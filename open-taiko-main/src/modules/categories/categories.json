@@ -1,0 +1,493 @@
+[
+  {
+    "aliases": [
+      "jpop",
+      "j-pop",
+      "pops"
+    ],
+    "id": 1,
+    "song_skin": {
+      "background": "#219fbb",
+      "bg_img": "bg_genre_0.png",
+      "border": [
+        "#7ec3d3",
+        "#0b6773"
+      ],
+      "info_fill": "#004d68",
+      "outline": "#005058",
+      "sort": 1
+    },
+    "title": "Pop",
+    "title_lang": {
+      "cn": "流行音乐",
+      "en": "Pop",
+      "ja": "J-POP",
+      "ko": "POP",
+      "tw": "流行音樂"
+    }
+  },
+  {
+    "aliases": [
+      "ボーカロイド曲",
+      "ボーカロイド",
+      "vocaloid music",
+      "vocaloidmusic",
+      "vocaloid"
+    ],
+    "id": 3,
+    "song_skin": {
+      "background": "#def2ef",
+      "bg_img": "bg_genre_2.png",
+      "border": [
+        "#f7fbff",
+        "#79919f"
+      ],
+      "info_fill": "#546184",
+      "outline": "#5a6584",
+      "sort": 3
+    },
+    "title": "VOCALOID™ Music",
+    "title_lang": {
+      "en": "VOCALOID™ Music",
+      "ja": "ボーカロイド™曲"
+    }
+  },
+  {
+    "aliases": [
+      "クラッシック",
+      "classic"
+    ],
+    "id": 5,
+    "song_skin": {
+      "background": "#d1a016",
+      "bg_img": "bg_genre_4.png",
+      "border": [
+        "#e7cf6b",
+        "#9a6b00"
+      ],
+      "info_fill": "#865800",
+      "outline": "#734d00",
+      "sort": 5
+    },
+    "title": "Classical",
+    "title_lang": {
+      "cn": "古典音乐",
+      "en": "Classical",
+      "ja": "クラシック",
+      "ko": "클래식",
+      "tw": "古典音樂"
+    }
+  },
+  {
+    "aliases": null,
+    "id": 2,
+    "song_skin": {
+      "background": "#ff9700",
+      "bg_img": "bg_genre_1.png",
+      "border": [
+        "#ffdb8c",
+        "#e75500"
+      ],
+      "info_fill": "#9c4002",
+      "outline": "#9c4100",
+      "sort": 2
+    },
+    "title": "Anime",
+    "title_lang": {
+      "cn": "卡通动画音乐",
+      "en": "Anime",
+      "ja": "アニメ",
+      "ko": "애니메이션",
+      "tw": "卡通動畫音樂"
+    }
+  },
+  {
+    "aliases": [
+      "namco",
+      "namcooriginal"
+    ],
+    "id": 7,
+    "song_skin": {
+      "background": "#ff5716",
+      "bg_img": "bg_genre_6.png",
+      "border": [
+        "#ffa66b",
+        "#b53000"
+      ],
+      "info_fill": "#961e00",
+      "outline": "#941c00",
+      "sort": 7
+    },
+    "title": "NAMCO Original",
+    "title_lang": {
+      "cn": "NAMCO原创音乐",
+      "en": "NAMCO Original",
+      "ja": "ナムコオリジナル",
+      "ko": "남코 오리지널",
+      "tw": "NAMCO原創音樂"
+    }
+  },
+  {
+    "aliases": [
+      "バラエティー",
+      "どうよう",
+      "童謡・民謡",
+      "children",
+      "children/folk",
+      "children-folk"
+    ],
+    "id": 4,
+    "song_skin": {
+      "background": "#8fd321",
+      "bg_img": "bg_genre_3.png",
+      "border": [
+        "#f7fbff",
+        "#587d0b"
+      ],
+      "info_fill": "#3c6800",
+      "outline": "#374c00",
+      "sort": 4
+    },
+    "title": "Variety",
+    "title_lang": {
+      "cn": "综合音乐",
+      "en": "Variety",
+      "ja": "バラエティ",
+      "ko": "버라이어티",
+      "tw": "綜合音樂"
+    }
+  },
+  {
+    "aliases": [
+      "game",
+      "gamemusic"
+    ],
+    "id": 6,
+    "song_skin": {
+      "background": "#9c72c0",
+      "bg_img": "bg_genre_5.png",
+      "border": [
+        "#bda2ce",
+        "#63407e"
+      ],
+      "info_fill": "#4f2886",
+      "outline": "#4b1c74",
+      "sort": 6
+    },
+    "title": "Game Music",
+    "title_lang": {
+      "cn": "游戏音乐",
+      "en": "Game Music",
+      "ja": "ゲームミュージック",
+      "ko": "게임",
+      "tw": "遊戲音樂"
+    }
+  },
+  {
+    "aliases": [
+      "bemani"
+    ],
+    "id": 102,
+    "song_skin": {
+      "background": "#3468c0",
+      "bg_img": "bg_genre_102.png",
+      "border": [
+        "#8eb7ff",
+        "#173c82"
+      ],
+      "info_fill": "#183878",
+      "outline": "#10285c",
+      "sort": 102
+    },
+    "title": "BEMANI",
+    "title_lang": {
+      "cn": "BEMANI",
+      "en": "BEMANI",
+      "ja": "BEMANI",
+      "ko": "BEMANI",
+      "tw": "BEMANI"
+    }
+  },
+  {
+    "aliases": [
+      "dance",
+      "dancemusic"
+    ],
+    "id": 100,
+    "song_skin": {
+      "background": "#050505",
+      "bg_img": "bg_genre_100.png",
+      "border": [
+        "#1A1A1A",
+        "#333333"
+      ],
+      "info_fill": "#101010",
+      "outline": "#000000",
+      "sort": 999
+    },
+    "title": "Dance Music",
+    "title_lang": {
+      "cn": "舞曲",
+      "en": "Dance Music",
+      "ja": "ダンスミュージック",
+      "ko": "댄스 뮤직",
+      "tw": "舞曲"
+    }
+  },
+  {
+    "aliases": [
+      "vtuber",
+      "virtual youtuber",
+      "バーチャルユーチューバー"
+    ],
+    "id": 106,
+    "song_skin": {
+      "background": "#e45b9e",
+      "bg_img": "bg_genre_106.png",
+      "border": [
+        "#ffb4d8",
+        "#972c64"
+      ],
+      "info_fill": "#8d2459",
+      "outline": "#761c4a",
+      "sort": 106
+    },
+    "title": "VTuber",
+    "title_lang": {
+      "cn": "虚拟主播",
+      "en": "VTuber",
+      "ja": "VTuber",
+      "ko": "버추얼 유튜버",
+      "tw": "虛擬主播"
+    }
+  },
+  {
+    "aliases": [
+      "リミックス",
+      "remix",
+      "remix culture",
+      "remixculture"
+    ],
+    "id": 107,
+    "song_skin": {
+      "background": "#7459c7",
+      "bg_img": "bg_genre_107.png",
+      "border": [
+        "#b9a8ef",
+        "#44308b"
+      ],
+      "info_fill": "#3e2b80",
+      "outline": "#30216b",
+      "sort": 107
+    },
+    "title": "Remix Culture",
+    "title_lang": {
+      "cn": "混音文化",
+      "en": "Remix Culture",
+      "ja": "リミックスカルチャー",
+      "ko": "리믹스 문화",
+      "tw": "混音文化"
+    }
+  },
+  {
+    "aliases": [
+      "東方",
+      "とうほう",
+      "touhou",
+      "touhou project",
+      "touhouproject"
+    ],
+    "id": 103,
+    "song_skin": {
+      "background": "#d43b45",
+      "bg_img": "bg_genre_103.png",
+      "border": [
+        "#ff9da3",
+        "#871b25"
+      ],
+      "info_fill": "#7d1821",
+      "outline": "#68111a",
+      "sort": 103
+    },
+    "title": "Touhou Project",
+    "title_lang": {
+      "cn": "东方Project",
+      "en": "Touhou Project",
+      "ja": "東方Project",
+      "ko": "동방 프로젝트",
+      "tw": "東方Project"
+    }
+  },
+  {
+    "aliases": [
+      "童謡",
+      "民謡",
+      "どうよう",
+      "children",
+      "children/folk",
+      "children-folk"
+    ],
+    "id": 101,
+    "song_skin": {
+      "background": "#b8ed55",
+      "bg_img": "bg_genre_101.png",
+      "border": [
+        "#ffffff",
+        "#7fae2a"
+      ],
+      "info_fill": "#679c18",
+      "outline": "#526b16",
+      "sort": 101
+    },
+    "title": "Children's/Folk Music",
+    "title_lang": {
+      "cn": "童谣・民谣",
+      "en": "Children's/Folk Music",
+      "ja": "童謡・民謡",
+      "ko": "동요・민요",
+      "tw": "童謠・民謠"
+    }
+  },
+  {
+    "aliases": [
+      "段位",
+      "dan-i dojo",
+      "dani dojo",
+      "danidojo"
+    ],
+    "id": 105,
+    "song_skin": {
+      "background": "#7a4b2a",
+      "bg_img": "bg_genre_105.png",
+      "border": [
+        "#d5a26f",
+        "#4a2915"
+      ],
+      "info_fill": "#482511",
+      "outline": "#351b0c",
+      "sort": 105
+    },
+    "title": "Dan-i Dojo",
+    "title_lang": {
+      "cn": "段位道场",
+      "en": "Dan-i Dojo",
+      "ja": "段位道場",
+      "ko": "단위도장",
+      "tw": "段位道場"
+    }
+  },
+  {
+    "aliases": [
+      "練習譜面",
+      "練習",
+      "practice",
+      "practice charts",
+      "practicecharts"
+    ],
+    "id": 104,
+    "song_skin": {
+      "background": "#38a68a",
+      "bg_img": "bg_genre_104.png",
+      "border": [
+        "#9ce6d3",
+        "#176653"
+      ],
+      "info_fill": "#155e4d",
+      "outline": "#104b3e",
+      "sort": 104
+    },
+    "title": "Practice Charts",
+    "title_lang": {
+      "cn": "练习谱面专用",
+      "en": "Practice Charts",
+      "ja": "練習譜面専用",
+      "ko": "연습 보면 전용",
+      "tw": "練習譜面專用"
+    }
+  },
+  {
+    "aliases": [
+      "東方アレンジ",
+      "とうほうアレンジ",
+      "touhou arrange",
+      "touhou project arrangements",
+      "touhouprojectarrangements"
+    ],
+    "id": 108,
+    "song_skin": {
+      "background": "#f05a63",
+      "bg_img": "bg_genre_108.png",
+      "border": [
+        "#ffc1c5",
+        "#b8323c"
+      ],
+      "info_fill": "#a8323b",
+      "outline": "#8a2029",
+      "sort": 103
+    },
+    "title": "Touhou Project Arrangements",
+    "title_lang": {
+      "cn": "东方Project改编曲",
+      "en": "Touhou Project Arrangements",
+      "ja": "東方Projectアレンジ",
+      "ko": "동방 프로젝트 어레인지",
+      "tw": "東方Project改編曲"
+    }
+  },
+  {
+    "aliases": [
+      "不可能譜面",
+      "impossible",
+      "impossible charts",
+      "impossiblecharts"
+    ],
+    "id": 109,
+    "song_skin": {
+      "background": "#777777",
+      "bg_img": "bg_genre_109.png",
+      "border": [
+        "#b8b8b8",
+        "#454545"
+      ],
+      "info_fill": "#414141",
+      "outline": "#303030",
+      "sort": 109
+    },
+    "title": "Impossible",
+    "title_lang": {
+      "cn": "不可能",
+      "en": "Impossible",
+      "ja": "不可能",
+      "ko": "불가능",
+      "tw": "不可能"
+    }
+  },
+  {
+    "aliases": [
+      "太鼓のタワー",
+      "タワー",
+      "taiko tower",
+      "taikotower"
+    ],
+    "id": 110,
+    "song_skin": {
+      "background": "#e58b2a",
+      "bg_img": "bg_genre_110.png",
+      "border": [
+        "#ffd184",
+        "#9b4d0e"
+      ],
+      "info_fill": "#87400a",
+      "outline": "#703306",
+      "sort": 105
+    },
+    "title": "Taiko Tower",
+    "title_lang": {
+      "cn": "太鼓塔",
+      "en": "Taiko Tower",
+      "ja": "太鼓タワー",
+      "ko": "태고 타워",
+      "tw": "太鼓塔"
+    }
+  }
+]

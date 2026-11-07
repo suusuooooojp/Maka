@@ -1,0 +1,20 @@
+{
+  "name": "schoolhub",
+  "version": "1.0.0",
+  "description": "SchoolHub web portal and unblocker",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "build": "echo 'Build complete'"
+  },
+  "keywords": [
+    "schoolhub",
+    "portal"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "",
+  "license": "ISC"
+}
