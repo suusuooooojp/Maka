@@ -52,11 +52,12 @@ def render_home(proxies, request=None):
     peers_list = storage_info.get("peers") if isinstance(storage_info.get("peers"), list) else []
     if not peers_list:
         peers_list = [
-            "https://leftt-5mo6.onrender.com",
-            "https://leftt-9.onrender.com",
+            "https://miruhukaka.ai.studio",
+            "https://chatwork.cloud.run",
+            "https://great.luhu.jp",
         ]
     self_urls_list = storage_info.get("self_urls") if isinstance(storage_info.get("self_urls"), list) else []
-    primary_origin = self_urls_list[0] if self_urls_list else (peers_list[0] if peers_list else "https://leftt-5mo6.onrender.com")
+    primary_origin = self_urls_list[0] if self_urls_list else (peers_list[0] if peers_list else "https://miruhukaka.ai.studio")
     peers_count = len(peers_list)
     pg_ok = "PG" if storage_info.get("postgres_active") else ""
     bb_ok = "BB" if storage_info.get("bitbucket_active") else ""
@@ -1523,8 +1524,9 @@ button, input {{ font: inherit; }}
     tabId = window.__sh_tab_id || ("t-" + Math.random().toString(36).slice(2, 10));
     window.__sh_tab_id = tabId;
   }}
+  const cookieSuffix = location.protocol === "https:" ? "; SameSite=None; Secure; Partitioned" : "; SameSite=Lax";
   try {{
-    document.cookie = `sh_sid=${{encodeURIComponent(session)}}; path=/; max-age=2592000; SameSite=Lax`;
+    document.cookie = `sh_sid=${{encodeURIComponent(session)}}; path=/; max-age=2592000${{cookieSuffix}}`;
     sessionStorage.setItem("sh_sid", session);
     localStorage.setItem("sh_sid", session);
     sessionStorage.setItem(SESSION_KEY, session);
@@ -1551,7 +1553,7 @@ button, input {{ font: inherit; }}
           if (data.session) {{
             session = data.session;
             try {{
-              document.cookie = `sh_sid=${{encodeURIComponent(session)}}; path=/; max-age=2592000; SameSite=Lax`;
+              document.cookie = `sh_sid=${{encodeURIComponent(session)}}; path=/; max-age=2592000${{cookieSuffix}}`;
               localStorage.setItem("sh_sid", session);
               localStorage.setItem(SESSION_KEY, session);
             }} catch (_) {{}}

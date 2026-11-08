@@ -869,7 +869,13 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
 
   // Keep CloudMoon concurrent session & communications active on /run-site gameplay pages
   try {
-    if (window.self === window.top && (window.location.pathname || '').startsWith('/run-site')) {
+    let isSameOriginChild = false;
+    try {
+      if (window.self !== window.top && window.parent && window.parent.location && window.parent.location.origin === window.location.origin) {
+        isSameOriginChild = true;
+      }
+    } catch (_) {}
+    if (!isSameOriginChild && (window.location.pathname || '').startsWith('/run-site')) {
       const getSid = function() {
         const m = document.cookie.match(/(?:^|;\s*)sh_sid=([^;]+)/);
         if (m) return decodeURIComponent(m[1]);

@@ -2,7 +2,8 @@ class Logo{
 	constructor(){
 		this.canvas = document.getElementById("logo")
 		this.ctx = this.canvas.getContext("2d")
-		this.pathSvg = failedTests.indexOf("Path2D SVG") === -1 && vectors.logo1
+		var ft = typeof failedTests !== "undefined" && Array.isArray(failedTests) ? failedTests : []
+		this.pathSvg = ft.indexOf("Path2D SVG") === -1 && vectors.logo1
 		this.symbolFont = "TnT, Meiryo, sans-serif"
 		this.symbols = [{
 			x: 315, y: 18, xAlt: 15, scale: true, text: "ブ",

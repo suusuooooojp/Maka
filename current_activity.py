@@ -127,6 +127,102 @@ def _get_live_chat_ccu() -> int:
     return 0
 
 
+def _get_live_openchat_service_ccu(now_ts: float | None = None) -> Counter:
+    """Return active concurrent users per service inferred from live OpenChat clients and recent messages."""
+    by_svc: Counter = Counter()
+    try:
+        import sys
+        openchat = sys.modules.get("openchat_proxy")
+        if not openchat:
+            return by_svc
+        cur = _now() if now_ts is None else now_ts
+        cutoff = cur - HEARTBEAT_TTL
+        active_clients = getattr(openchat, "_ACTIVE_CLIENTS", {}) or {}
+        client_svcs = getattr(openchat, "_ACTIVE_CLIENT_SERVICES", {}) or {}
+        messages = getattr(openchat, "_MESSAGES", []) or []
+
+        # Map recent message senders/clients (last 30m) to their most recent service
+        recent_msg_svc: Dict[str, str] = {}
+        active_msg_users: Dict[str, str] = {}
+        for m in messages[-120:]:
+            if not isinstance(m, dict):
+                continue
+            m_ts = float(m.get("ts") or 0.0)
+            if cur - m_ts > 1800.0:
+                continue
+            raw_s = str(m.get("service") or "").strip()
+            if not raw_s or raw_s in ("System", "Web"):
+                continue
+            norm_s = _normalize_service_name(raw_s)
+            cid = str(m.get("clientId") or "").strip()
+            sid = str(m.get("senderId") or "").strip()
+            if cid:
+                recent_msg_svc[cid] = norm_s
+            if sid:
+                recent_msg_svc[sid] = norm_s
+            if cur - m_ts <= HEARTBEAT_TTL:
+                u_key = cid or sid
+                if u_key:
+                    active_msg_users[u_key] = norm_s
+
+        counted_keys: set[str] = set()
+        for k, ts in list(active_clients.items()):
+            if float(ts or 0.0) < cutoff:
+                continue
+            k_str = str(k).strip()
+            if not k_str or k_str in counted_keys:
+                continue
+            counted_keys.add(k_str)
+            svc_raw = client_svcs.get(k_str) or recent_msg_svc.get(k_str) or "School Hub"
+            norm_s = _normalize_service_name(svc_raw)
+            by_svc[norm_s] += 1
+
+        for u_key, norm_s in active_msg_users.items():
+            if u_key not in counted_keys:
+                counted_keys.add(u_key)
+                by_svc[norm_s] += 1
+    except Exception:
+        pass
+    return by_svc
+
+
+def _get_openchat_message_service_counts() -> tuple[Counter, Dict[str, float]]:
+    """Count deduplicated service visits (30-min window per user+service) from OpenChat message history."""
+    counts: Counter = Counter()
+    last_ts: Dict[str, float] = {}
+    try:
+        import sys
+        openchat = sys.modules.get("openchat_proxy")
+        if not openchat:
+            return counts, last_ts
+        messages = getattr(openchat, "_MESSAGES", []) or []
+        last_by_user_svc: Dict[tuple[str, str], float] = {}
+        for m in sorted(
+            (x for x in messages if isinstance(x, dict)),
+            key=lambda x: float(x.get("ts") or 0.0),
+        ):
+            m_ts = float(m.get("ts") or 0.0)
+            if m_ts < _STATS_RESET_EPOCH:
+                continue
+            raw_s = str(m.get("service") or "").strip()
+            if not raw_s or raw_s == "System":
+                continue
+            norm_s = _normalize_service_name(raw_s)
+            u_key = str(m.get("clientId") or m.get("senderId") or "").strip()
+            if not u_key or u_key == "SYS":
+                continue
+            prev_ts = last_by_user_svc.get((u_key, norm_s))
+            if prev_ts is not None and (m_ts - prev_ts) < 1800.0:
+                continue
+            last_by_user_svc[(u_key, norm_s)] = m_ts
+            counts[norm_s] += 1
+            if m_ts > last_ts.get(norm_s, 0.0):
+                last_ts[norm_s] = m_ts
+    except Exception:
+        pass
+    return counts, last_ts
+
+
 def extract_client_fp(request: Optional[Request]) -> str:
     """Compute a deterministic per-browser fingerprint from normalized client IP + User-Agent."""
     if request is None:
@@ -178,7 +274,16 @@ def _detect_service_from_path(path: str) -> str:
         return "YouTube"
     if p.startswith("/tiktok"):
         return "TikTok"
-    if p.startswith("/cloudmoon") or p.startswith("/run-site") or p.startswith("/data/"):
+    if (
+        p.startswith("/cloudmoon")
+        or p.startswith("/run-site")
+        or p.startswith("/data/")
+        or p.startswith("/game/")
+        or p.startswith("/list/")
+        or p.startswith("/h5/")
+        or p == "/ja"
+        or p.startswith("/ja/")
+    ):
         return "CloudMoon"
     if p.startswith("/trump"):
         return "トランプ (大富豪・ババ抜き)"
@@ -264,11 +369,14 @@ def _normalize_service_name(service: str, path: str = "") -> str:
         return "Kazwire"
     if sl == "utopia" or "utopia" in sl:
         return "Utopia"
-    if sl in ("school hub", "schoolhub", "hub", "web", ""):
+    if sl in ("school hub", "schoolhub", "hub", "web", "ホーム", ""):
         return _detect_service_from_path(path) or "School Hub"
     if s in _CANONICAL_SERVICES:
         return s
     return _detect_service_from_path(path) or "School Hub"
+
+
+_infer_service = _normalize_service_name
 
 
 _ORIGIN_NORM_CACHE: Dict[str, str] = {}
@@ -290,13 +398,19 @@ def _normalize_origin_url(raw_url: str) -> str:
         if (
             not host
             or "." not in host
-            or host in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "test", "testserver", "example.com", "test.example.com")
-            or host.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "198.51.100."))
+            or host in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "test", "testserver", "example.com", "test.example.com", "aaaaaa.cloud.run")
+            or host.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "198.51.100.", "ais-dev-"))
             or host.endswith((".internal", ".local", ".test", ".invalid", ".example.com", ".example.org", ".example.net"))
+            or "hospitaldelninodif" in host
         ):
             _ORIGIN_NORM_CACHE[raw_url] = ""
             return ""
-        scheme = "https" if (host.endswith(".onrender.com") or parsed.scheme == "https") else "http"
+        if host.startswith("untitled-hello-") and host.endswith(".run.app"):
+            res = "https://miruhukaka.ai.studio"
+            if len(_ORIGIN_NORM_CACHE) < 2000:
+                _ORIGIN_NORM_CACHE[raw_url] = res
+            return res
+        scheme = "https" if (host.endswith((".onrender.com", ".ai.studio", ".cloud.run", ".run.app", ".luhu.jp")) or parsed.scheme == "https") else "http"
         if parsed.port and not ((scheme == "https" and parsed.port == 443) or (scheme == "http" and parsed.port == 80)):
             netloc = f"{host}:{parsed.port}"
         else:
@@ -325,7 +439,9 @@ def _is_fake_subresource_event(ev: Event) -> bool:
 
 
 def _record_event_into_service_totals_locked(ev: Event) -> None:
-    if _is_fake_subresource_event(ev):
+    if _is_fake_subresource_event(ev) or ev.state == "closed":
+        return
+    if ev.source not in ACCESS_SOURCES:
         return
     svc = _normalize_service_name(ev.service, ev.path)
     ev.service = svc
@@ -558,7 +674,7 @@ def _prune(now: float | None = None) -> None:
 
 
 def _compute_service_ccu_locked(current: float | None = None) -> Counter:
-    """Count concurrent active users per service across all active sessions."""
+    """Count concurrent active users per service across all active sessions and OpenChat clients."""
     now_ts = _now() if current is None else current
     cutoff = now_ts - HEARTBEAT_TTL
     leaving_cutoff = now_ts - LEAVING_GRACE_TTL
@@ -590,6 +706,17 @@ def _compute_service_ccu_locked(current: float | None = None) -> Counter:
         else:
             s_name = _normalize_service_name(str(item.get("service") or "School Hub"), str(item.get("path") or "/"))
             by_svc[s_name] += 1
+
+    # Merge live OpenChat service activity (e.g. @CloudMoon chatters) so service CCU is always accurate
+    chat_by_svc = _get_live_openchat_service_ccu(now_ts)
+    for s_name, chat_cnt in chat_by_svc.items():
+        if chat_cnt <= 0:
+            continue
+        if s_name != "School Hub":
+            if chat_cnt > by_svc.get(s_name, 0):
+                by_svc[s_name] = chat_cnt
+        elif not by_svc:
+            by_svc[s_name] = chat_cnt
     return by_svc
 
 
@@ -597,7 +724,8 @@ def _record_ccu_locked(now: float | None = None) -> tuple[int, int, dict]:
     global _PEAK_CCU
     current = _now() if now is None else now
     _prune(current)
-    active_count = len(_SESSIONS)
+    by_svc = _compute_service_ccu_locked(current)
+    active_count = max(len(_SESSIONS), sum(by_svc.values()), _get_live_chat_ccu())
     if active_count > _PEAK_CCU:
         _PEAK_CCU = active_count
 
@@ -620,7 +748,6 @@ def _record_ccu_locked(now: float | None = None) -> tuple[int, int, dict]:
         for k in [k for k in _CCU_HOURLY_SAMPLES if k < min_b]:
             _CCU_HOURLY_SAMPLES.pop(k, None)
 
-    by_svc = _compute_service_ccu_locked(current)
     return b5, _CCU_SAMPLES.get(b5, active_count), dict(by_svc)
 
 
@@ -687,13 +814,14 @@ def _can_record_access_locked(sid: str, service: str, now: float, source: str = 
 
 
 def _can_record_comm_locked(sid: str, service: str, now: float, path: str = "") -> bool:
-    """Debounce ongoing active service communications so active usage across all services is counted."""
+    """Record a single visit per 30-minute session if a service tab only sends heartbeats (e.g., inside an iframe)."""
     svc = _normalize_service_name(service, path)
     key = (sid, svc)
-    window = 20.0 if svc == "School Hub" else 15.0
-    if now - _LAST_COMM_EVENT.get(key, 0.0) < window:
+    last_ts = max(_LAST_COMM_EVENT.get(key, 0.0), _LAST_NAV_ACCESS.get(key, 0.0))
+    if now - last_ts < 1800.0:
         return False
     _LAST_COMM_EVENT[key] = now
+    _LAST_NAV_ACCESS[key] = now
     return True
 
 
@@ -712,9 +840,9 @@ def _invoke_session_touch_hook(sid: str, svc: str, path: str, state: str, now: f
 
 
 def touch_session_activity(
-    session: str,
-    service: str,
-    path: str,
+    session: str = "",
+    service: str = "School Hub",
+    path: str = "/",
     *,
     state: str = "active",
     source: str = "heartbeat",
@@ -722,10 +850,14 @@ def touch_session_activity(
     origin: str = "",
     tab: str = "",
     client_fp: str = "",
+    session_id: str = "",
+    tab_id: str = "",
 ) -> None:
-    """Update active session state and record service communication events."""
+    """Update active session state and record service access events."""
     global _STATE_VERSION
-    if not session:
+    eff_session = session or session_id
+    eff_tab = tab or tab_id
+    if not eff_session:
         return
     now = _now()
     norm_origin = _normalize_origin_url(origin)
@@ -735,7 +867,7 @@ def touch_session_activity(
     eff_origin = norm_origin
     eff_state = state
     with _LOCK:
-        sid = session[:100]
+        sid = eff_session[:100]
         clean_path = (path or "/")[:500]
         svc = _normalize_service_name(service, clean_path)
         eff_svc, eff_path, eff_origin = _update_session_tab_locked(
@@ -746,7 +878,7 @@ def touch_session_activity(
             source,
             now,
             origin=norm_origin,
-            tab=tab,
+            tab=eff_tab,
             client_fp=client_fp,
         )
         eff_state = str(_SESSIONS.get(sid, {}).get("state") or ("leaving" if state in ("closed", "leaving") else state))
@@ -756,10 +888,12 @@ def touch_session_activity(
 
         if state not in ("closed", "leaving"):
             if record_access or source in ACCESS_SOURCES:
-                if _can_record_access_locked(sid, svc, now, source=source, path=clean_path):
-                    _add_event(sid, svc, clean_path, state, source, norm_origin or eff_origin)
+                eff_src = source if source in ACCESS_SOURCES else ("home" if svc == "School Hub" else "visit")
+                if _can_record_access_locked(sid, svc, now, source=eff_src, path=clean_path):
+                    _add_event(sid, svc, clean_path, state, eff_src, norm_origin or eff_origin)
             elif _can_record_comm_locked(sid, svc, now, path=clean_path):
-                _add_event(sid, svc, clean_path, state, source, norm_origin or eff_origin)
+                eff_src = "home" if svc == "School Hub" else "visit"
+                _add_event(sid, svc, clean_path, state, eff_src, norm_origin or eff_origin)
 
     if _CCU_SAMPLE_HOOK is not None and hook_args is not None:
         try:
@@ -800,43 +934,55 @@ def _is_valid_session_entry(sid: str, sdata: dict) -> bool:
     return True
 
 
-def _sanitize_events_list(events: List[Event]) -> List[Event]:
-    """Deduplicate historical events where open+visit or home reloads were double-recorded."""
+def _sanitize_events_list(events: List[Event], *, rebuild_totals: bool = True) -> List[Event]:
+    """Deduplicate historical events and strip 15-second keepalive heartbeats so access counts reflect true visits."""
     events_sorted = sorted(events, key=lambda x: x.ts)
     cleaned: List[Event] = []
     last_by_svc: Dict[str, tuple[float, Event]] = {}
     last_by_sess_svc: Dict[tuple[str, str], tuple[float, Event]] = {}
     last_hub_by_sess: Dict[str, tuple[float, Event]] = {}
 
+    if rebuild_totals:
+        _POST_SEED_EVENTS_BY_SVC.clear()
+        _SERVICE_TOTALS.clear()
+        _SERVICE_TOTALS.update(_SEED_SERVICE_TOTALS)
+
     for ev in events_sorted:
-        if _is_fake_subresource_event(ev):
+        if _is_fake_subresource_event(ev) or ev.state == "closed":
             continue
         svc = _normalize_service_name(ev.service, ev.path)
         ev.service = svc
         ev.origin = _normalize_origin_url(getattr(ev, "origin", "") or "")
-        _record_event_into_service_totals_locked(ev)
-        if ev.source not in ACCESS_SOURCES:
-            cleaned.append(ev)
-            continue
-        if svc == "School Hub" or ev.source == "home":
-            prev_h_entry = last_hub_by_sess.get(ev.session)
-            if prev_h_entry is not None and (ev.ts - prev_h_entry[0]) < 5.0:
-                if not prev_h_entry[1].origin and ev.origin:
-                    prev_h_entry[1].origin = ev.origin
-                continue
-            last_hub_by_sess[ev.session] = (ev.ts, ev)
         prev_ss_entry = last_by_sess_svc.get((ev.session, svc))
-        if prev_ss_entry is not None and (ev.ts - prev_ss_entry[0]) < 2.0:
-            if not prev_ss_entry[1].origin and ev.origin:
-                prev_ss_entry[1].origin = ev.origin
-            continue
-        prev_svc_entry = last_by_svc.get(svc)
-        if ev.session.startswith("s-") and prev_svc_entry is not None and (ev.ts - prev_svc_entry[0]) < 1.2:
-            if not prev_svc_entry[1].origin and ev.origin:
-                prev_svc_entry[1].origin = ev.origin
-            continue
+        if ev.source not in ACCESS_SOURCES:
+            # Keepalive heartbeat/visibility: only count as a visit if this (session, service)
+            # has had no activity in the last 30 minutes (1800s)
+            if prev_ss_entry is not None and (ev.ts - prev_ss_entry[0]) < 1800.0:
+                if not prev_ss_entry[1].origin and ev.origin:
+                    prev_ss_entry[1].origin = ev.origin
+                continue
+            ev.source = "home" if svc == "School Hub" else "visit"
+        else:
+            if svc == "School Hub" or ev.source == "home":
+                prev_h_entry = last_hub_by_sess.get(ev.session)
+                if prev_h_entry is not None and (ev.ts - prev_h_entry[0]) < 15.0:
+                    if not prev_h_entry[1].origin and ev.origin:
+                        prev_h_entry[1].origin = ev.origin
+                    continue
+                last_hub_by_sess[ev.session] = (ev.ts, ev)
+            if prev_ss_entry is not None and (ev.ts - prev_ss_entry[0]) < 15.0:
+                if not prev_ss_entry[1].origin and ev.origin:
+                    prev_ss_entry[1].origin = ev.origin
+                continue
+            prev_svc_entry = last_by_svc.get(svc)
+            if ev.session.startswith("s-") and prev_svc_entry is not None and (ev.ts - prev_svc_entry[0]) < 1.2:
+                if not prev_svc_entry[1].origin and ev.origin:
+                    prev_svc_entry[1].origin = ev.origin
+                continue
         last_by_sess_svc[(ev.session, svc)] = (ev.ts, ev)
         last_by_svc[svc] = (ev.ts, ev)
+        if rebuild_totals:
+            _record_event_into_service_totals_locked(ev)
         cleaned.append(ev)
     return cleaned
 
@@ -875,7 +1021,6 @@ def merge_external_state(
             norm_orig = _normalize_origin_url(getattr(ev, "origin", "") or "")
             ev.origin = norm_orig
             ev.service = _normalize_service_name(ev.service, ev.path)
-            _record_event_into_service_totals_locked(ev)
             prev_ev = existing_by_id.get(ev.id)
             if prev_ev is None:
                 existing_by_id[ev.id] = ev
@@ -887,23 +1032,12 @@ def merge_external_state(
 
         if new_evs:
             _EVENTS.extend(new_evs)
-            _EVENTS = _sanitize_events_list(_EVENTS)
+            _EVENTS = _sanitize_events_list(_EVENTS, rebuild_totals=True)
             if len(_EVENTS) > MAX_EVENTS:
                 del _EVENTS[:-MAX_EVENTS]
             _EVENT_IDS.clear()
             _EVENT_IDS.update(e.id for e in _EVENTS)
             changed = True
-
-        if service_totals and reset_epoch >= _STATS_RESET_EPOCH:
-            for raw_k, raw_v in service_totals.items():
-                norm_k = _normalize_service_name(str(raw_k or ""))
-                iv = int(raw_v or 0)
-                seeded_plus_post = _SEED_SERVICE_TOTALS.get(norm_k, 0) + len(_POST_SEED_EVENTS_BY_SVC.get(norm_k, set()))
-                if norm_k == "YouTube" and iv > seeded_plus_post + 50 and seeded_plus_post >= _SEED_SERVICE_TOTALS.get("YouTube", 0):
-                    iv = seeded_plus_post
-                if iv > _SERVICE_TOTALS.get(norm_k, 0):
-                    _SERVICE_TOTALS[norm_k] = iv
-                    changed = True
 
         if service_last_ts:
             for raw_k, raw_ts in service_last_ts.items():
@@ -1066,7 +1200,8 @@ def merge_external_state(
                     changed = True
 
         _prune(now)
-        live_ccu = max(len(_SESSIONS), _get_live_chat_ccu())
+        by_svc_now = _compute_service_ccu_locked(now)
+        live_ccu = max(len(_SESSIONS), sum(by_svc_now.values()), _get_live_chat_ccu())
         b5_sec = TIMELINE_MINUTES * 60
         b5 = int(now // b5_sec) * b5_sec
         if live_ccu > _CCU_SAMPLES.get(b5, 0):
@@ -1113,20 +1248,25 @@ def _is_access(event: Event) -> bool:
 def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     """Build usage & concurrency statistics across all deployments and all services.
 
-    - Service CCU (`service_ccu`) and total CCU (`current_ccu`) reflect real-time active tabs/sessions.
-    - Service communication ranking (`service_counts` / `service_ranking`) aggregates ALL communications
-      across all deployments and full history so counts never shrink when event windows rotate.
+    - Service CCU (`service_ccu`) and total CCU (`current_ccu`) reflect real-time active tabs/sessions
+      and live OpenChat users (such as @CloudMoon).
+    - Service access ranking (`service_counts` / `service_ranking`) aggregates deduplicated visits
+      across all deployments without 15-second heartbeat inflation.
     - Entries (services or peer URLs) with zero visitors for 5 days are automatically removed from rankings.
     """
     current = _now() if now is None else now
     is_live_global = now is None or (events is _EVENTS)
     if is_live_global:
-        events = [ev for ev in events if not _is_fake_subresource_event(ev) and getattr(ev, "ts", 0.0) >= _STATS_RESET_EPOCH]
+        raw_filtered = [ev for ev in events if not _is_fake_subresource_event(ev) and getattr(ev, "ts", 0.0) >= _STATS_RESET_EPOCH]
+        if any(ev.source not in ACCESS_SOURCES for ev in raw_filtered):
+            events = _sanitize_events_list(raw_filtered, rebuild_totals=True)
+        else:
+            events = raw_filtered
     inactive_cutoff = current - RANKING_INACTIVE_TTL
-    accesses = [event for event in events if _is_access(event)]
+    accesses = [event for event in events if _is_access(event) and event.state != "closed"]
     current_dt = datetime.fromtimestamp(current, tz=JST)
     today = current_dt.date()
-    today_source_events = [ev for ev in events if ev.state != "closed"] if is_live_global else accesses
+    today_source_events = accesses
     today_accesses = sum(
         1 for event in today_source_events
         if datetime.fromtimestamp(event.ts, tz=JST).date() == today
@@ -1138,29 +1278,28 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     }
     today_visitors = len(today_visitor_sessions)
 
-    live_ccu = max(len(_SESSIONS), _get_live_chat_ccu())
     service_ccu = _compute_service_ccu_locked(current) if is_live_global else Counter()
+    live_ccu = max(len(_SESSIONS), sum(service_ccu.values()), _get_live_chat_ccu()) if is_live_global else len(_SESSIONS)
 
-    event_all_counts: Counter = Counter()
     event_access_counts: Counter = Counter()
     service_last_access_ts: Dict[str, float] = dict(_SERVICE_LAST_TS) if is_live_global else {}
 
-    for event in events:
+    for event in accesses:
         svc = _normalize_service_name(event.service or "School Hub", event.path) if is_live_global else (event.service or "School Hub")
-        if event.state != "closed":
-            event_all_counts[svc] += 1
-        if _is_access(event):
-            event_access_counts[svc] += 1
-            if not is_live_global and float(event.ts) > service_last_access_ts.get(svc, 0.0):
-                service_last_access_ts[svc] = float(event.ts)
-        if is_live_global and float(event.ts) > service_last_access_ts.get(svc, 0.0):
+        event_access_counts[svc] += 1
+        if float(event.ts) > service_last_access_ts.get(svc, 0.0):
             service_last_access_ts[svc] = float(event.ts)
 
     if is_live_global:
+        oc_counts, oc_last_ts = _get_openchat_message_service_counts()
+        for oc_svc, oc_ts in oc_last_ts.items():
+            if oc_ts > service_last_access_ts.get(oc_svc, 0.0):
+                service_last_access_ts[oc_svc] = oc_ts
         all_known_services = (
             set(_CANONICAL_SERVICES)
             | set(_SERVICE_TOTALS.keys())
-            | set(event_all_counts.keys())
+            | set(event_access_counts.keys())
+            | set(oc_counts.keys())
             | set(service_ccu.keys())
         )
         raw_service_counts: Counter = Counter()
@@ -1168,14 +1307,10 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
             norm_s = _normalize_service_name(svc_name)
             post_seed_cnt = len(_POST_SEED_EVENTS_BY_SVC.get(norm_s, set()))
             seeded_total = _SEED_SERVICE_TOTALS.get(norm_s, 0) + post_seed_cnt
-            persisted_total = _SERVICE_TOTALS.get(norm_s, 0)
-            if norm_s == "YouTube" and persisted_total > seeded_total + 50 and seeded_total >= _SEED_SERVICE_TOTALS.get("YouTube", 0):
-                persisted_total = seeded_total
-                _SERVICE_TOTALS[norm_s] = seeded_total
-            ev_total = max(event_all_counts.get(norm_s, 0), event_access_counts.get(norm_s, 0))
-            best_total = max(seeded_total, persisted_total, ev_total)
-            if best_total > _SERVICE_TOTALS.get(norm_s, 0):
-                _SERVICE_TOTALS[norm_s] = best_total
+            ev_total = event_access_counts.get(norm_s, 0)
+            oc_total = oc_counts.get(norm_s, 0)
+            best_total = max(seeded_total, ev_total, oc_total)
+            _SERVICE_TOTALS[norm_s] = best_total
             if best_total > 0:
                 raw_service_counts[norm_s] = best_total
     else:
@@ -1216,7 +1351,7 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     # Exclude legacy synthetic s-... sessions from unique_sessions if real sessions exist
     non_synth_access_sessions = {
         event.session
-        for event in (events if is_live_global else accesses)
+        for event in accesses
         if event.session and not (event.ts < _LEGACY_SUBRESOURCE_CUTOFF and event.session.startswith("s-"))
     }
     if non_synth_access_sessions:
@@ -1234,13 +1369,12 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     counts = [0] * TIMELINE_BUCKETS
     ccu_sessions_per_bucket: list[set[str]] = [set() for _ in range(TIMELINE_BUCKETS)]
 
-    for event in events:
+    for event in accesses:
         if start <= event.ts < end:
             index = int((event.ts - start) // bucket_seconds)
             if 0 <= index < TIMELINE_BUCKETS:
-                if (event.state != "closed") if is_live_global else _is_access(event):
-                    counts[index] += 1
-                if event.state != "closed" and event.session:
+                counts[index] += 1
+                if event.session:
                     if not (event.ts < _LEGACY_SUBRESOURCE_CUTOFF and event.session.startswith("s-")):
                         ccu_sessions_per_bucket[index].add(event.session)
 
@@ -1271,13 +1405,12 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     hourly_counts = [0] * HOURLY_BUCKETS
     hourly_sub_sets: list[Dict[int, set[str]]] = [{} for _ in range(HOURLY_BUCKETS)]
 
-    for event in events:
+    for event in accesses:
         if start_h <= event.ts < end_h:
             idx_h = int((event.ts - start_h) // hour_sec)
             if 0 <= idx_h < HOURLY_BUCKETS:
-                if event.state != "closed":
-                    hourly_counts[idx_h] += 1
-                if event.state != "closed" and event.session:
+                hourly_counts[idx_h] += 1
+                if event.session:
                     if not (event.ts < _LEGACY_SUBRESOURCE_CUTOFF and event.session.startswith("s-")):
                         sub_b = int(event.ts // bucket_seconds) * bucket_seconds
                         s_set = hourly_sub_sets[idx_h].get(sub_b)
@@ -1347,7 +1480,7 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     default_origin = (
         self_urls_list[0]
         if self_urls_list
-        else ("https://leftt-5mo6.onrender.com" if "https://leftt-5mo6.onrender.com" in peers_list else (peers_list[0] if peers_list else "https://leftt-5mo6.onrender.com"))
+        else ("https://miruhukaka.ai.studio" if "https://miruhukaka.ai.studio" in peers_list else (peers_list[0] if peers_list else "https://miruhukaka.ai.studio"))
     )
 
     peer_status_map = storage_info.get("peer_status") if isinstance(storage_info.get("peer_status"), dict) else {}
@@ -1359,7 +1492,7 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
     # Build session -> origins map to infer origin for recent same-session events if unambiguous
     sess_origins_map: Dict[str, set[str]] = {}
     has_any_explicit_origin = False
-    for ev in events:
+    for ev in accesses:
         eo = _normalize_origin_url(getattr(ev, "origin", "") or "")
         if eo and not _is_peer_suspended(eo):
             has_any_explicit_origin = True
@@ -1381,7 +1514,7 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
 
     peer_counts: Counter = Counter()
     peer_last_access_ts: Dict[str, float] = {}
-    for ev in (events if is_live_global else accesses):
+    for ev in accesses:
         if ev.state == "closed":
             continue
         orig = _normalize_origin_url(getattr(ev, "origin", "") or "")
@@ -1402,6 +1535,10 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
             continue
         peer_ccu[orig] += 1
         peer_last_access_ts[orig] = max(peer_last_access_ts.get(orig, 0.0), current)
+
+    if is_live_global and live_ccu > sum(peer_ccu.values()):
+        peer_ccu[default_origin] += (live_ccu - sum(peer_ccu.values()))
+        peer_last_access_ts[default_origin] = max(peer_last_access_ts.get(default_origin, 0.0), current)
 
     for pu, ccu_val in peer_ccu.items():
         if ccu_val > 0 and peer_counts.get(pu, 0) < ccu_val:
@@ -1458,14 +1595,16 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
             "status": status_str,
         })
 
-    total_visitors = max(unique_sessions, len({ev.session for ev in events if ev.session}))
+    total_visitors = max(unique_sessions, len({ev.session for ev in accesses if ev.session}))
     if total_visitors == 0 and live_ccu > 0:
         total_visitors = live_ccu
     if today_visitors == 0 and live_ccu > 0:
         today_visitors = live_ccu
+    if today_accesses == 0 and today_visitors > 0:
+        today_accesses = today_visitors
 
     return {
-        "recorded_events": max(len(events), total_service_comm),
+        "recorded_events": max(len(accesses), total_service_comm),
         "access_events": max(len(accesses), total_service_comm),
         "total_comm_count": total_service_comm,
         "today_accesses": today_visitors,
@@ -1506,6 +1645,7 @@ def build_snapshot_payload(force: bool = False) -> dict:
     if (
         not force
         and _SNAPSHOT_CACHE is not None
+        and _SNAPSHOT_CACHE_VERSION == _STATE_VERSION
         and (now - _SNAPSHOT_CACHE_TS) < _SNAPSHOT_CACHE_TTL
     ):
         res = dict(_SNAPSHOT_CACHE)
@@ -1516,6 +1656,7 @@ def build_snapshot_payload(force: bool = False) -> dict:
         if (
             not force
             and _SNAPSHOT_CACHE is not None
+            and _SNAPSHOT_CACHE_VERSION == _STATE_VERSION
             and (now - _SNAPSHOT_CACHE_TS) < _SNAPSHOT_CACHE_TTL
         ):
             res = dict(_SNAPSHOT_CACHE)
@@ -1534,14 +1675,14 @@ def build_snapshot_payload(force: bool = False) -> dict:
             }
             for s in _SESSIONS.values()
         ]
+        stats_data = _aggregate_stats(list(_EVENTS))
         access_events = [e for e in _EVENTS if _is_access(e)]
         recent = access_events[-30:] if access_events else _EVENTS[-30:]
         events = [_json_event(event) for event in recent]
-        stats_data = _aggregate_stats(list(_EVENTS))
         payload = {
             "ok": True,
             "ttl": HEARTBEAT_TTL,
-            "active_sessions": len(sessions),
+            "active_sessions": max(len(sessions), int(stats_data.get("current_ccu") or 0)),
             "sessions": sessions,
             "events": events,
             "stats": stats_data,
@@ -1628,7 +1769,8 @@ async def heartbeat(request: Request):
                 if _can_record_access_locked(session, service, now, source=source, path=path):
                     _add_event(session, service, path, state, source, eff_origin)
             elif _can_record_comm_locked(session, service, now, path=path):
-                _add_event(session, service, path, state, source, eff_origin)
+                eff_src = "home" if service == "School Hub" else "visit"
+                _add_event(session, service, path, state, eff_src, eff_origin)
 
     if _CCU_SAMPLE_HOOK is not None and hook_args is not None:
         try:

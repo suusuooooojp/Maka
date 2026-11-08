@@ -91,6 +91,7 @@ var scoreStorage
 var account = {}
 var gpicker
 var db
+var failedTests = window.failedTests = Array.isArray(window.failedTests) ? window.failedTests : []
 
 let audioUnlocked = false;
 let cachedCanvasEl = null;

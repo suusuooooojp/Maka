@@ -953,7 +953,7 @@ class SettingsView{
 	}
 	setLang(lang){
 		settings.setLang(lang)
-		if(failedTests.length !== 0){
+		if(typeof failedTests !== "undefined" && Array.isArray(failedTests) && failedTests.length !== 0 && typeof showUnsupported === "function"){
 			showUnsupported(strings)
 		}
 		for(var i in this.items){

@@ -1420,7 +1420,7 @@ async def openchat_global_middleware(request: Request, call_next):
     response = await call_next(request)
     if (
         req_path in ("/", "", "/minecraft", "/minecraft/", "/eagler", "/eagler/", "/openchat", "/openchat/")
-        or req_path.startswith(("/src/views/", "/taiko/src/views/", "/run-site"))
+        or req_path.startswith(("/src/views/", "/taiko/src/views/"))
         or "/~/sj/" in req_path
     ):
         return response

@@ -57,8 +57,8 @@ _DEFAULT_BB_TOKEN = (
 _DEFAULT_BB_REPO = "school-hub/leftt"
 _BB_BRANCH = "stats-store"
 _BB_FILE = "activity_store.json"
-_PRIMARY_HUB_URL = "https://leftt-5mo6.onrender.com"
-_SECONDARY_HUB_URL = "https://leftt-9.onrender.com"
+_PRIMARY_HUB_URL = "https://miruhukaka.ai.studio"
+_SECONDARY_HUB_URL = "https://chatwork.cloud.run"
 
 _DB_URLS: List[str] = []
 for _raw_u in (
@@ -104,6 +104,7 @@ _SELF_URLS: Set[str] = set()
 _KNOWN_PEERS: Set[str] = {
     _PRIMARY_HUB_URL,
     _SECONDARY_HUB_URL,
+    "https://great.luhu.jp",
 }
 _SUSPENDED_PEERS: Set[str] = {
     "https://leftt-al1l.onrender.com",
@@ -118,7 +119,7 @@ _HTTP_LOCK = threading.Lock()
 
 
 def _normalize_peer_url(raw_url: str) -> str:
-    """Normalize a deployment origin URL, upgrading .onrender.com to https:// and rejecting test/local hosts."""
+    """Normalize a deployment origin URL, mapping internal AI Studio Cloud Run hosts to miruhukaka.ai.studio and rejecting test/local hosts."""
     if not raw_url or not isinstance(raw_url, str):
         return ""
     clean = raw_url.strip().rstrip("/")
@@ -126,16 +127,19 @@ def _normalize_peer_url(raw_url: str) -> str:
         return ""
     try:
         parsed = urllib.parse.urlsplit(clean)
-        host = (parsed.hostname or "").lower()
+        host = (parsed.hostname or "").lower().rstrip(".")
         if (
             not host
             or "." not in host
-            or host in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "test", "testserver", "example.com", "test.example.com")
-            or host.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "198.51.100."))
+            or host in ("127.0.0.1", "localhost", "0.0.0.0", "::1", "test", "testserver", "example.com", "test.example.com", "aaaaaa.cloud.run")
+            or host.startswith(("10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.", "198.51.100.", "ais-dev-"))
             or host.endswith((".internal", ".local", ".test", ".invalid", ".example.com", ".example.org", ".example.net"))
+            or "hospitaldelninodif" in host
         ):
             return ""
-        scheme = "https" if (host.endswith(".onrender.com") or parsed.scheme == "https") else "http"
+        if host.startswith("untitled-hello-") and host.endswith(".run.app"):
+            return "https://miruhukaka.ai.studio"
+        scheme = "https" if (host.endswith((".onrender.com", ".ai.studio", ".cloud.run", ".run.app", ".luhu.jp")) or parsed.scheme == "https") else "http"
         if parsed.port and not ((scheme == "https" and parsed.port == 443) or (scheme == "http" and parsed.port == 80)):
             netloc = f"{host}:{parsed.port}"
         else:

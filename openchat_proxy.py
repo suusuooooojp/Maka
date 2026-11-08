@@ -50,8 +50,9 @@ _DEFAULT_EXTERNAL_PG_SSL = (
 )
 
 _KNOWN_PEERS: set[str] = {
-    "https://leftt-5mo6.onrender.com",
-    "https://leftt-9.onrender.com",
+    "https://miruhukaka.ai.studio",
+    "https://chatwork.cloud.run",
+    "https://great.luhu.jp",
 }
 
 _CORS_HEADERS = {
@@ -304,13 +305,111 @@ _SUBNET_CANONICAL_IDS: dict[str, str] = {
 
 
 _ACTIVE_CLIENTS: dict[str, float] = {}
+_ACTIVE_CLIENT_SERVICES: dict[str, str] = {}
 
 
-def _touch_active_client(client_id: str = "", sid: str = ""):
+def _infer_openchat_service(scope_or_req=None, explicit_service: str = "", client_id: str = "", sid: str = "") -> str:
+    import current_activity
+    svc = str(explicit_service or "").strip()
+    if svc and svc not in ("Web", "System", "School Hub", "ホーム"):
+        return current_activity._normalize_service_name(svc)
+    if scope_or_req is not None:
+        try:
+            qp = getattr(scope_or_req, "query_params", None)
+            if qp:
+                q_svc = str(qp.get("svc") or qp.get("service") or "").strip()
+                if q_svc and q_svc not in ("Web", "System", "School Hub", "ホーム"):
+                    return current_activity._normalize_service_name(q_svc)
+            headers = getattr(scope_or_req, "headers", None)
+            if headers:
+                h_svc = str(headers.get("x-openchat-service") or "").strip()
+                if h_svc and h_svc not in ("Web", "System", "School Hub", "ホーム"):
+                    return current_activity._normalize_service_name(h_svc)
+                ref = str(headers.get("referer") or "").strip()
+                if ref:
+                    ref_path = urllib.parse.urlsplit(ref).path or "/"
+                    inferred = current_activity._detect_service_from_path(ref_path)
+                    if inferred and inferred != "School Hub":
+                        return inferred
+            req_url = getattr(scope_or_req, "url", None)
+            if req_url and getattr(req_url, "path", None):
+                p = str(req_url.path)
+                for pfx in _PREFIXES:
+                    if pfx != "/openchat" and p.startswith(pfx):
+                        base_p = p[: len(pfx) - len("/openchat")] or "/"
+                        inferred = current_activity._detect_service_from_path(base_p)
+                        if inferred and inferred != "School Hub":
+                            return inferred
+        except Exception:
+            pass
+    for key in (client_id, sid):
+        if key and key in _ACTIVE_CLIENT_SERVICES:
+            cached_svc = _ACTIVE_CLIENT_SERVICES[key]
+            if cached_svc and cached_svc != "School Hub":
+                return cached_svc
+    now = time.time()
+    if client_id or sid:
+        for m in reversed(_MESSAGES[-80:]):
+            if not isinstance(m, dict):
+                continue
+            if (now - float(m.get("ts") or 0.0)) > 1800.0:
+                break
+            m_cid = str(m.get("clientId") or "").strip()
+            m_sid = str(m.get("senderId") or "").strip()
+            if (client_id and m_cid == client_id) or (sid and m_sid == sid):
+                m_svc = str(m.get("service") or "").strip()
+                if m_svc and m_svc not in ("Web", "System"):
+                    return current_activity._normalize_service_name(m_svc)
+    for key in (client_id, sid):
+        if key and key in _ACTIVE_CLIENT_SERVICES:
+            return _ACTIVE_CLIENT_SERVICES[key]
+    return current_activity._normalize_service_name(svc) if svc else "School Hub"
+
+
+def _touch_active_client(
+    client_id: str = "",
+    sid: str = "",
+    service: str = "",
+    scope_or_req=None,
+    source: str = "openchat",
+):
     now = time.time()
     key = str(client_id or sid or "").strip()
     if key:
         _ACTIVE_CLIENTS[key] = now
+    resolved_svc = _infer_openchat_service(scope_or_req, service, client_id, sid)
+    if resolved_svc and resolved_svc != "System":
+        if client_id:
+            _ACTIVE_CLIENT_SERVICES[client_id] = resolved_svc
+        if sid:
+            _ACTIVE_CLIENT_SERVICES[sid] = resolved_svc
+        if key:
+            _ACTIVE_CLIENT_SERVICES[key] = resolved_svc
+    try:
+        import current_activity
+        act_sid = ""
+        if scope_or_req is not None:
+            qp = getattr(scope_or_req, "query_params", None)
+            if qp:
+                act_sid = str(qp.get("sid") or "").strip()
+            if not act_sid:
+                act_sid = _extract_cookie_val(scope_or_req, "sh_sid")
+        if not act_sid:
+            act_sid = f"oc-{client_id or sid}" if (client_id or sid) else ""
+        if act_sid and resolved_svc != "System":
+            origin = _get_self_url(scope_or_req if isinstance(scope_or_req, Request) else None)
+            current_activity.touch_session_activity(
+                session=act_sid,
+                service=resolved_svc or "School Hub",
+                path="",
+                state="active",
+                source="open" if source == "openchat_msg" else source,
+                record_access=(source == "openchat_msg"),
+                origin=origin,
+                tab=f"t-oc-{(client_id or sid)[:12]}" if (client_id or sid) else "t-oc-main",
+            )
+    except Exception:
+        pass
 
 
 def _get_online_count() -> int:
@@ -592,10 +691,17 @@ def _register_peer_url(url: str):
     if not url or not isinstance(url, str):
         return
     clean = url.strip().rstrip("/")
-    if "onrender.com" in clean and clean.startswith(("http://", "https://")):
-        if clean.startswith("http://"):
-            clean = "https://" + clean[7:]
-        _KNOWN_PEERS.add(clean)
+    if not clean.startswith(("http://", "https://")):
+        return
+    try:
+        parsed = urlparse(clean)
+        host = (parsed.hostname or "").lower()
+        if not host or host in ("localhost", "127.0.0.1", "0.0.0.0") or host.startswith("ais-dev-") or host.startswith("untitled-hello-"):
+            return
+        if any(d in host for d in ("onrender.com", "ai.studio", "cloud.run", "luhu.jp", "koyeb.app", "hf.space")):
+            _KNOWN_PEERS.add(f"https://{host}")
+    except Exception:
+        pass
 
 
 _BB_TOKEN = os.getenv(
@@ -993,6 +1099,9 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
             if item.get("trip") and not ex.get("trip"):
                 ex["trip"] = _clean_str(item.get("trip"), 16)
                 updated = True
+            if item.get("service") and ex.get("service") in ("", "Web", "School Hub", "ホーム") and item.get("service") not in ("Web", "System"):
+                ex["service"] = _clean_str(item.get("service"), 32)
+                updated = True
             continue
         try:
             ts = float(item.get("ts")) if item.get("ts") is not None else time.time()
@@ -1000,7 +1109,7 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
             ts = time.time()
         if ts <= _RESET_EPOCH_TS:
             continue
-        service = _clean_str(item.get("service") or "Web", 16)
+        service = _clean_str(item.get("service") or "Web", 32)
         time_str = _format_time_hms(item.get("time"), ts)
         clean_msg = {
             "id": mid,
@@ -1024,6 +1133,8 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
         _MESSAGES.append(clean_msg)
         existing_by_id[mid] = clean_msg
         added = True
+        if (time.time() - ts) < 90.0 and service not in ("", "System"):
+            _touch_active_client(client_id, sender_id, service=service, source="openchat_msg")
 
     if added or updated:
         _MESSAGES.sort(key=lambda m: m.get("ts", 0))
@@ -1237,8 +1348,8 @@ async def claim_chat_name(request: Request):
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
-    _touch_active_client(cid)
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=trip)
+    _touch_active_client(cid, my_id, scope_or_req=request, source="openchat")
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     resp = JSONResponse(
@@ -1315,8 +1426,8 @@ async def get_chat_history(request: Request = None):
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
-    _touch_active_client(cid)
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=trip)
+    _touch_active_client(cid, my_id, scope_or_req=request, source="openchat")
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
@@ -1379,12 +1490,14 @@ async def sync_chat_messages(request: Request):
     tok = ""
     trip = ""
     raw_name = ""
+    sync_svc = ""
     try:
         data = await request.json()
         cid = _clean_str(data.get("clientId"), 64)
         tok = _clean_str(data.get("token") or data.get("ipToken"), 64)
         trip = _clean_str(data.get("tripKey") or data.get("trip"), 64)
         raw_name = _clean_str(data.get("name"), 40)
+        sync_svc = _clean_str(data.get("service"), 32)
         peer_map = data.get("cidMap")
         if isinstance(peer_map, dict):
             map_changed = False
@@ -1416,8 +1529,9 @@ async def sync_chat_messages(request: Request):
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
-    _touch_active_client(cid)
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=trip)
+    if cid:
+        _touch_active_client(cid, my_id, service=sync_svc, scope_or_req=request, source="openchat")
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
@@ -1484,7 +1598,7 @@ async def send_chat_message(request: Request):
     if not raw_user_name and request:
         raw_user_name = _extract_cookie_val(request, "sh_openchat_name") or (request.headers.get("x-openchat-name") or "")
     trip_key = trip_key.strip().lstrip("#").lstrip("◆").strip()
-    service = _clean_str(incoming_msg.get("service") or "Web", 16)
+    service = _clean_str(incoming_msg.get("service") or "Web", 32)
 
     is_forwarded = bool(incoming_msg.get("forwarded"))
     peer_map = data.get("cidMap")
@@ -1500,11 +1614,11 @@ async def send_chat_message(request: Request):
             _save_cid_map()
     if is_forwarded:
         sender_id = _canonicalize_sid(_format_display_name(incoming_msg.get("senderId") or "ANON0000"), client_id)
+        _touch_active_client(client_id, sender_id, service=service, source="openchat_msg")
     else:
         # Strictly enforce IP/CID/Trip derived ID
         sender_id = _get_ip_id(request, client_id=client_id, ip_token=tok, trip_key=trip_key)
-
-    _touch_active_client(client_id, sender_id)
+        _touch_active_client(client_id, sender_id, service=service, scope_or_req=request, source="openchat_msg")
     trip_code = _calculate_tripcode(trip_key) if trip_key else ""
     signed_tok = _sign_id(sender_id)
     mid = _clean_str(incoming_msg.get("id"), 64)
@@ -1529,7 +1643,7 @@ async def send_chat_message(request: Request):
             },
             headers=_CORS_HEADERS,
         )
-        _add_fixed_id_cookie(resp, sender_id, cid=client_id, trip=trip_key)
+        _add_fixed_id_cookie(resp, my_id := sender_id, cid=client_id, trip=trip_key)
         return resp
 
     try:
@@ -1633,6 +1747,7 @@ async def openchat_websocket(websocket: WebSocket):
     ws_tok = websocket.query_params.get("token", "")
     ws_trip = websocket.query_params.get("trip", "")
     ws_name = websocket.query_params.get("name", "")
+    ws_svc = websocket.query_params.get("svc", "")
     if not ws_trip:
         ws_trip = _extract_cookie_val(websocket, "sh_openchat_trip") or ""
     if not ws_name:
@@ -1641,7 +1756,7 @@ async def openchat_websocket(websocket: WebSocket):
     ws_ip_id = _get_ip_id(websocket, client_id=ws_cid, ip_token=ws_tok, trip_key=ws_trip, custom_name=ws_name)
     ws_trip_code = _calculate_tripcode(ws_trip) if ws_trip else ""
     ws_signed_tok = _sign_id(ws_ip_id)
-    _touch_active_client(ws_cid, ws_ip_id)
+    _touch_active_client(ws_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
     asyncio.create_task(_broadcast_online_count())
     try:
         clean_msgs = [
@@ -1670,7 +1785,10 @@ async def openchat_websocket(websocket: WebSocket):
                 data = json.loads(raw)
                 mtype = data.get("type")
                 if mtype == "ping":
-                    _touch_active_client(ws_cid, ws_ip_id)
+                    ping_svc = _clean_str(data.get("service") or ws_svc, 32)
+                    if ping_svc:
+                        ws_svc = ping_svc
+                    _touch_active_client(ws_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
                     await websocket.send_text(
                         json.dumps({"type": "pong", "myId": ws_ip_id, "token": ws_signed_tok, "trip": ws_trip_code, "onlineCount": _get_online_count(), "resetEpoch": _RESET_EPOCH_TS, "totalCount": len(_MESSAGES)})
                     )
@@ -1680,10 +1798,13 @@ async def openchat_websocket(websocket: WebSocket):
                     sync_tok = _clean_str(data.get("token") or data.get("ipToken") or ws_tok, 64)
                     sync_trip = _clean_str(data.get("tripKey") or data.get("trip") or ws_trip, 64)
                     sync_name = _clean_str(data.get("name") or ws_name, 40)
+                    sync_svc = _clean_str(data.get("service") or ws_svc, 32)
+                    if sync_svc:
+                        ws_svc = sync_svc
                     ws_ip_id = _get_ip_id(websocket, client_id=sync_cid, ip_token=sync_tok, trip_key=sync_trip, custom_name=sync_name) or ws_ip_id
                     ws_trip_code = _calculate_tripcode(sync_trip) if sync_trip else ""
                     ws_signed_tok = _sign_id(ws_ip_id)
-                    _touch_active_client(sync_cid, ws_ip_id)
+                    _touch_active_client(sync_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
                     incoming = data.get("messages", [])
                     if incoming:
                         prev_ep = _RESET_EPOCH_TS
@@ -1740,11 +1861,12 @@ async def openchat_websocket(websocket: WebSocket):
 
                 sender_id = _get_ip_id(websocket, client_id=client_id, ip_token=tok, trip_key=trip_key, custom_name=raw_user_name) or ws_ip_id
                 ws_ip_id = sender_id
-                _touch_active_client(client_id, sender_id)
+                service = _clean_str(incoming_msg.get("service") or ws_svc or "Web", 32)
+                ws_svc = service
+                _touch_active_client(client_id, sender_id, service=service, scope_or_req=websocket, source="openchat_msg")
                 trip_code = _calculate_tripcode(trip_key) if trip_key else ""
                 sender_signed_tok = _sign_id(sender_id)
                 ws_signed_tok = sender_signed_tok
-                service = _clean_str(incoming_msg.get("service") or "Web", 16)
 
                 mid = _clean_str(incoming_msg.get("id"), 64)
                 if not mid:
@@ -1861,6 +1983,9 @@ _PREFIXES = [
     "/trump/openchat",
     "/tiktok/openchat",
     "/cloudmoon/openchat",
+    "/run-site/openchat",
+    "/minecraft/openchat",
+    "/eagler/openchat",
     "/interstellar/openchat",
     "/utopia/openchat",
     "/kazwire/openchat",
@@ -2105,7 +2230,9 @@ _CLIENT_JS = r"""
     const u = base + path;
     const delim = u.includes('?') ? '&' : '?';
     const trip = getStoredTripKey();
-    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '');
+    const svc = detectService();
+    const sid = window.__sh_sid || '';
+    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
   }
 
   function getWsUrl() {
@@ -2120,30 +2247,68 @@ _CLIENT_JS = r"""
     }
     const delim = u.includes('?') ? '&' : '?';
     const trip = getStoredTripKey();
-    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '');
+    const svc = detectService();
+    const sid = window.__sh_sid || '';
+    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
+  }
+
+  function matchServiceFromPath(rawPath, rawHost) {
+    const p = (rawPath || '/').toLowerCase();
+    const h = (rawHost || '').toLowerCase();
+    if (p.startsWith('/minecraft') || p.startsWith('/eagler')) return 'マインクラフト(日本語版)';
+    if (p.startsWith('/play') || p.startsWith('/bloxd') || p.startsWith('/proxy_subdomain/bloxd') || p.startsWith('/index/') || h.includes('bloxd')) return 'Bloxd.io(安定)';
+    if (p.startsWith('/deep') || p.startsWith('/diep') || p.startsWith('/deeeep') || h.includes('diep') || h.includes('deeeep')) return 'Diep.io';
+    if (p.startsWith('/taiko') || p.startsWith('/songs/') || p.startsWith('/src/') || h.includes('taiko')) return '太鼓の達人(pc推奨)';
+    if (p.startsWith('/youtube-beta')) return 'youtube(beta)';
+    if (p.startsWith('/youtube') || h.includes('youtube')) return 'YouTube';
+    if (p.startsWith('/wakame') || p.startsWith('/watch') || p.startsWith('/search') || p.startsWith('/channel') || p.startsWith('/hashtag') || p.startsWith('/playlist')) return 'わかめ\u3000ぷらす';
+    if (p.startsWith('/twitch') || h.includes('twitch')) return 'Twitch(安定)';
+    if (p.startsWith('/spotify') || h.includes('spotify')) return 'Spotify';
+    if (p.startsWith('/instagram') || h.includes('instagram')) return 'Instagram';
+    if (p === '/x' || p.startsWith('/x/') || p.startsWith('/twitter') || h.includes('twitter')) return 'X';
+    if (p.startsWith('/florr') || h.includes('florr')) return 'Florr.io';
+    if (
+      p.startsWith('/cloudmoon') ||
+      p.startsWith('/run-site') ||
+      p.startsWith('/data/') ||
+      p.startsWith('/game/') ||
+      p.startsWith('/list/') ||
+      p.startsWith('/h5/') ||
+      p === '/ja' ||
+      p.startsWith('/ja/') ||
+      h.includes('cloudmoon')
+    ) return 'CloudMoon';
+    if (p.startsWith('/trump')) return 'トランプ (大富豪・ババ抜き)';
+    if (p.startsWith('/tiktok') || h.includes('tiktok')) return 'TikTok';
+    if (p.startsWith('/kazwire')) return 'Kazwire';
+    if (p.startsWith('/utopia')) return 'Utopia';
+    if (p.startsWith('/interstellar') || p === '/a' || p === '/b' || p === '/c' || p === '/d' || p.startsWith('/a/') || p.startsWith('/b/') || p.startsWith('/c/') || p.startsWith('/d/')) return 'Interstellar';
+    return '';
   }
 
   // Detect current active service dynamically using canonical School Hub service names
   function detectService() {
     try {
-      const p = (window.location.pathname || '/').toLowerCase();
-      const h = (window.location.host || '').toLowerCase();
-      if (p.startsWith('/play') || p.startsWith('/bloxd') || p.startsWith('/proxy_subdomain/bloxd') || p.startsWith('/index/') || h.includes('bloxd')) return 'Bloxd.io(安定)';
-      if (p.startsWith('/deep') || p.startsWith('/diep') || p.startsWith('/deeeep') || h.includes('diep') || h.includes('deeeep')) return 'Diep.io';
-      if (p.startsWith('/taiko') || p.startsWith('/songs/') || p.startsWith('/src/') || h.includes('taiko')) return '太鼓の達人(pc推奨)';
-      if (p.startsWith('/youtube') || h.includes('youtube')) return 'YouTube';
-      if (p.startsWith('/wakame') || p.startsWith('/watch') || p.startsWith('/search') || p.startsWith('/channel') || p.startsWith('/hashtag') || p.startsWith('/playlist')) return 'わかめ\u3000ぷらす';
-      if (p.startsWith('/twitch') || h.includes('twitch')) return 'Twitch(安定)';
-      if (p.startsWith('/spotify') || h.includes('spotify')) return 'Spotify';
-      if (p.startsWith('/instagram') || h.includes('instagram')) return 'Instagram';
-      if (p === '/x' || p.startsWith('/x/') || p.startsWith('/twitter') || h.includes('twitter')) return 'X';
-      if (p.startsWith('/florr') || h.includes('florr')) return 'Florr.io';
-      if (p.startsWith('/cloudmoon') || p.startsWith('/run-site') || p.startsWith('/data/') || h.includes('cloudmoon')) return 'CloudMoon';
-      if (p.startsWith('/trump')) return 'トランプ (大富豪・ババ抜き)';
-      if (p.startsWith('/tiktok') || h.includes('tiktok')) return 'TikTok';
-      if (p.startsWith('/kazwire')) return 'Kazwire';
-      if (p.startsWith('/utopia')) return 'Utopia';
-      if (p.startsWith('/interstellar') || p === '/a' || p === '/b' || p === '/c' || p === '/d' || p.startsWith('/a/') || p.startsWith('/b/') || p.startsWith('/c/') || p.startsWith('/d/')) return 'Interstellar';
+      const direct = matchServiceFromPath(window.location.pathname, window.location.host);
+      if (direct) return direct;
+      if (document.getElementById('sh-cloudmoon-adblock') || window.__cm_session || window.__CLOUDMOON_PROXY__) {
+        return 'CloudMoon';
+      }
+      try {
+        if (window.parent && window.parent !== window && window.parent.location && window.parent.location.pathname) {
+          const fromParent = matchServiceFromPath(window.parent.location.pathname, window.parent.location.host);
+          if (fromParent) return fromParent;
+        }
+      } catch (_) {}
+      try {
+        if (document.referrer) {
+          const refUrl = new URL(document.referrer, window.location.origin);
+          if (refUrl.origin === window.location.origin && (window.location.pathname || '/').startsWith('/openchat')) {
+            const fromRef = matchServiceFromPath(refUrl.pathname, refUrl.host);
+            if (fromRef) return fromRef;
+          }
+        }
+      } catch (_) {}
       return 'School Hub';
     } catch (_) {
       return 'School Hub';
@@ -2153,7 +2318,22 @@ _CLIENT_JS = r"""
   // Universal Real-Time Concurrent Activity Tracker
   (function initActivityTracker() {
     try {
-      if (window.self !== window.top) return;
+      try {
+        if (
+          window.self !== window.top &&
+          window.parent &&
+          window.parent !== window.self &&
+          window.parent.location &&
+          window.parent.location.origin === window.location.origin &&
+          window.parent.__SH_ACTIVITY_TRACKER_RUNNING &&
+          matchServiceFromPath(window.parent.location.pathname, window.parent.location.host) === matchServiceFromPath(window.location.pathname, window.location.host)
+        ) {
+          return;
+        }
+      } catch (_) {
+        // Cross-origin outer wrapper (e.g. Google AI Studio miruhukaka.ai.studio iframe): MUST run tracker!
+      }
+      window.__SH_ACTIVITY_TRACKER_RUNNING = true;
       const SESSION_STORAGE_KEY = 'schoolhub.currentActivity.session.v1';
       function getCookieSid() {
         const m = document.cookie.match(/(?:^|;\s*)sh_sid=([^;]+)/);
@@ -2181,8 +2361,9 @@ _CLIENT_JS = r"""
       }
       window.__sh_tab_id = tabId;
 
+      const cookieSuffix = window.location.protocol === 'https:' ? '; SameSite=None; Secure; Partitioned' : '; SameSite=Lax';
       try {
-        document.cookie = 'sh_sid=' + encodeURIComponent(sid) + '; path=/; max-age=2592000; SameSite=Lax';
+        document.cookie = 'sh_sid=' + encodeURIComponent(sid) + '; path=/; max-age=2592000' + cookieSuffix;
         sessionStorage.setItem('sh_sid', sid);
         localStorage.setItem('sh_sid', sid);
         localStorage.setItem(SESSION_STORAGE_KEY, sid);
@@ -2232,7 +2413,7 @@ _CLIENT_JS = r"""
               sid = d.session;
               window.__sh_sid = sid;
               try {
-                document.cookie = 'sh_sid=' + encodeURIComponent(sid) + '; path=/; max-age=2592000; SameSite=Lax';
+                document.cookie = 'sh_sid=' + encodeURIComponent(sid) + '; path=/; max-age=2592000' + cookieSuffix;
                 localStorage.setItem('sh_sid', sid);
                 localStorage.setItem(SESSION_STORAGE_KEY, sid);
               } catch (_) {}
@@ -5165,25 +5346,35 @@ _CLIENT_JS = r"""
     return entry;
   }
 
+  function formatServiceBadge(svc) {
+    let rawSvc = String(svc || 'Web').trim();
+    if (!rawSvc || rawSvc === 'School Hub' || rawSvc === 'ホーム' || rawSvc === 'Web') return 'ホーム';
+    if (rawSvc.includes('CloudMoon') || rawSvc.toLowerCase().includes('cloudmoon')) return 'CloudMoon';
+    if (rawSvc.includes('Bloxd')) return 'Bloxd.io';
+    if (rawSvc.includes('太鼓')) return '太鼓の達人';
+    if (rawSvc.includes('マインクラフト') || rawSvc.includes('マイクラ') || rawSvc.toLowerCase().includes('minecraft')) return 'マイクラ';
+    if (rawSvc.includes('わかめ')) return 'わかめtube';
+    if (rawSvc.toLowerCase().includes('youtube')) return 'YouTube';
+    if (rawSvc.includes('Twitch')) return 'Twitch';
+    if (rawSvc.includes('Spotify')) return 'Spotify';
+    if (rawSvc.includes('トランプ')) return 'トランプ';
+    return rawSvc;
+  }
+
   function createMsgGroupElement(msg, resNo) {
     const el = document.createElement('div');
     const cleanSender = cleanIdDisplay(msg.senderId);
     const senderNorm = normalizeName(cleanSender);
     const isSelf = (senderNorm && senderNorm === normalizeName(currentSenderId));
+    const rawSvc = formatServiceBadge(msg.service);
     el.className = 'sh-chat-msg' + (isSelf ? ' is-self' : '');
     el.dataset.mid = msg.id;
     el.dataset.senderNorm = senderNorm;
     el.dataset.trip = (msg.trip && String(msg.trip).trim()) || '';
     el.dataset.name = (msg.name && String(msg.name).trim()) || '';
+    el.dataset.service = rawSvc;
     const sId = escapeHtml(cleanSender);
     const idColor = getIdColor(cleanSender);
-    let rawSvc = String(msg.service || 'Web');
-    if (rawSvc === 'School Hub' || rawSvc === 'ホーム') rawSvc = 'ホーム';
-    else if (rawSvc.includes('Bloxd')) rawSvc = 'Bloxd.io';
-    else if (rawSvc.includes('太鼓')) rawSvc = '太鼓の達人';
-    else if (rawSvc.includes('わかめ') || rawSvc.includes('YouTube')) rawSvc = 'わかめtube';
-    else if (rawSvc.includes('Twitch')) rawSvc = 'Twitch';
-    else if (rawSvc.includes('Spotify')) rawSvc = 'Spotify';
     const sSvc = escapeHtml(rawSvc);
     const sTime = escapeHtml(formatMsgTime(msg));
     const sName = escapeHtml(cleanSender);
@@ -5233,13 +5424,15 @@ _CLIENT_JS = r"""
     const senderNorm = normalizeName(msg.senderId || '--------');
     const msgTrip = (msg.trip && String(msg.trip).trim()) || '';
     const msgName = (msg.name && String(msg.name).trim()) || '';
+    const msgSvc = formatServiceBadge(msg.service);
     const lastGroup = container.lastElementChild;
     if (
       lastGroup &&
       lastGroup.classList.contains('sh-chat-msg') &&
       lastGroup.dataset.senderNorm === senderNorm &&
       (lastGroup.dataset.trip || '') === msgTrip &&
-      (lastGroup.dataset.name || '') === msgName
+      (lastGroup.dataset.name || '') === msgName &&
+      (lastGroup.dataset.service || '') === msgSvc
     ) {
       const entriesWrap = lastGroup.querySelector('.sh-chat-msg-entries');
       if (entriesWrap) {
@@ -5299,6 +5492,10 @@ _CLIENT_JS = r"""
     }
     if (msg.name && cached.name !== msg.name) {
       cached.name = msg.name;
+      changed = true;
+    }
+    if (msg.service && cached.service !== msg.service) {
+      cached.service = msg.service;
       changed = true;
     }
     if (changed) {
@@ -5411,7 +5608,7 @@ _CLIENT_JS = r"""
         clearInterval(heartbeatTimer);
         heartbeatTimer = setInterval(() => {
           if (ws && ws.readyState === WebSocket.OPEN) {
-            try { ws.send(JSON.stringify({ type: 'ping' })); } catch (_) {}
+            try { ws.send(JSON.stringify({ type: 'ping', service: detectService() })); } catch (_) {}
           }
         }, 15000);
         try {
@@ -5421,7 +5618,8 @@ _CLIENT_JS = r"""
             messages: localMessageCache.slice(-80),
             clientId: currentClientId,
             token: currentIpToken,
-            tripKey: myTrip
+            tripKey: myTrip,
+            service: detectService()
           }));
         } catch (_) {}
         flushUnsent();
@@ -5477,13 +5675,15 @@ _CLIENT_JS = r"""
         headers: {
           'Content-Type': 'application/json',
           'X-OpenChat-Client-Id': currentClientId,
+          'X-OpenChat-Service': detectService(),
           ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
           ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
         },
         body: JSON.stringify({
           clientId: currentClientId,
           token: currentIpToken,
-          tripKey: myTrip
+          tripKey: myTrip,
+          service: detectService()
         }),
       });
       const data = await res.json().catch(() => null);
@@ -5509,13 +5709,15 @@ _CLIENT_JS = r"""
         messages: outgoing.slice(-100),
         clientId: currentClientId,
         token: currentIpToken,
-        tripKey: myTrip
+        tripKey: myTrip,
+        service: detectService()
       };
       const res = await fetch(getApiUrl('/openchat/sync'), {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-OpenChat-Client-Id': currentClientId,
+          'X-OpenChat-Service': detectService(),
           ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
           ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
         },
@@ -5546,6 +5748,7 @@ _CLIENT_JS = r"""
         cache: 'no-store',
         headers: {
           'X-OpenChat-Client-Id': currentClientId,
+          'X-OpenChat-Service': detectService(),
           ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
           ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
         }
@@ -5709,6 +5912,7 @@ _CLIENT_JS = r"""
       headers: {
         'Content-Type': 'application/json',
         'X-OpenChat-Client-Id': currentClientId,
+        'X-OpenChat-Service': msg.service,
         ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
         ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
       },
@@ -5716,7 +5920,8 @@ _CLIENT_JS = r"""
         message: msg,
         clientId: currentClientId,
         token: currentIpToken,
-        tripKey: myTrip
+        tripKey: myTrip,
+        service: msg.service
       })
     }).then(async (r) => {
       const data = await r.json().catch(() => null);
@@ -5748,7 +5953,8 @@ _CLIENT_JS = r"""
           clientId: currentClientId,
           token: currentIpToken,
           tripKey: myTrip,
-          name: myName
+          name: myId,
+          service: msg.service
         }));
       } catch (_) {}
     }

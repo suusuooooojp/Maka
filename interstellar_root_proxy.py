@@ -247,6 +247,16 @@ _IS_CSS_URL_RE = re.compile(
 )
 
 
+_IS_CSP_META_RE = re.compile(
+    r'<meta[^>]+http-equiv\s*=\s*["\']?(?:Content-Security-Policy|X-Frame-Options)[^>]*>',
+    flags=re.IGNORECASE,
+)
+_IS_INTEGRITY_RE = re.compile(
+    r'\s+(?:integrity|nonce)\s*=\s*(?:["\'][^"\']*["\']|[^\s>]+)',
+    flags=re.IGNORECASE,
+)
+
+
 def _rewrite_interstellar_url(base_url: str, raw_val: str) -> str:
     val = (raw_val or "").strip()
     if not val or val.startswith(("#", "javascript:", "data:", "blob:", "mailto:", "tel:", "about:")):
@@ -254,22 +264,80 @@ def _rewrite_interstellar_url(base_url: str, raw_val: str) -> str:
     if val.startswith(("/interstellar/", "/a/")):
         return raw_val
     resolved = urllib.parse.urljoin(base_url, val)
-    return f"/interstellar/a/{encode_xor(resolved)}"
+    return f"/interstellar/a/sj/{urllib.parse.quote(resolved, safe='')}"
 
 
 def _rewrite_interstellar_html(base_url: str, html_text: str) -> str:
+    cleaned = _IS_CSP_META_RE.sub("", html_text)
+    cleaned = _IS_INTEGRITY_RE.sub("", cleaned)
+
     def _attr_repl(match: re.Match) -> str:
         prefix, quote, url_val, suffix = match.groups()
         rewritten = _rewrite_interstellar_url(base_url, url_val)
         return f"{prefix}{quote}{rewritten}{suffix}"
 
-    rewritten_html = _IS_ATTR_RE.sub(_attr_repl, html_text)
+    rewritten_html = _IS_ATTR_RE.sub(_attr_repl, cleaned)
+    safe_base = base_url.replace("\\", "\\\\").replace("'", "\\'").replace("</", "<\\/")
     inject = (
-        '<script src="/interstellar/sw.js?v=2025-04-15"></script>'
         "<script>"
-        "if ('serviceWorker' in navigator) {"
-        "  navigator.serviceWorker.register('/interstellar/sw.js?v=2025-04-15', { scope: '/interstellar/' }).catch(() => {});"
+        "(function(){"
+        f"const BASE='{safe_base}';"
+        "const P='/interstellar/a/sj/';"
+        "function rw(u){"
+        "try{"
+        "if(!u||typeof u!=='string')return u;"
+        "const s=u.trim();"
+        "if(!s||/^(?:#|javascript:|data:|blob:|mailto:|tel:|about:)/i.test(s))return u;"
+        "if(s.startsWith('/interstellar/')||s.startsWith('/openchat/')||s.startsWith('/activity/'))return u;"
+        "if(s.startsWith(location.origin+'/interstellar/'))return u;"
+        "const abs=new URL(s,BASE).href;"
+        "return P+encodeURIComponent(abs);"
+        "}catch(e){return u;}"
         "}"
+        "if('serviceWorker' in navigator){"
+        "try{if(navigator.serviceWorker.startMessages)navigator.serviceWorker.startMessages();}catch(e){}"
+        "navigator.serviceWorker.register('/interstellar/sw.js?v=2025-04-15',{scope:'/interstellar/'}).catch(()=>{});"
+        "}"
+        "document.addEventListener('click',function(e){"
+        "const a=e.target&&e.target.closest?e.target.closest('a[href]'):null;"
+        "if(!a||e.defaultPrevented)return;"
+        "const raw=a.getAttribute('href');"
+        "if(!raw||raw.startsWith('#')||raw.startsWith('javascript:'))return;"
+        "const next=rw(raw);"
+        "if(next!==raw)a.setAttribute('href',next);"
+        "if(a.target==='_blank')a.removeAttribute('target');"
+        "},true);"
+        "document.addEventListener('submit',function(e){"
+        "const f=e.target;"
+        "if(!f||f.tagName!=='FORM')return;"
+        "const act=f.getAttribute('action')||BASE;"
+        "const method=(f.getAttribute('method')||'GET').toUpperCase();"
+        "if(method==='GET'){"
+        "e.preventDefault();"
+        "try{"
+        "const targetUrl=act.startsWith('/interstellar/a/sj/')?decodeURIComponent(act.slice('/interstellar/a/sj/'.length)):new URL(act,BASE).href;"
+        "const u=new URL(targetUrl);"
+        "const fd=new FormData(f);"
+        "for(const [k,v] of fd.entries()){if(typeof v==='string')u.searchParams.set(k,v);}"
+        "location.href=P+encodeURIComponent(u.href);"
+        "}catch(err){f.setAttribute('action',rw(act));f.submit();}"
+        "}else{f.setAttribute('action',rw(act));}"
+        "},true);"
+        "try{"
+        "const _fetch=window.fetch.bind(window);"
+        "window.fetch=function(input,init){"
+        "try{if(typeof input==='string')input=rw(input);else if(input instanceof URL)input=rw(input.href);}catch(e){}"
+        "return _fetch(input,init);"
+        "};"
+        "const _open=XMLHttpRequest.prototype.open;"
+        "XMLHttpRequest.prototype.open=function(m,u,...rest){"
+        "try{if(typeof u==='string')u=rw(u);}catch(e){}"
+        "return _open.call(this,m,u,...rest);"
+        "};"
+        "const _wopen=window.open.bind(window);"
+        "window.open=function(u,...rest){return _wopen(rw(u),...rest);};"
+        "}catch(e){}"
+        "})();"
         "</script>"
     )
     if re.search(r"<head[^>]*>", rewritten_html, flags=re.IGNORECASE):
@@ -285,15 +353,36 @@ def _rewrite_interstellar_html(base_url: str, html_text: str) -> str:
     return rewritten_html
 
 
+def _extract_blocked_search_query(url_str: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(url_str)
+        host = (parsed.hostname or "").lower()
+        qs = urllib.parse.parse_qs(parsed.query)
+        if any(h in host for h in ("search.brave.com", "google.com", "google.co.jp", "duckduckgo.com", "mojeek.com")):
+            q = (qs.get("q") or qs.get("p") or [""])[0].strip()
+            return q
+    except Exception:
+        pass
+    return ""
+
+
 async def handle_interstellar_fallback_proxy(request: Request, target_url: str) -> Response:
     if request.url.query and "?" not in target_url:
         target_url = f"{target_url}?{request.url.query}"
     if not target_url.startswith(("http://", "https://")):
         target_url = "https://" + target_url.lstrip("/")
 
+    search_q = _extract_blocked_search_query(target_url)
+    if search_q and any(h in target_url.lower() for h in ("search.brave.com", "duckduckgo.com", "google.com/search", "google.co.jp/search", "google.com/sorry")):
+        target_url = f"https://search.yahoo.co.jp/search?p={urllib.parse.quote(search_q)}"
+
     client = _get_is_http_client()
+    default_ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
     req_headers = {
-        "User-Agent": request.headers.get("user-agent") or "Mozilla/5.0",
+        "User-Agent": request.headers.get("user-agent") or default_ua,
         "Accept": request.headers.get("accept") or "*/*",
         "Accept-Language": request.headers.get("accept-language") or "ja,en-US;q=0.9,en;q=0.8",
         "Accept-Encoding": "identity",
@@ -306,6 +395,13 @@ async def handle_interstellar_fallback_proxy(request: Request, target_url: str) 
             headers=req_headers,
             content=body,
         )
+        if search_q and (upstream.status_code in {202, 403, 429} or "/sorry/" in str(upstream.url)):
+            fallback_search = f"https://search.yahoo.co.jp/search?p={urllib.parse.quote(search_q)}"
+            upstream = await client.request(
+                method="GET",
+                url=fallback_search,
+                headers=req_headers,
+            )
     except Exception as exc:
         return Response(
             content=f"Interstellar upstream fetch error: {exc}".encode("utf-8"),
@@ -326,7 +422,7 @@ async def handle_interstellar_fallback_proxy(request: Request, target_url: str) 
         rewritten_html = _rewrite_interstellar_html(final_url, html_str)
         return Response(
             content=rewritten_html.encode("utf-8"),
-            status_code=upstream.status_code,
+            status_code=200 if upstream.status_code in {202, 429} else upstream.status_code,
             media_type="text/html; charset=utf-8",
             headers=resp_headers,
         )

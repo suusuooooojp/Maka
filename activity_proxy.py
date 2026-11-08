@@ -94,9 +94,21 @@ def _detect_service(path: str) -> tuple[str | None, bool, str]:
     if path.startswith("/tiktok"):
         is_entry = not path.startswith("/tiktok/api/")
         return "TikTok", is_entry, "/tiktok"
-    if path.startswith("/cloudmoon") or path.startswith("/run-site") or path.startswith("/data/"):
-        is_entry = path in ("/cloudmoon", "/cloudmoon/", "/run-site") or path.startswith(("/cloudmoon/game/", "/run-site"))
-        return "CloudMoon", is_entry, "/cloudmoon"
+    if (
+        path.startswith("/cloudmoon")
+        or path.startswith("/run-site")
+        or path.startswith("/data/")
+        or path.startswith("/game/")
+        or path.startswith("/list/")
+        or path.startswith("/h5/")
+        or path == "/ja"
+        or path.startswith("/ja/")
+    ):
+        is_entry = (
+            path in ("/cloudmoon", "/cloudmoon/", "/run-site", "/run-site/", "/ja", "/ja/")
+            or path.startswith(("/cloudmoon/game/", "/run-site/ja/", "/run-site/game/", "/game/", "/ja/game/", "/ja/list/"))
+        )
+        return "CloudMoon", is_entry, "/cloudmoon/"
     if path.startswith("/trump"):
         is_entry = not path.startswith(("/trump/api/", "/trump/ws/"))
         return "トランプ (大富豪・ババ抜き)", is_entry, "/trump"
@@ -185,22 +197,26 @@ if _schoolhub_app is not None:
             if service_name is not None:
                 sec_mode = (request.headers.get("sec-fetch-mode") or "").lower()
                 sec_dest = (request.headers.get("sec-fetch-dest") or "").lower()
+                accept_hdr = (request.headers.get("accept") or "").lower()
                 is_top_doc_nav = (
                     request.method == "GET"
                     and is_entry_path
-                    and sec_mode == "navigate"
-                    and sec_dest == "document"
+                    and (
+                        (sec_mode == "navigate" and sec_dest in ("document", "iframe", "empty", ""))
+                        or (not sec_mode and "text/html" in accept_hdr)
+                    )
                 )
 
                 new_cookie_sid = ""
                 if is_top_doc_nav and not cookie_sid:
                     new_cookie_sid = "s-" + uuid.uuid4().hex[:18]
 
-                if cookie_sid and is_top_doc_nav:
+                eff_sid = cookie_sid or new_cookie_sid
+                if eff_sid and is_top_doc_nav:
                     try:
                         should_record_access = path != "/"
                         touch_session_activity(
-                            cookie_sid,
+                            eff_sid,
                             service_name,
                             canon_path,
                             state="active",
@@ -214,12 +230,14 @@ if _schoolhub_app is not None:
                 response = await call_next(request)
                 if new_cookie_sid:
                     try:
+                        is_https = proto == "https"
                         response.set_cookie(
                             "sh_sid",
                             new_cookie_sid,
                             max_age=86400 * 30,
                             path="/",
-                            samesite="lax",
+                            samesite="none" if is_https else "lax",
+                            secure=is_https,
                             httponly=False,
                         )
                     except Exception:

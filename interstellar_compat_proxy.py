@@ -237,6 +237,9 @@ _SJ_TP_JS = r"""(() => {
   async function ensureServiceWorker() {
     if (!("serviceWorker" in navigator)) return null;
     try {
+      if (typeof navigator.serviceWorker.startMessages === "function") {
+        try { navigator.serviceWorker.startMessages(); } catch (e) {}
+      }
       const reg = await navigator.serviceWorker.register("/interstellar/sw.js?v=2025-04-15", {
         scope: "/interstellar/",
       });
@@ -272,6 +275,10 @@ _SJ_TP_JS = r"""(() => {
       throw new Error("Sj bundle did not load.");
     }
 
+    if ("serviceWorker" in navigator && typeof navigator.serviceWorker.startMessages === "function") {
+      try { navigator.serviceWorker.startMessages(); } catch (e) {}
+    }
+
     const [{ BareMuxConnection }, { ScramjetController }] = await Promise.all([
       import("/interstellar/bm/index.mjs"),
       Promise.resolve(window.$scramjetLoadController()),
@@ -285,6 +292,17 @@ _SJ_TP_JS = r"""(() => {
       decodeUrl: url => sj.decodeUrl(url),
       pxyUrl: url => sj.encodeUrl(url),
     };
+
+    try {
+      const connection = new BareMuxConnection("/interstellar/bm/worker.js");
+      if ("serviceWorker" in navigator && typeof navigator.serviceWorker.startMessages === "function") {
+        try { navigator.serviceWorker.startMessages(); } catch (e) {}
+      }
+      await connection.setTransport("/interstellar/ep/index.mjs", [{ wisp: getWispUrl() }]);
+      window.__isSj.connection = connection;
+    } catch (err) {
+      console.warn("BareMux transport setup warning:", err);
+    }
 
     try {
       await sj.init();
@@ -302,14 +320,6 @@ _SJ_TP_JS = r"""(() => {
     }
 
     await ensureServiceWorker();
-
-    try {
-      const connection = new BareMuxConnection("/interstellar/bm/worker.js");
-      await connection.setTransport("/interstellar/ep/index.mjs", [{ wisp: getWispUrl() }]);
-      window.__isSj.connection = connection;
-    } catch (err) {
-      console.warn("BareMux transport setup warning:", err);
-    }
   }
 
   async function boot() {
@@ -339,6 +349,9 @@ _SJ_TP_JS = r"""(() => {
 _INDEX3_JS = r"""// index-3.js (isolated under /interstellar)
 window.addEventListener("load", () => {
   if ("serviceWorker" in navigator) {
+    if (typeof navigator.serviceWorker.startMessages === "function") {
+      try { navigator.serviceWorker.startMessages(); } catch (e) {}
+    }
     navigator.serviceWorker
       .register("/interstellar/sw.js?v=2025-04-15", { scope: "/interstellar/" })
       .catch(() =>
@@ -349,19 +362,35 @@ window.addEventListener("load", () => {
   }
 });
 
-let xl = false;
-try {
-  xl =
-    window.top.location.pathname === "/interstellar/d" ||
-    window.top.location.pathname === "/d";
-} catch {
+function isInsideTabsView() {
   try {
-    xl =
-      window.parent.location.pathname === "/interstellar/d" ||
-      window.parent.location.pathname === "/d";
-  } catch {
-    xl = false;
+    if (window.parent && window.parent !== window) {
+      const pp = window.parent.location.pathname;
+      if (pp === "/interstellar/d" || pp === "/d") return true;
+    }
+  } catch {}
+  try {
+    if (window.top && window.top !== window) {
+      const tp = window.top.location.pathname;
+      if (tp === "/interstellar/d" || tp === "/d") return true;
+    }
+  } catch {}
+  return false;
+}
+
+let xl = isInsideTabsView();
+
+function resolveSearchEngine() {
+  const raw = (localStorage.getItem("engine") || "").trim();
+  if (
+    !raw ||
+    raw.includes("google.com/search") ||
+    raw.includes("search.brave.com") ||
+    raw.includes("duckduckgo.com")
+  ) {
+    return "https://search.yahoo.co.jp/search?p=";
   }
+  return raw;
 }
 
 const form = document.getElementById("fv");
@@ -371,7 +400,7 @@ if (form && input) {
   form.addEventListener("submit", async event => {
     event.preventDefault();
     try {
-      if (xl) await processUrl(input.value, "");
+      if (isInsideTabsView()) await processUrl(input.value, "");
       else await processUrl(input.value, "/interstellar/d");
     } catch {
       await processUrl(input.value, "/interstellar/d");
@@ -426,8 +455,7 @@ async function getPxyUrl(url) {
 async function processUrl(value, path) {
   let url = (value || "").trim();
   if (!url) return;
-  const engine = localStorage.getItem("engine");
-  const searchUrl = engine ? engine : "https://search.brave.com/search?q=";
+  const searchUrl = resolveSearchEngine();
 
   if (!isUrl(url)) {
     url = searchUrl + encodeURIComponent(url);
@@ -480,7 +508,7 @@ function handleInitialQuery() {
       const cleanUrl = window.location.pathname;
       window.history.replaceState({}, "", cleanUrl);
       setTimeout(() => {
-        if (xl) void processUrl(initial, "");
+        if (isInsideTabsView()) void processUrl(initial, "");
         else void processUrl(initial, "/interstellar/d");
       }, 60);
     }
@@ -521,9 +549,25 @@ function useScramjetPxy() {
   return p === "sj";
 }
 
+function resolveSearchEngine() {
+  const raw = (localStorage.getItem("engine") || "").trim();
+  if (
+    !raw ||
+    raw.includes("google.com/search") ||
+    raw.includes("search.brave.com") ||
+    raw.includes("duckduckgo.com")
+  ) {
+    return "https://search.yahoo.co.jp/search?p=";
+  }
+  return raw;
+}
+
 async function ensureTransportReady() {
   try {
     if ("serviceWorker" in navigator) {
+      if (typeof navigator.serviceWorker.startMessages === "function") {
+        try { navigator.serviceWorker.startMessages(); } catch (e) {}
+      }
       await navigator.serviceWorker
         .register("/interstellar/sw.js?v=2025-04-15", { scope: "/interstellar/" })
         .catch(() =>
@@ -644,7 +688,7 @@ document.addEventListener("DOMContentLoaded", () => {
       event.preventDefault();
       const formValue = input.value.trim();
       if (!formValue) return;
-      const engine = localStorage.getItem("engine") || "https://search.brave.com/search?q=";
+      const engine = resolveSearchEngine();
       const url = isUrl(formValue)
         ? prependHttps(formValue)
         : `${engine}${encodeURIComponent(formValue)}`;
@@ -867,6 +911,7 @@ function popout() {
   const activeIframe = document.querySelector("#frame-container iframe.active");
   if (activeIframe) {
     const newWindow = window.open("about:blank", "_blank");
+    if (newWindow) {
       const name = localStorage.getItem("name") || "Google";
       const icon =
         localStorage.getItem("icon") ||
@@ -1122,13 +1167,32 @@ async def _c1(request: Request):
         'const c = window.location.pathname === "/gt";',
         'const c = window.location.pathname === "/gt" || window.location.pathname.endsWith("/interstellar/gt");',
     )
-    text = text.replace(
-        'window.top.location.pathname === "/d"',
-        '(window.top.location.pathname === "/d" || window.top.location.pathname === "/interstellar/d")',
+    text = re.sub(
+        r"let\s+t\s*;\s*try\s*\{.*?\}\s*catch\s*\{.*?\}",
+        (
+            "let t = false;\n"
+            "try { if (window.parent && window.parent !== window && (window.parent.location.pathname === '/d' || window.parent.location.pathname === '/interstellar/d')) t = true; } catch {}\n"
+            "try { if (!t && window.top && window.top !== window && (window.top.location.pathname === '/d' || window.top.location.pathname === '/interstellar/d')) t = true; } catch {}"
+        ),
+        text,
+        count=1,
+        flags=re.DOTALL,
     )
     text = text.replace(
-        'window.parent.location.pathname === "/d"',
-        '(window.parent.location.pathname === "/d" || window.parent.location.pathname === "/interstellar/d")',
+        'saveToLocal(Selected);\n    window.location.href = "rx";\n    if (t) {\n      window.location.href = Selected;\n    }',
+        'const localPath = (Selected && Selected.startsWith("/") && !Selected.startsWith("/interstellar/")) ? ("/interstellar" + Selected) : Selected;\n    saveToLocal(localPath);\n    if (t) {\n      window.location.href = localPath;\n    } else {\n      window.location.href = "/interstellar/d";\n    }',
+    )
+    text = text.replace(
+        'go(Selected);\n    if (t) {\n      blank(Selected);\n    }',
+        'if (t) {\n      blank(Selected);\n    } else {\n      go(Selected);\n    }',
+    )
+    text = text.replace(
+        "image.src = app.image;",
+        'image.src = (app.image && app.image.startsWith("/") && !app.image.startsWith("/interstellar/")) ? ("/interstellar" + app.image) : app.image;',
+    )
+    text = text.replace(
+        'const appsContainer = document.getElementById("apps-container");\n    appsContainer.appendChild(pinnedApps);\n    appsContainer.appendChild(nonPinnedApps);',
+        'const appsContainer = document.getElementById("apps-container");\n    if (appsContainer) {\n      appsContainer.appendChild(pinnedApps);\n      appsContainer.appendChild(nonPinnedApps);\n    }',
     )
     text = text.replace('"/assets/', '"/interstellar/assets/')
     text = text.replace('window.location.href = "rx";', 'window.location.href = "/interstellar/d";')
@@ -1168,14 +1232,19 @@ async def _m1(request: Request):
         text,
         flags=re.DOTALL | re.IGNORECASE,
     )
-    text = text.replace(
-        'window.top.location.pathname === "/d"',
-        '(window.top.location.pathname === "/d" || window.top.location.pathname === "/interstellar/d")',
+    text = re.sub(
+        r"let\s+qp\s*;\s*try\s*\{.*?\}\s*catch\s*\{.*?\}",
+        (
+            "let qp = false;\n"
+            "try { if (window.parent && window.parent !== window && (window.parent.location.pathname === '/d' || window.parent.location.pathname === '/interstellar/d')) qp = true; } catch {}\n"
+            "try { if (!qp && window.top && window.top !== window && (window.top.location.pathname === '/d' || window.top.location.pathname === '/interstellar/d')) qp = true; } catch {}"
+        ),
+        text,
+        count=1,
+        flags=re.DOTALL,
     )
-    text = text.replace(
-        'window.parent.location.pathname === "/d"',
-        '(window.parent.location.pathname === "/d" || window.parent.location.pathname === "/interstellar/d")',
-    )
+    text = text.replace("icon.setAttribute(", "icon?.setAttribute(")
+    text = text.replace("name.textContent = FinalNameValue;", "if (name) name.textContent = FinalNameValue;")
     text = text.replace('href="/./"', 'href="/interstellar/"')
     text = text.replace('href="/./a"', 'href="/interstellar/a"')
     text = text.replace('href="/./b"', 'href="/interstellar/b"')
