@@ -1,15 +1,14 @@
 from html import escape
 import json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from fastapi.responses import HTMLResponse
 from hub_data import enrich_service
+
 try:
     from current_activity import build_snapshot_payload
 except Exception:
     build_snapshot_payload = None
-
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 JST = ZoneInfo("Asia/Tokyo")
 
@@ -95,13 +94,13 @@ def render_home(proxies, request=None):
         acc_num = int(svc_counts.get(name_raw) or 0)
         status_cls = "service-status active" if ccu_num > 0 else "service-status"
         cards_html.append(
-            f'''<a class="card service" href="{path_esc}" data-service="{name_esc}" data-name="{name_esc}" '''
+            f'''<a class="card service md-ripple-surface" href="{path_esc}" data-service="{name_esc}" data-name="{name_esc}" '''
             f'''data-path="{path_esc}" data-category="{cat_esc}" data-keywords="{kw_esc}">'''
             f'''<div class="card-head">'''
             f'''<div class="card-title"><b>{name_esc}</b><span class="cat-tag">{cat_label_esc}</span></div>'''
-            f'''<button type="button" class="fav-btn" data-fav="{name_esc}" title="固定" aria-label="固定">☆</button>'''
+            f'''<button type="button" class="fav-btn" data-fav="{name_esc}" title="ピン留め" aria-label="{name_esc} を固定">☆</button>'''
             f'''</div>'''
-            f'''<div class="card-sub">{desc_esc} <span class="card-path">{path_esc}</span></div>'''
+            f'''<div class="card-sub"><span>{desc_esc}</span><span class="card-path">{path_esc}</span></div>'''
             f'''<div class="card-foot">'''
             f'''<span class="{status_cls}" data-status-for="{name_esc}"><span class="status-dot"></span>同接 {ccu_num:,}</span>'''
             f'''<span class="service-access-count" data-count-for="{name_esc}">{acc_num:,}回</span>'''
@@ -209,7 +208,11 @@ def render_home(proxies, request=None):
             f'''<div class="rank-bar-bg"><div class="rank-bar-fill" style="width:{bar_w}%"></div></div>'''
             f'''</div>'''
         )
-    initial_ranking_html = "".join(rank_rows_html) if rank_rows_html else '<div style="color:var(--muted);font-size:12px;padding:6px 0">過去5日間の通信データなし</div>'
+    initial_ranking_html = (
+        "".join(rank_rows_html)
+        if rank_rows_html
+        else '<div class="empty-state-inline">過去5日間の通信データなし</div>'
+    )
 
     recent_events_html = []
     events_list = (initial_snapshot or {}).get("events") or []
@@ -225,356 +228,651 @@ def render_home(proxies, request=None):
             f'''<span class="recent-time">{time_str}</span>'''
             f'''</div>'''
         )
-    initial_recent_html = "".join(recent_events_html) if recent_events_html else '<div style="color:var(--muted);font-size:12px;padding:6px 0">履歴なし</div>'
+    initial_recent_html = (
+        "".join(recent_events_html)
+        if recent_events_html
+        else '<div class="empty-state-inline">履歴なし</div>'
+    )
 
     html = f"""<!doctype html>
-<html lang="ja">
+<html lang="ja" data-theme="light">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#ffffff">
-<title>Google</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f8fafd">
+<title>Google School Hub</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
+/* ==========================================================================
+   School Hub Home — Material Design 3 & M3 Expressive Architecture
+   Zero hardcoded component colors; 100% M3 Token-Driven Light & Dark Mode
+   ========================================================================== */
+
 :root {{
-  --bg: #f8f9fa;
-  --surface: #ffffff;
-  --surface-2: #f1f3f4;
-  --surface-hover: #e8f0fe;
-  --text: #202124;
-  --muted: #5f6368;
-  --border: #dadce0;
-  --border-subtle: #e8eaed;
-  --accent: #1a73e8;
-  --accent-hover: #1557b0;
-  --accent-soft: #e8f0fe;
-  --green: #188038;
-  --green-soft: #e6f4ea;
-  --radius: 16px;
-  --radius-sm: 10px;
-  --shadow-sm: 0 1px 2px rgba(60,64,67,0.12), 0 1px 3px 1px rgba(60,64,67,0.06);
-  --shadow-md: 0 1px 6px rgba(32,33,36,0.18);
+  /* Legacy aliases mapped strictly to M3 tokens for compatibility */
+  --bg: var(--md-sys-color-surface);
+  --surface: var(--md-sys-color-surface-container-lowest);
+  --surface-2: var(--md-sys-color-surface-container);
+  --surface-hover: var(--md-sys-color-surface-container-high);
+  --text: var(--md-sys-color-on-surface);
+  --muted: var(--md-sys-color-on-surface-variant);
+  --border: var(--md-sys-color-outline-variant);
+  --border-subtle: var(--md-sys-color-surface-container-high);
+  --accent: var(--md-sys-color-primary);
+  --accent-hover: var(--md-sys-color-on-primary-container);
+  --accent-soft: var(--md-sys-color-primary-container);
+  --green: var(--md-sys-color-tertiary);
+  --green-soft: var(--md-sys-color-tertiary-container);
+  --radius: var(--md-sys-shape-corner-large);
+  --radius-sm: var(--md-sys-shape-corner-medium);
+  --shadow-sm: var(--md-sys-elevation-1);
+  --shadow-md: var(--md-sys-elevation-2);
 }}
-[data-theme="dark"] {{
-  --bg: #131314;
-  --surface: #1e1f20;
-  --surface-2: #282a2c;
-  --surface-hover: #303134;
-  --text: #e8eaed;
-  --muted: #9aa0a6;
-  --border: #3c4043;
-  --border-subtle: #2d2e31;
-  --accent: #8ab4f8;
-  --accent-hover: #aecbfa;
-  --accent-soft: rgba(138,180,248,0.16);
-  --green: #81c995;
-  --green-soft: rgba(129,201,149,0.16);
-  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
-  --shadow-md: 0 2px 8px rgba(0,0,0,0.5);
+
+*, *::before, *::after {{
+  box-sizing: border-box;
+  touch-action: manipulation;
 }}
-* {{ box-sizing: border-box; touch-action: manipulation; }}
+
 html, body {{
   margin: 0;
   min-height: 100%;
-  font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--md-sys-typescale-font-plain);
+  background-color: var(--md-sys-color-surface);
+  color: var(--md-sys-color-on-surface);
   line-height: 1.5;
   font-size: 14px;
-  touch-action: manipulation;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
 }}
-a {{ color: inherit; text-decoration: none; }}
-button, input, textarea {{ font: inherit; }}
 
-/* Google 4-Color Top Accent Bar */
-.google-color-bar {{
-  height: 4px;
-  width: 100%;
-  background: linear-gradient(90deg, #4285F4 0% 25%, #EA4335 25% 50%, #FBBC05 50% 75%, #34A853 75% 100%);
+a {{
+  color: inherit;
+  text-decoration: none;
 }}
 
-/* Header */
-.topbar {{
-  background: var(--surface);
-  border-bottom: 1px solid var(--border);
+button, input, textarea, select {{
+  font: inherit;
+}}
+
+/* Accessibility Skip Link */
+.skip-link {{
+  position: absolute;
+  top: -60px;
+  left: var(--md-space-4);
+  z-index: 9999;
+  padding: var(--md-space-2) var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-small);
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  font-weight: 600;
+  transition: top var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.skip-link:focus {{
+  top: var(--md-space-3);
+}}
+
+/* Subtle M3 Top Accent Bar */
+.google-color-bar {{
+  height: 3px;
+  width: 100%;
+  background: linear-gradient(
+    90deg,
+    var(--md-sys-color-primary) 0% 35%,
+    var(--md-sys-color-secondary) 35% 70%,
+    var(--md-sys-color-tertiary) 70% 100%
+  );
+}}
+
+/* --- App Shell Layout (Navigation Rail + Top App Bar + Main Workspace) --- */
+.m3-app-shell {{
+  display: grid;
+  grid-template-columns: 84px minmax(0, 1fr);
+  min-height: calc(100vh - 3px);
+}}
+
+/* --- M3 Navigation Rail (Desktop & Tablet) --- */
+.m3-nav-rail {{
   position: sticky;
   top: 0;
-  z-index: 40;
+  height: 100vh;
+  background-color: var(--md-sys-color-surface-container-low);
+  border-right: 1px solid var(--md-sys-color-outline-variant);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--md-space-3) var(--md-space-2);
+  gap: var(--md-space-2);
+  z-index: 50;
+  user-select: none;
 }}
-.topbar-inner {{
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 10px 20px;
+.m3-rail-top {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--md-space-2);
+  width: 100%;
+  margin-bottom: var(--md-space-2);
+}}
+.m3-rail-fab {{
+  width: 56px;
+  height: 56px;
+  border-radius: var(--md-sys-shape-corner-large);
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  cursor: pointer;
+  box-shadow: var(--md-sys-elevation-1);
+  transition:
+    box-shadow var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.m3-rail-fab:hover {{
+  box-shadow: var(--md-sys-elevation-2);
+  transform: translateY(-1px);
+}}
+.m3-rail-destinations {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--md-space-2);
+  width: 100%;
+  flex: 1;
+}}
+.m3-rail-item {{
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--md-space-1);
+  padding: var(--md-space-1) 0;
+  color: var(--md-sys-color-on-surface-variant);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-decoration: none;
+}}
+.m3-rail-pill {{
+  width: 56px;
+  height: 32px;
+  border-radius: var(--md-sys-shape-corner-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.m3-rail-item:hover .m3-rail-pill {{
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}}
+.m3-rail-item.active .m3-rail-pill,
+.m3-rail-item[aria-current="page"] .m3-rail-pill {{
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}}
+.m3-rail-item.active,
+.m3-rail-item[aria-current="page"] {{
+  color: var(--md-sys-color-on-surface);
+  font-weight: 600;
+}}
+.m3-rail-label {{
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.2px;
+  text-align: center;
+}}
+
+/* --- M3 Modal Navigation Drawer --- */
+.m3-drawer-scrim {{
+  position: fixed;
+  inset: 0;
+  background-color: var(--md-sys-color-scrim);
+  backdrop-filter: blur(2px);
+  z-index: 90;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--md-sys-motion-duration-medium1) var(--md-sys-motion-easing-standard);
+}}
+.m3-drawer-scrim.open {{
+  opacity: 1;
+  pointer-events: auto;
+}}
+.m3-nav-drawer {{
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 300px;
+  max-width: 86vw;
+  background-color: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface);
+  border-top-right-radius: var(--md-sys-shape-corner-large);
+  border-bottom-right-radius: var(--md-sys-shape-corner-large);
+  box-shadow: var(--md-sys-elevation-3);
+  z-index: 100;
+  padding: var(--md-space-4) var(--md-space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--md-space-1);
+  transform: translateX(-104%);
+  transition: transform var(--md-sys-motion-duration-medium2) var(--md-sys-motion-easing-emphasized);
+  overflow-y: auto;
+}}
+.m3-nav-drawer.open {{
+  transform: translateX(0);
+}}
+.m3-drawer-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  padding: var(--md-space-2) var(--md-space-4) var(--md-space-3);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  margin-bottom: var(--md-space-2);
+}}
+.m3-drawer-section-label {{
+  padding: var(--md-space-3) var(--md-space-4) var(--md-space-1);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--md-sys-color-on-surface-variant);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}}
+.m3-drawer-link {{
+  display: flex;
+  align-items: center;
+  gap: var(--md-space-3);
+  height: 48px;
+  padding: 0 var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-full);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+  font-weight: 500;
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.m3-drawer-link:hover {{
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}}
+.m3-drawer-link.active {{
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  font-weight: 600;
+}}
+
+/* --- Main Column & Top App Bar --- */
+.m3-main-column {{
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}}
+
+.topbar {{
+  background-color: var(--md-sys-color-surface);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  transition: background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.topbar-inner {{
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: var(--md-space-3) var(--md-space-6);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
 }}
 .brand {{
-  font-weight: 700;
-  font-size: 18px;
-  letter-spacing: -0.02em;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--md-space-3);
+  flex-wrap: wrap;
 }}
 .google-wordmark {{
   display: inline-flex;
   align-items: baseline;
-  font-size: 20px;
+  font-family: var(--md-sys-typescale-font-brand);
+  font-size: 21px;
   font-weight: 700;
-  letter-spacing: -0.03em;
+  letter-spacing: -0.02em;
+  color: var(--md-sys-color-on-surface);
 }}
-.google-wordmark .g-b {{ color: #4285F4; }}
-.google-wordmark .g-r {{ color: #EA4335; }}
-.google-wordmark .g-y {{ color: #FBBC05; }}
-.google-wordmark .g-g {{ color: #34A853; }}
+.google-wordmark .g-b {{ color: var(--md-sys-color-primary); }}
+.google-wordmark .g-r {{ color: var(--md-sys-color-error); }}
+.google-wordmark .g-y {{ color: var(--md-sys-color-warning); }}
+.google-wordmark .g-g {{ color: var(--md-sys-color-tertiary); }}
 .google-wordmark .g-sub {{
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   font-size: 15px;
   font-weight: 600;
-  margin-left: 6px;
+  margin-left: var(--md-space-2);
   letter-spacing: 0;
 }}
+
 .live-badge {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--green-soft);
-  color: var(--green);
+  gap: var(--md-space-2);
+  padding: var(--md-space-1) var(--md-space-3);
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
   font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }}
 .live-dot {{
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--green);
+  width: 8px;
+  height: 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-tertiary);
 }}
+
 .topbar-right {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--md-space-2);
   flex-wrap: wrap;
 }}
 .meta-pill {{
   font-size: 12px;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   font-variant-numeric: tabular-nums;
-  padding: 4px 10px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-2);
+  padding: 6px var(--md-space-3);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-surface-container-low);
 }}
+
 .btn {{
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
+  position: relative;
+  overflow: hidden;
+  min-height: 36px;
+  padding: 0 var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+  justify-content: center;
+  gap: var(--md-space-2);
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    box-shadow var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
 .btn:hover {{
-  background: var(--surface-hover);
-  border-color: var(--accent);
+  background-color: var(--md-sys-color-surface-container-high);
+  border-color: var(--md-sys-color-primary);
+}}
+.btn:focus-visible {{
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }}
 .btn-primary {{
-  background: #1a73e8;
-  color: #ffffff;
-  border-color: #1a73e8;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  border-color: transparent;
 }}
 .btn-primary:hover {{
-  background: #1557b0;
-  color: #ffffff;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  box-shadow: var(--md-sys-elevation-1);
+  filter: brightness(1.06);
+}}
+.btn-tonal {{
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-color: transparent;
+}}
+.btn-tonal:hover {{
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
 }}
 
-/* Main Layout */
+/* --- Main Content Container --- */
 .container {{
-  max-width: 1200px;
+  width: 100%;
+  max-width: 1280px;
   margin: 0 auto;
-  padding: 18px 20px 48px;
+  padding: var(--md-space-5) var(--md-space-6) var(--md-space-14);
 }}
 
-/* Google Search Inspired Control Panel */
+/* --- M3 Expressive Search & Filter Control Panel --- */
 .control-panel {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 16px 18px;
-  margin-bottom: 16px;
-  box-shadow: var(--shadow-sm);
+  background-color: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-extra-large);
+  padding: var(--md-space-5) var(--md-space-6);
+  margin-bottom: var(--md-space-5);
+  box-shadow: var(--md-sys-elevation-1);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--md-space-4);
 }}
 .omnibox {{
   display: flex;
-  gap: 10px;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
   align-items: center;
 }}
 .search-wrap {{
-  flex: 1 1 300px;
+  flex: 1 1 320px;
   position: relative;
   display: flex;
   align-items: center;
 }}
 .search-icon {{
   position: absolute;
-  left: 14px;
-  color: var(--muted);
-  font-size: 14px;
+  left: var(--md-space-4);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 16px;
   pointer-events: none;
 }}
 #search {{
   width: 100%;
-  padding: 10px 64px 10px 38px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 14px;
+  min-height: 48px;
+  padding: var(--md-space-2) 72px var(--md-space-2) 44px;
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
+  font-size: 15px;
   outline: none;
-  box-shadow: 0 1px 4px rgba(32,33,36,0.1);
-  transition: border-color 0.15s, box-shadow 0.15s;
+  box-shadow: var(--md-sys-elevation-1);
+  transition:
+    border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    box-shadow var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+#search::placeholder {{
+  color: var(--md-sys-color-on-surface-variant);
 }}
 #search:focus {{
-  border-color: var(--accent);
-  box-shadow: 0 1px 6px rgba(26,115,232,0.28);
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary-container), var(--md-sys-elevation-2);
 }}
 .search-clear {{
   position: absolute;
-  right: 34px;
+  right: 40px;
   border: 0;
   background: transparent;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
-  font-size: 15px;
-  padding: 2px 6px;
+  font-size: 16px;
+  padding: var(--md-space-1) var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-full);
   display: none;
+}}
+.search-clear:hover {{
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
 }}
 .search-kbd {{
   position: absolute;
-  right: 12px;
+  right: var(--md-space-3);
   font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  color: var(--muted);
+  padding: 2px 7px;
+  border-radius: var(--md-sys-shape-corner-extra-small);
+  background-color: var(--md-sys-color-surface-container-high);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface-variant);
   pointer-events: none;
+  font-family: var(--md-sys-typescale-font-mono);
 }}
+
 .quick-actions {{
   display: flex;
-  gap: 8px;
+  gap: var(--md-space-2);
   flex-wrap: wrap;
 }}
+
 .filter-row {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
 }}
 .tabs {{
   display: flex;
-  gap: 6px;
+  gap: var(--md-space-2);
   flex-wrap: wrap;
 }}
 .tab-btn {{
-  padding: 6px 14px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
+  position: relative;
+  overflow: hidden;
+  min-height: 36px;
+  padding: 0 var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-small);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  background-color: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface-variant);
   font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--md-space-1);
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
 .tab-btn:hover {{
-  color: var(--text);
-  background: var(--surface-2);
+  color: var(--md-sys-color-on-surface);
+  background-color: var(--md-sys-color-surface-container-high);
 }}
 .tab-btn.active {{
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: var(--accent);
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  border-color: transparent;
 }}
 .tab-count {{
   font-size: 11.5px;
   opacity: 0.85;
-  margin-left: 3px;
+  margin-left: 2px;
 }}
+
 .recent-bar {{
   display: none;
   align-items: center;
-  gap: 6px;
+  gap: var(--md-space-2);
   flex-wrap: wrap;
   font-size: 12px;
 }}
-.recent-bar.visible {{ display: flex; }}
-.recent-label {{ color: var(--muted); font-weight: 500; }}
+.recent-bar.visible {{
+  display: flex;
+}}
+.recent-label {{
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 600;
+}}
 .recent-chip {{
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
+  padding: var(--md-space-1) var(--md-space-3);
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface);
   font-size: 12px;
   font-weight: 500;
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
-.recent-chip:hover {{ border-color: var(--accent); color: var(--accent); }}
+.recent-chip:hover {{
+  border-color: var(--md-sys-color-primary);
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}}
 
-/* Service Grid (Google Material 3 Cards) */
+/* --- Service Grid (Material 3 Elevated/Outlined Interactive Cards) --- */
 .grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(256px, 1fr));
+  gap: var(--md-space-4);
 }}
 .card {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
+  position: relative;
+  overflow: hidden;
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: var(--md-space-4) var(--md-space-5);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  box-shadow: var(--shadow-sm);
-  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+  gap: var(--md-space-2);
+  box-shadow: var(--md-sys-elevation-1);
+  transition:
+    transform var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    box-shadow var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
 .card:hover {{
-  border-color: var(--accent);
-  box-shadow: var(--shadow-md);
-  transform: translateY(-1px);
+  border-color: var(--md-sys-color-primary);
+  background-color: var(--md-sys-color-surface-container-low);
+  box-shadow: var(--md-sys-elevation-2);
+  transform: translateY(-2px);
+}}
+.card:focus-visible {{
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
 }}
 .card-head {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--md-space-2);
 }}
 .card-title {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--md-space-2);
   min-width: 0;
 }}
 .card-title b {{
-  font-size: 15px;
+  font-family: var(--md-sys-typescale-font-brand);
+  font-size: 16px;
   font-weight: 700;
-  color: var(--text);
+  color: var(--md-sys-color-on-surface);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -582,50 +880,55 @@ button, input, textarea {{ font: inherit; }}
 .cat-tag {{
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--muted);
-  border: 1px solid var(--border-subtle);
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-small);
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
   white-space: nowrap;
 }}
 .fav-btn {{
-  width: 26px;
-  height: 26px;
-  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--md-sys-shape-corner-full);
   border: 1px solid transparent;
   background: transparent;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   cursor: pointer;
   padding: 0;
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
-.fav-btn:hover, .fav-btn.pinned {{
-  color: #fbbc04;
-  background: var(--surface-2);
+.fav-btn:hover,
+.fav-btn.pinned {{
+  color: var(--md-sys-color-warning);
+  background-color: var(--md-sys-color-warning-container);
 }}
 .card-sub {{
-  color: var(--muted);
-  font-size: 12.5px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 13px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: var(--md-space-2);
   line-height: 1.45;
 }}
 .card-path {{
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--md-sys-typescale-font-mono);
   font-size: 11px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--surface-2);
-  opacity: 0.85;
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-extra-small);
+  background-color: var(--md-sys-color-surface-container);
+  color: var(--md-sys-color-on-surface-variant);
+  flex-shrink: 0;
 }}
 .card-foot {{
   margin-top: auto;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-subtle);
+  padding-top: var(--md-space-2);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -635,118 +938,146 @@ button, input, textarea {{ font: inherit; }}
 .service-status {{
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--muted);
+  gap: 6px;
+  color: var(--md-sys-color-on-surface-variant);
 }}
 .status-dot {{
   width: 7px;
   height: 7px;
-  border-radius: 50%;
-  background: #9aa0a6;
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-outline);
 }}
 .service-status.active {{
-  color: var(--green);
-  font-weight: 600;
+  color: var(--md-sys-color-tertiary);
+  font-weight: 700;
 }}
 .service-status.active .status-dot {{
-  background: var(--green);
+  background-color: var(--md-sys-color-tertiary);
 }}
 .service-access-count {{
-  color: var(--muted);
-  font-weight: 500;
-}}
-.empty-search {{
-  display: none;
-  padding: 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--muted);
-  font-size: 13.5px;
-  margin-top: 10px;
-  text-align: center;
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 600;
 }}
 
-/* Statistics Section */
+.empty-search {{
+  display: none;
+  padding: var(--md-space-8) var(--md-space-6);
+  background-color: var(--md-sys-color-surface-container-low);
+  border: 1px dashed var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-large);
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 14px;
+  margin-top: var(--md-space-4);
+  text-align: center;
+}}
+.empty-state-inline {{
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 12.5px;
+  padding: var(--md-space-2) 0;
+}}
+
+/* --- Statistics & Real-time Telemetry Section --- */
 .stats-section {{
-  margin-top: 22px;
+  margin-top: var(--md-space-8);
 }}
 .section-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
-  margin-bottom: 10px;
+  margin-bottom: var(--md-space-4);
 }}
 .section-title-group {{
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
 }}
 .section-title-group h2 {{
   margin: 0;
-  font-size: 16px;
+  font-family: var(--md-sys-typescale-font-brand);
+  font-size: 18px;
   font-weight: 700;
+  color: var(--md-sys-color-on-surface);
 }}
 .section-title-group span {{
   font-size: 12px;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
 }}
+
+/* M3 Segmented Range Switch */
 .range-switch {{
   display: inline-flex;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 3px;
-  gap: 3px;
+  background-color: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-full);
+  padding: 2px;
+  gap: 2px;
 }}
 .range-btn {{
   border: 0;
   background: transparent;
-  color: var(--muted);
-  padding: 4px 12px;
-  border-radius: 999px;
-  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
+  padding: 6px var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-full);
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+  transition:
+    background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.range-btn:hover:not(.active) {{
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
 }}
 .range-btn.active {{
-  background: #1a73e8;
-  color: #fff;
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
 }}
 
-/* KPI Strip */
+/* KPI Strip (M3 Surface Containers) */
 .kpi-grid {{
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: var(--md-space-3);
+  margin-bottom: var(--md-space-3);
 }}
 .kpi-card {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
-  box-shadow: var(--shadow-sm);
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: var(--md-space-4);
+  box-shadow: var(--md-sys-elevation-1);
 }}
 .kpi-label {{
-  font-size: 11.5px;
-  color: var(--muted);
+  font-size: 12px;
+  color: var(--md-sys-color-on-surface-variant);
   font-weight: 600;
   display: flex;
   justify-content: space-between;
+  align-items: center;
+}}
+.kpi-tag {{
+  font-size: 10.5px;
+  padding: 1px var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  font-weight: 700;
 }}
 .kpi-value {{
-  font-size: 20px;
+  font-family: var(--md-sys-typescale-font-brand);
+  font-size: 22px;
   font-weight: 700;
-  margin: 4px 0 2px;
+  color: var(--md-sys-color-on-surface);
+  margin: var(--md-space-1) 0 2px;
   font-variant-numeric: tabular-nums;
 }}
 .kpi-sub {{
   font-size: 11.5px;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   font-variant-numeric: tabular-nums;
 }}
 
@@ -754,38 +1085,39 @@ button, input, textarea {{ font: inherit; }}
 .charts-grid {{
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: var(--md-space-3);
+  margin-bottom: var(--md-space-3);
 }}
 .chart-card {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: var(--md-space-4);
   position: relative;
-  box-shadow: var(--shadow-sm);
+  box-shadow: var(--md-sys-elevation-1);
 }}
 .chart-head {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 6px;
+  gap: var(--md-space-2);
+  margin-bottom: var(--md-space-2);
 }}
 .chart-title {{
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
+  color: var(--md-sys-color-on-surface);
   margin: 0;
 }}
 .chart-badge {{
   font-size: 12px;
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   font-variant-numeric: tabular-nums;
 }}
 .canvas-wrap {{
   position: relative;
   width: 100%;
-  height: 160px;
+  height: 168px;
 }}
 .chart-canvas {{
   display: block;
@@ -796,112 +1128,140 @@ button, input, textarea {{ font: inherit; }}
 .chart-tooltip {{
   position: absolute;
   pointer-events: none;
-  background: rgba(32, 33, 36, 0.94);
-  color: #f8f9fa;
-  padding: 5px 10px;
-  border-radius: 6px;
+  background-color: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  padding: var(--md-space-1) var(--md-space-3);
+  border-radius: var(--md-sys-shape-corner-small);
   font-size: 11.5px;
   white-space: nowrap;
   opacity: 0;
-  transition: opacity 0.1s;
+  transition: opacity var(--md-sys-motion-duration-short1);
   z-index: 10;
+  box-shadow: var(--md-sys-elevation-2);
 }}
 
-/* Bottom Breakdown */
+/* Bottom Breakdown & Data Panels */
 .bottom-grid {{
   display: grid;
   grid-template-columns: 1.2fr 1fr;
-  gap: 10px;
-  margin-top: 10px;
+  gap: var(--md-space-3);
+  margin-top: var(--md-space-3);
 }}
 .panel-card {{
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 12px 14px;
-  box-shadow: var(--shadow-sm);
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: var(--md-space-4) var(--md-space-5);
+  box-shadow: var(--md-sys-elevation-1);
 }}
 .panel-title {{
-  margin: 0 0 8px;
-  font-size: 13px;
+  margin: 0 0 var(--md-space-3);
+  font-size: 14px;
   font-weight: 700;
+  color: var(--md-sys-color-on-surface);
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: var(--md-space-2);
+}}
+.panel-subtitle {{
+  color: var(--md-sys-color-on-surface-variant);
+  font-weight: 400;
+  font-size: 12px;
 }}
 .rank-row {{
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-subtle);
+  padding: var(--md-space-2) 0;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }}
-.rank-row:last-child {{ border-bottom: 0; }}
+.rank-row:last-child {{
+  border-bottom: 0;
+}}
 .rank-top {{
   display: flex;
   align-items: center;
   justify-content: space-between;
   font-size: 12.5px;
-  margin-bottom: 4px;
-  gap: 8px;
+  margin-bottom: var(--md-space-1);
+  gap: var(--md-space-2);
   flex-wrap: wrap;
 }}
 .rank-name-wrap {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--md-space-2);
   flex-wrap: wrap;
+}}
+.rank-url-link {{
+  color: var(--md-sys-color-primary);
+  font-weight: 600;
+}}
+.rank-url-link:hover {{
+  text-decoration: underline;
 }}
 .rank-badge {{
   font-size: 11px;
   font-weight: 700;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--muted);
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
 }}
-.rank-badge.rank-1 {{ background: #fef7e0; color: #b06000; }}
-.rank-badge.rank-2 {{ background: #e8f0fe; color: #1a73e8; }}
-.rank-badge.rank-3 {{ background: #fce8e6; color: #c5221f; }}
+.rank-badge.rank-1 {{
+  background-color: var(--md-sys-color-warning-container);
+  color: var(--md-sys-color-on-warning-container);
+}}
+.rank-badge.rank-2 {{
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+}}
+.rank-badge.rank-3 {{
+  background-color: var(--md-sys-color-error-container);
+  color: var(--md-sys-color-on-error-container);
+}}
 .peer-status-badge {{
   font-size: 11px;
   font-weight: 600;
-  padding: 1px 7px;
-  border-radius: 999px;
+  padding: 2px var(--md-space-2);
+  border-radius: var(--md-sys-shape-corner-full);
 }}
 .peer-status-badge.online {{
-  background: var(--green-soft);
-  color: var(--green);
+  background-color: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
 }}
 .peer-status-badge.standby {{
-  background: var(--surface-2);
-  color: var(--muted);
+  background-color: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
 }}
-.rank-name {{ font-weight: 600; }}
+.rank-name {{
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+}}
 .rank-metrics {{
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--md-space-2);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }}
 .rank-ccu-pill {{
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
 }}
 .rank-ccu-pill.active {{
-  color: var(--green);
+  color: var(--md-sys-color-tertiary);
   font-weight: 700;
 }}
 .rank-bar-bg {{
   width: 100%;
-  height: 5px;
-  border-radius: 999px;
-  background: var(--surface-2);
+  height: 6px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-surface-container-high);
   overflow: hidden;
 }}
 .rank-bar-fill {{
   height: 100%;
-  border-radius: 999px;
-  background: #1a73e8;
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-primary);
 }}
 .recent-list {{
   display: flex;
@@ -911,50 +1271,57 @@ button, input, textarea {{ font: inherit; }}
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: var(--md-space-2);
+  padding: var(--md-space-2) 0;
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
   font-size: 12.5px;
 }}
-.recent-row:last-child {{ border-bottom: 0; }}
-.recent-svc {{ font-weight: 600; }}
+.recent-row:last-child {{
+  border-bottom: 0;
+}}
+.recent-svc {{
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface);
+}}
 .recent-time {{
-  color: var(--muted);
+  color: var(--md-sys-color-on-surface-variant);
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }}
+
+/* M3 Snackbar / Toast */
 .toast {{
   position: fixed;
-  right: 16px;
-  bottom: 16px;
+  right: var(--md-space-5);
+  bottom: var(--md-space-5);
   z-index: 100;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: #202124;
-  color: #f8f9fa;
-  font-size: 12.5px;
+  padding: var(--md-space-3) var(--md-space-5);
+  border-radius: var(--md-sys-shape-corner-small);
+  background-color: var(--md-sys-color-inverse-surface);
+  color: var(--md-sys-color-inverse-on-surface);
+  font-size: 13px;
   font-weight: 500;
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--md-sys-elevation-3);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.15s;
+  transform: translateY(8px);
+  transition:
+    opacity var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard),
+    transform var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
-.toast.show {{ opacity: 1; }}
-
-@media (max-width: 820px) {{
-  .kpi-grid {{ grid-template-columns: repeat(2, 1fr); }}
-  .charts-grid {{ grid-template-columns: 1fr; }}
-  .bottom-grid {{ grid-template-columns: 1fr; }}
+.toast.show {{
+  opacity: 1;
+  transform: translateY(0);
 }}
 
-/* Hub Embedded OpenChat Section */
+/* --- Hub Embedded OpenChat Section (M3 Adaptive Surface Container) --- */
 .hub-chat-section {{
-  margin-top: 22px;
-  background: #0d1017 !important;
-  border: 1px solid #1e293b !important;
-  border-radius: var(--radius);
+  margin-top: var(--md-space-8);
+  background-color: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-extra-large);
   overflow: hidden;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
+  box-shadow: var(--md-sys-elevation-2);
   display: flex;
   flex-direction: column;
 }}
@@ -962,74 +1329,75 @@ button, input, textarea {{ font: inherit; }}
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px;
-  background: #111827 !important;
-  border-bottom: 1px solid #1e293b !important;
+  padding: var(--md-space-4) var(--md-space-5);
+  background-color: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
   flex-wrap: wrap;
-  gap: 10px;
+  gap: var(--md-space-3);
 }}
 .hub-chat-title-wrap {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--md-space-3);
   flex-wrap: wrap;
 }}
 .hub-chat-badge {{
-  background: #1a73e8;
-  color: #fff;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
   font-size: 11px;
   font-weight: 700;
-  padding: 3px 9px;
-  border-radius: 999px;
+  padding: 3px var(--md-space-3);
+  border-radius: var(--md-sys-shape-corner-full);
   letter-spacing: 0.03em;
 }}
 .hub-chat-title {{
   margin: 0;
+  font-family: var(--md-sys-typescale-font-brand);
   font-size: 16px;
   font-weight: 700;
-  color: #f8fafc !important;
+  color: var(--md-sys-color-on-surface);
 }}
 .hub-chat-sub {{
   font-size: 12px;
-  color: #cbd5e1 !important;
+  color: var(--md-sys-color-on-surface-variant);
 }}
 .hub-chat-meta-right {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--md-space-3);
+  flex-wrap: wrap;
 }}
 .hub-status-pill {{
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   font-size: 12px;
-  color: #4ade80;
+  color: var(--md-sys-color-tertiary);
   font-weight: 600;
 }}
 .hub-status-dot {{
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #22c55e;
-  box-shadow: 0 0 6px #22c55e;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background-color: var(--md-sys-color-tertiary);
 }}
 .hub-status-dot.reconnecting {{
-  background: #f59e0b;
-  box-shadow: 0 0 6px #f59e0b;
+  background-color: var(--md-sys-color-warning);
 }}
 .hub-my-id-btn {{
   font-size: 12px;
   font-weight: 700;
-  color: #8ab4f8;
-  background: rgba(138, 180, 248, 0.14);
-  border: 1px solid rgba(138, 180, 248, 0.35);
-  padding: 4px 10px;
-  border-radius: 999px;
+  color: var(--md-sys-color-on-secondary-container);
+  background-color: var(--md-sys-color-secondary-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  padding: 4px var(--md-space-3);
+  border-radius: var(--md-sys-shape-corner-full);
   cursor: pointer;
-  transition: all 0.15s;
+  transition: background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
 .hub-my-id-btn:hover {{
-  background: rgba(138, 180, 248, 0.24);
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
 }}
 .hub-chat-body-wrapper {{
   position: relative;
@@ -1042,59 +1410,58 @@ button, input, textarea {{ font: inherit; }}
   min-height: 0 !important;
   overflow-y: scroll !important;
   overflow-x: hidden !important;
-  padding: 14px 18px;
+  padding: var(--md-space-4) var(--md-space-5);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: var(--md-space-3);
   overscroll-behavior: contain;
-  background: #0d1017 !important;
-  color: #f8fafc !important;
+  background-color: var(--md-sys-color-surface-container-lowest);
+  color: var(--md-sys-color-on-surface);
 }}
 .hub-chat-body::-webkit-scrollbar {{
   width: 6px;
 }}
 .hub-chat-body::-webkit-scrollbar-thumb {{
-  background: #334155;
-  border-radius: 3px;
+  background-color: var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-full);
 }}
 .hub-chat-scroll-btn {{
   position: absolute;
-  bottom: 12px;
+  bottom: var(--md-space-3);
   left: 50%;
   transform: translateX(-50%);
-  background: #1a73e8;
-  color: #fff;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
   border: none;
   font-size: 12px;
   font-weight: 700;
-  padding: 6px 16px;
-  border-radius: 999px;
+  padding: 6px var(--md-space-4);
+  border-radius: var(--md-sys-shape-corner-full);
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
-  transition: all 0.15s;
+  box-shadow: var(--md-sys-elevation-2);
+  transition: transform var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
   z-index: 5;
 }}
 .hub-chat-scroll-btn:hover {{
-  background: #1557b0;
   transform: translateX(-50%) translateY(-2px);
 }}
 .hub-chat-footer {{
-  padding: 12px 16px;
-  background: #111827 !important;
-  border-top: 1px solid #1e293b !important;
+  padding: var(--md-space-3) var(--md-space-4);
+  background-color: var(--md-sys-color-surface-container);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
 }}
 .hub-reply-banner {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  background: rgba(26, 115, 232, 0.22) !important;
-  border: 1px solid rgba(138, 180, 248, 0.4) !important;
-  border-radius: 8px;
-  padding: 6px 10px;
-  margin-bottom: 8px;
+  gap: var(--md-space-2);
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-small);
+  padding: 6px var(--md-space-3);
+  margin-bottom: var(--md-space-2);
   font-size: 12px;
-  color: #f1f5f9 !important;
 }}
 .hub-reply-info {{
   display: flex;
@@ -1103,23 +1470,20 @@ button, input, textarea {{ font: inherit; }}
   overflow: hidden;
   white-space: nowrap;
 }}
-.hub-reply-icon {{
-  color: #8ab4f8;
-  font-weight: 700;
-}}
+.hub-reply-icon,
 .hub-reply-target {{
-  color: #8ab4f8;
+  color: var(--md-sys-color-primary);
   font-weight: 700;
 }}
 .hub-reply-text {{
-  color: #cbd5e1 !important;
+  color: var(--md-sys-color-on-primary-container);
   overflow: hidden;
   text-overflow: ellipsis;
 }}
 .hub-reply-cancel {{
   background: transparent;
   border: none;
-  color: #94a3b8;
+  color: var(--md-sys-color-on-primary-container);
   font-size: 14px;
   cursor: pointer;
 }}
@@ -1130,44 +1494,43 @@ button, input, textarea {{ font: inherit; }}
 }}
 .hub-chat-input-row {{
   display: flex;
-  gap: 8px;
+  gap: var(--md-space-2);
   position: relative;
   align-items: flex-end;
 }}
 .hub-chat-input {{
   flex: 1;
-  min-height: 40px;
+  min-height: 42px;
   max-height: 110px;
   resize: none;
-  background: rgba(255, 255, 255, 0.08) !important;
-  border: 1px solid #334155 !important;
-  border-radius: 12px;
-  padding: 9px 34px 9px 14px;
+  background-color: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline);
+  border-radius: var(--md-sys-shape-corner-medium);
+  padding: 9px 36px 9px 14px;
   font-size: 14px;
   line-height: 1.45;
-  font-family: inherit;
-  color: #f8fafc !important;
+  color: var(--md-sys-color-on-surface);
   outline: none;
-  transition: border-color 0.15s;
-  box-sizing: border-box;
+  transition: border-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
   overflow-y: auto;
 }}
 .hub-chat-input:focus {{
-  border-color: #8ab4f8 !important;
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary-container);
 }}
 .hub-chat-input::placeholder {{
-  color: #94a3b8 !important;
+  color: var(--md-sys-color-on-surface-variant);
 }}
 .hub-input-clear {{
   position: absolute;
-  right: 92px;
+  right: 96px;
   top: 11px;
-  background: #334155;
+  background-color: var(--md-sys-color-surface-container-high);
   border: none;
-  color: #cbd5e1;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
+  color: var(--md-sys-color-on-surface-variant);
+  width: 20px;
+  height: 20px;
+  border-radius: var(--md-sys-shape-corner-full);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1177,218 +1540,395 @@ button, input, textarea {{ font: inherit; }}
   z-index: 2;
 }}
 .hub-chat-send-btn {{
-  background: #1a73e8;
-  color: #fff;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
   border: none;
-  border-radius: 999px;
-  padding: 0 20px;
+  border-radius: var(--md-sys-shape-corner-full);
+  padding: 0 var(--md-space-5);
   font-size: 13.5px;
   font-weight: 700;
   cursor: pointer;
-  transition: all 0.15s;
-  height: 40px;
+  height: 42px;
   align-self: flex-end;
+  transition: box-shadow var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
 }}
 .hub-chat-send-btn:hover {{
-  background: #1557b0;
+  box-shadow: var(--md-sys-elevation-1);
+  filter: brightness(1.06);
 }}
 .hub-chat-meta {{
   display: flex;
   justify-content: space-between;
   align-items: center;
   font-size: 11.5px;
-  color: #94a3b8 !important;
+  color: var(--md-sys-color-on-surface-variant);
   padding: 0 2px;
   flex-wrap: wrap;
   gap: 6px;
 }}
+
+/* --- Mobile M3 Bottom Navigation Bar --- */
+.m3-bottom-nav {{
+  display: none;
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 68px;
+  background-color: var(--md-sys-color-surface-container);
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  z-index: 45;
+  justify-content: space-around;
+  align-items: center;
+  padding: 0 var(--md-space-2) env(safe-area-inset-bottom, 0px);
+}}
+.m3-bottom-nav-item {{
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 11px;
+  font-weight: 600;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: var(--md-space-1) 0;
+}}
+.m3-bottom-nav-pill {{
+  width: 56px;
+  height: 30px;
+  border-radius: var(--md-sys-shape-corner-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  transition: background-color var(--md-sys-motion-duration-short2) var(--md-sys-motion-easing-standard);
+}}
+.m3-bottom-nav-item.active .m3-bottom-nav-pill {{
+  background-color: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+}}
+.m3-bottom-nav-item.active {{
+  color: var(--md-sys-color-on-surface);
+}}
+
+/* --- Responsive Breakpoints (Desktop / Tablet / Smartphone) --- */
+@media (max-width: 960px) {{
+  .kpi-grid {{
+    grid-template-columns: repeat(2, 1fr);
+  }}
+  .charts-grid {{
+    grid-template-columns: 1fr;
+  }}
+  .bottom-grid {{
+    grid-template-columns: 1fr;
+  }}
+}}
+
+@media (max-width: 720px) {{
+  .m3-app-shell {{
+    grid-template-columns: 1fr;
+  }}
+  .m3-nav-rail {{
+    display: none;
+  }}
+  .m3-bottom-nav {{
+    display: flex;
+  }}
+  .topbar-inner {{
+    padding: var(--md-space-2) var(--md-space-4);
+  }}
+  .container {{
+    padding: var(--md-space-4) var(--md-space-4) 96px;
+  }}
+  .control-panel {{
+    padding: var(--md-space-4);
+    border-radius: var(--md-sys-shape-corner-large);
+  }}
+  .toast {{
+    bottom: 80px;
+  }}
+}}
 </style>
 </head>
 <body>
+<a href="#main-content" class="skip-link">メインコンテンツへスキップ</a>
 <div class="google-color-bar"></div>
-<header class="topbar">
-  <div class="topbar-inner">
-    <div class="brand">
-      <a href="/" class="google-wordmark" aria-label="Google School Hub">
-        <span class="g-b">G</span><span class="g-r">o</span><span class="g-y">o</span><span class="g-b">g</span><span class="g-g">l</span><span class="g-r">e</span>
-        <span class="g-sub">School Hub</span>
+
+<!-- M3 Modal Navigation Drawer -->
+<div class="m3-drawer-scrim" id="navDrawerScrim" aria-hidden="true"></div>
+<aside class="m3-nav-drawer" id="navDrawer" aria-label="サイトナビゲーション">
+  <div class="m3-drawer-header">
+    <span class="google-wordmark">
+      <span class="g-b">G</span><span class="g-r">o</span><span class="g-y">o</span><span class="g-b">g</span><span class="g-g">l</span><span class="g-r">e</span>
+      <span class="g-sub">School Hub</span>
+    </span>
+    <button type="button" class="md-icon-btn" id="drawerCloseBtn" aria-label="メニューを閉じる">✕</button>
+  </div>
+  <div class="m3-drawer-section-label">メインメニュー</div>
+  <a href="#services-section" class="m3-drawer-link active" data-drawer-nav="ALL">🏠 ホーム・全サービス ({counts["ALL"]})</a>
+  <a href="#services-section" class="m3-drawer-link" data-drawer-filter="Watch">📺 動画・SNS ({counts["Watch"]})</a>
+  <a href="#services-section" class="m3-drawer-link" data-drawer-filter="Games">🎮 ゲーム ({counts["Games"]})</a>
+  <a href="#services-section" class="m3-drawer-link" data-drawer-filter="Browser">🌐 ブラウザ ({counts["Browser"]})</a>
+  <a href="#services-section" class="m3-drawer-link" data-drawer-filter="FAV">★ ピン留め固定</a>
+  <div class="m3-drawer-section-label">主要アプリ・統計</div>
+  <a href="/wakame/" class="m3-drawer-link">🎬 わかめtube Plus</a>
+  <a href="/youtube-beta/" class="m3-drawer-link">▶ YouTube Beta</a>
+  <a href="/openchat" class="m3-drawer-link">💬 オープンチャット (全画面)</a>
+  <a href="#activity" class="m3-drawer-link" data-drawer-scroll="#activity">📊 統計・リアルタイム稼働</a>
+  <a href="#hub-openchat-section" class="m3-drawer-link" data-drawer-scroll="#hub-openchat-section">💭 ページ内チャットへ移動</a>
+</aside>
+
+<div class="m3-app-shell">
+  <!-- M3 Navigation Rail (Desktop & Tablet) -->
+  <nav class="m3-nav-rail" aria-label="メインナビゲーション">
+    <div class="m3-rail-top">
+      <button type="button" class="md-icon-btn" id="railMenuBtn" title="ナビゲーションドロワーを開く" aria-label="メニューを開く">☰</button>
+      <button type="button" class="m3-rail-fab" id="railSearchFab" title="検索バーにフォーカス (/)" aria-label="検索">🔍</button>
+    </div>
+    <div class="m3-rail-destinations">
+      <a href="#services-section" class="m3-rail-item active" data-rail-filter="ALL" aria-current="page">
+        <span class="m3-rail-pill">🏠</span>
+        <span class="m3-rail-label">すべて</span>
       </a>
-      <span class="live-badge" title="現在の同時接続数">
-        <span class="live-dot"></span>
-        <span>同接 <strong id="heroLiveCcu">{live_ccu:,}人</strong></span>
-      </span>
+      <a href="#services-section" class="m3-rail-item" data-rail-filter="Watch">
+        <span class="m3-rail-pill">📺</span>
+        <span class="m3-rail-label">動画</span>
+      </a>
+      <a href="#services-section" class="m3-rail-item" data-rail-filter="Games">
+        <span class="m3-rail-pill">🎮</span>
+        <span class="m3-rail-label">ゲーム</span>
+      </a>
+      <a href="#services-section" class="m3-rail-item" data-rail-filter="Browser">
+        <span class="m3-rail-pill">🌐</span>
+        <span class="m3-rail-label">ブラウザ</span>
+      </a>
+      <a href="#activity" class="m3-rail-item" data-rail-scroll="#activity">
+        <span class="m3-rail-pill">📊</span>
+        <span class="m3-rail-label">統計</span>
+      </a>
+      <a href="#hub-openchat-section" class="m3-rail-item" data-rail-scroll="#hub-openchat-section">
+        <span class="m3-rail-pill">💬</span>
+        <span class="m3-rail-label">チャット</span>
+      </a>
     </div>
-    <div class="topbar-right">
-      <a href="#hub-openchat-section" class="btn btn-primary">💬 オープンチャット</a>
-      <span class="meta-pill" id="externalSyncText">{initial_sync_str}</span>
-      <span class="meta-pill" id="jstClock">--:--:-- JST</span>
-      <button type="button" class="btn" id="themeToggle">ダーク</button>
-    </div>
+  </nav>
+
+  <!-- Main Workspace Column -->
+  <div class="m3-main-column">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand">
+          <button type="button" class="md-icon-btn" id="mobileMenuBtn" aria-label="メニューを開く" title="メニュー">☰</button>
+          <a href="/" class="google-wordmark" aria-label="Google School Hub">
+            <span class="g-b">G</span><span class="g-r">o</span><span class="g-y">o</span><span class="g-b">g</span><span class="g-g">l</span><span class="g-r">e</span>
+            <span class="g-sub">School Hub</span>
+          </a>
+          <span class="live-badge" title="現在の同時接続数">
+            <span class="live-dot"></span>
+            <span>同接 <strong id="heroLiveCcu">{live_ccu:,}人</strong></span>
+          </span>
+        </div>
+        <div class="topbar-right">
+          <a href="#hub-openchat-section" class="btn btn-primary">💬 オープンチャット</a>
+          <span class="meta-pill" id="externalSyncText">{initial_sync_str}</span>
+          <span class="meta-pill" id="jstClock">--:--:-- JST</span>
+          <button type="button" class="btn btn-tonal" id="themeToggle" aria-label="テーマを切り替え">ダーク</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="container" id="main-content">
+      <section class="control-panel" id="services-section" aria-label="検索とカテゴリフィルター">
+        <div class="omnibox">
+          <div class="search-wrap">
+            <span class="search-icon" aria-hidden="true">🔍</span>
+            <input id="search" type="search" placeholder="Google検索 / サービス名・URLを入力してEnter" autocomplete="off" aria-label="サービス検索またはURL入力">
+            <button type="button" class="search-clear" id="searchClear" title="クリア" aria-label="検索語句をクリア">×</button>
+            <span class="search-kbd" aria-hidden="true">/</span>
+          </div>
+          <div class="quick-actions">
+            <button type="button" class="btn btn-tonal" id="quickYoutube">▶ YouTube検索</button>
+            <button type="button" class="btn btn-tonal" id="quickWakame">🎬 わかめtube</button>
+            <button type="button" class="btn" id="quickBrowser">🌐 Interstellar</button>
+          </div>
+        </div>
+
+        <div class="filter-row">
+          <div class="tabs" id="categoryTabs" role="tablist" aria-label="サービスカテゴリー">
+            <button type="button" class="tab-btn active" data-filter="ALL" role="tab" aria-selected="true">すべて<span class="tab-count">({counts["ALL"]})</span></button>
+            <button type="button" class="tab-btn" data-filter="Games" role="tab" aria-selected="false">🎮 ゲーム<span class="tab-count">({counts["Games"]})</span></button>
+            <button type="button" class="tab-btn" data-filter="Watch" role="tab" aria-selected="false">📺 動画・SNS<span class="tab-count">({counts["Watch"]})</span></button>
+            <button type="button" class="tab-btn" data-filter="Browser" role="tab" aria-selected="false">🌐 ブラウザ<span class="tab-count">({counts["Browser"]})</span></button>
+            <button type="button" class="tab-btn" data-filter="FAV" role="tab" aria-selected="false">★ 固定<span class="tab-count" id="favTabCount">(0)</span></button>
+          </div>
+          <div class="recent-bar" id="recentBar">
+            <span class="recent-label">最近使ったサービス:</span>
+            <div id="recentChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="grid" id="grid" role="region" aria-label="サービス一覧">{cards}</div>
+      <div class="empty-search" id="emptySearch" role="status">
+        一致するサービスがありません。Enterキーを押すとYouTube検索または指定URLを直接開きます。
+      </div>
+
+      <section class="stats-section" id="activity" aria-label="統計・リアルタイム稼働状況">
+        <div class="section-header">
+          <div class="section-title-group">
+            <h2>📊 統計・リアルタイム稼働状況</h2>
+            <span id="statsMetaNote">0.5s 外部DB・マルチRender同期</span>
+          </div>
+          <div class="range-switch" role="group" aria-label="表示期間">
+            <button type="button" class="range-btn active" data-range="60m">60分 (5分単位)</button>
+            <button type="button" class="range-btn" data-range="24h">24時間 (1時間単位)</button>
+          </div>
+        </div>
+
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <div class="kpi-label"><span>現在同接</span><span class="kpi-tag">LIVE</span></div>
+            <div class="kpi-value" id="kpiCurrentCcu">{live_ccu:,}人</div>
+            <div class="kpi-sub" id="kpiPeakCcu">本日最大: {today_peak:,}人 / 最高: {peak_ccu:,}人</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label"><span>本日訪問者数</span><span class="kpi-tag">JST</span></div>
+            <div class="kpi-value" id="kpiTodayAccess">{today_access:,}人</div>
+            <div class="kpi-sub">00:00以降</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label"><span>累計訪問者数</span><span class="kpi-tag">TOTAL</span></div>
+            <div class="kpi-value" id="kpiTotalAccess">{total_access:,}人</div>
+            <div class="kpi-sub">外部DB保存済</div>
+          </div>
+          <div class="kpi-card">
+            <div class="kpi-label"><span>ユニーク接続</span><span class="kpi-tag">SESSION</span></div>
+            <div class="kpi-value" id="kpiUniqueSessions">{unique_sessions:,}</div>
+            <div class="kpi-sub" id="kpiActiveServices">稼働サービス: {active_services_count}</div>
+          </div>
+        </div>
+
+        <div class="charts-grid">
+          <div class="chart-card">
+            <div class="chart-head">
+              <h3 class="chart-title">同時接続数 (同接)</h3>
+              <span class="chart-badge" id="ccuChartBadge">現在 {live_ccu:,}人 / 最大 {peak_ccu:,}人</span>
+            </div>
+            <div class="canvas-wrap">
+              <canvas class="chart-canvas" id="ccuCanvas"></canvas>
+              <div class="chart-tooltip" id="ccuTooltip"></div>
+            </div>
+          </div>
+
+          <div class="chart-card">
+            <div class="chart-head">
+              <h3 class="chart-title">訪問者数</h3>
+              <span class="chart-badge" id="accessChartBadge">期間合計 {total_access:,}人</span>
+            </div>
+            <div class="canvas-wrap">
+              <canvas class="chart-canvas" id="accessCanvas"></canvas>
+              <div class="chart-tooltip" id="accessTooltip"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel-card peer-rank-panel">
+          <h3 class="panel-title">
+            <span>通信ランキング（拠点URL別）</span>
+            <small class="panel-subtitle" id="peerRankingNote">稼働拠点の通信・同接ランキング（5日間訪問なしで自動除外）</small>
+          </h3>
+          <div id="peerRankingList">{initial_peer_ranking_html}</div>
+        </div>
+
+        <div class="bottom-grid">
+          <div class="panel-card">
+            <h3 class="panel-title">
+              <span>通信ランキング（サービス別）</span>
+              <small class="panel-subtitle" id="rankingTotalNote">全拠点合計 {total_access:,}人 / 5日間訪問なしで自動除外</small>
+            </h3>
+            <div id="activityStatus">{initial_ranking_html}</div>
+          </div>
+          <div class="panel-card">
+            <h3 class="panel-title">
+              <span>最新通信・訪問履歴</span>
+              <small class="panel-subtitle">最新8件</small>
+            </h3>
+            <div class="recent-list" id="recentActivity">{initial_recent_html}</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Large Embedded OpenChat at bottom of School Hub -->
+      <section class="hub-chat-section" id="hub-openchat-section" aria-label="総合オープンチャット">
+        <div class="hub-chat-header">
+          <div class="hub-chat-title-wrap">
+            <span class="hub-chat-badge">オープンチャット</span>
+            <h2 class="hub-chat-title">💬 School Hub 総合オープンチャット</h2>
+            <span class="hub-chat-sub">👀 見るだけならログイン不要 / 🔑 投稿するにはログインが必要 / 🎬 動画・画像投稿対応</span>
+          </div>
+          <div class="hub-chat-meta-right">
+            <span class="hub-status-pill"><span class="hub-status-dot"></span>オンライン</span>
+            <span class="sh-chat-res-counter" id="hub-chat-res-counter" title="1000レス到達でスレッド自動リセット">0/1000</span>
+            <span class="hub-my-id-btn" id="hub-chat-id-badge" title="ログインするとユーザー名とIDが表示されます">ID:{escape(my_id)}</span>
+          </div>
+        </div>
+        <div class="hub-chat-body-wrapper">
+          <div class="hub-chat-body" id="hub-chat-body"></div>
+          <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">↓ 最新メッセージへ</button>
+        </div>
+        <div class="hub-chat-footer">
+          <div class="hub-reply-banner" id="hub-reply-banner" style="display:none;">
+            <div class="hub-reply-info">
+              <span class="hub-reply-icon">&gt;&gt;返信先:</span>
+              <span class="hub-reply-target" id="hub-reply-target"></span>
+              <span class="hub-reply-text" id="hub-reply-text"></span>
+            </div>
+            <button type="button" class="hub-reply-cancel" id="hub-reply-cancel" title="返信を取り消す">✕</button>
+          </div>
+          <form class="hub-chat-form" id="hub-chat-form">
+            <div class="hub-chat-input-row">
+              <textarea class="hub-chat-input" id="hub-chat-input" placeholder="メッセージを入力... (投稿するにはログインが必要です / 動画・画像対応)" maxlength="200" rows="1" autocomplete="off"></textarea>
+              <button type="button" class="hub-input-clear" id="hub-input-clear" style="display:none;" title="クリア">✕</button>
+              <button type="submit" class="hub-chat-send-btn">送る</button>
+            </div>
+            <div class="hub-chat-meta">
+              <span>👀 閲覧はログイン不要 / 🔑 投稿・画像🖼️・動画🎬の送信はログインが必要 / 送るボタンで投稿</span>
+              <span class="hub-char-count" id="hub-char-count">0/200</span>
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
   </div>
-</header>
+</div>
 
-<main class="container">
-  <section class="control-panel">
-    <div class="omnibox">
-      <div class="search-wrap">
-        <span class="search-icon">🔍</span>
-        <input id="search" type="search" placeholder="Google検索 / サービス名・URLを入力してEnter" autocomplete="off">
-        <button type="button" class="search-clear" id="searchClear" title="クリア">×</button>
-        <span class="search-kbd">/</span>
-      </div>
-      <div class="quick-actions">
-        <button type="button" class="btn" id="quickYoutube">▶ YouTube検索</button>
-        <button type="button" class="btn" id="quickWakame">🎬 わかめtube</button>
-        <button type="button" class="btn" id="quickBrowser">🌐 Interstellar</button>
-      </div>
-    </div>
-
-    <div class="filter-row">
-      <div class="tabs" id="categoryTabs" role="tablist">
-        <button type="button" class="tab-btn active" data-filter="ALL">すべて<span class="tab-count">({counts["ALL"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Games">🎮 ゲーム<span class="tab-count">({counts["Games"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Watch">📺 動画・SNS<span class="tab-count">({counts["Watch"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Browser">🌐 ブラウザ<span class="tab-count">({counts["Browser"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="FAV">★ 固定<span class="tab-count" id="favTabCount">(0)</span></button>
-      </div>
-      <div class="recent-bar" id="recentBar">
-        <span class="recent-label">最近使ったサービス:</span>
-        <div id="recentChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-      </div>
-    </div>
-  </section>
-
-  <div class="grid" id="grid">{cards}</div>
-  <div class="empty-search" id="emptySearch">
-    一致するサービスがありません。EnterキーでYouTube検索またはURLを開きます。
-  </div>
-
-  <section class="stats-section" id="activity">
-    <div class="section-header">
-      <div class="section-title-group">
-        <h2>📊 統計・リアルタイム稼働状況</h2>
-        <span id="statsMetaNote">0.5s 外部DB・マルチRender同期</span>
-      </div>
-      <div class="range-switch" role="group">
-        <button type="button" class="range-btn active" data-range="60m">60分 (5分単位)</button>
-        <button type="button" class="range-btn" data-range="24h">24時間 (1時間単位)</button>
-      </div>
-    </div>
-
-    <div class="kpi-grid">
-      <div class="kpi-card">
-        <div class="kpi-label"><span>現在同接</span><span>LIVE</span></div>
-        <div class="kpi-value" id="kpiCurrentCcu">{live_ccu:,}人</div>
-        <div class="kpi-sub" id="kpiPeakCcu">本日最大: {today_peak:,}人 / 最高: {peak_ccu:,}人</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label"><span>本日訪問者数</span><span>JST</span></div>
-        <div class="kpi-value" id="kpiTodayAccess">{today_access:,}人</div>
-        <div class="kpi-sub">00:00以降</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label"><span>累計訪問者数</span><span>TOTAL</span></div>
-        <div class="kpi-value" id="kpiTotalAccess">{total_access:,}人</div>
-        <div class="kpi-sub">外部DB保存済</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label"><span>ユニーク接続</span><span>SESSION</span></div>
-        <div class="kpi-value" id="kpiUniqueSessions">{unique_sessions:,}</div>
-        <div class="kpi-sub" id="kpiActiveServices">稼働サービス: {active_services_count}</div>
-      </div>
-    </div>
-
-    <div class="charts-grid">
-      <div class="chart-card">
-        <div class="chart-head">
-          <h3 class="chart-title">同時接続数 (同接)</h3>
-          <span class="chart-badge" id="ccuChartBadge">現在 {live_ccu:,}人 / 最大 {peak_ccu:,}人</span>
-        </div>
-        <div class="canvas-wrap">
-          <canvas class="chart-canvas" id="ccuCanvas"></canvas>
-          <div class="chart-tooltip" id="ccuTooltip"></div>
-        </div>
-      </div>
-
-      <div class="chart-card">
-        <div class="chart-head">
-          <h3 class="chart-title">訪問者数</h3>
-          <span class="chart-badge" id="accessChartBadge">期間合計 {total_access:,}人</span>
-        </div>
-        <div class="canvas-wrap">
-          <canvas class="chart-canvas" id="accessCanvas"></canvas>
-          <div class="chart-tooltip" id="accessTooltip"></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="panel-card peer-rank-panel">
-      <h3 class="panel-title">
-        <span>通信ランキング（拠点URL別）</span>
-        <small style="color:var(--muted);font-weight:400" id="peerRankingNote">稼働拠点の通信・同接ランキング（5日間訪問なしで自動除外）</small>
-      </h3>
-      <div id="peerRankingList">{initial_peer_ranking_html}</div>
-    </div>
-
-    <div class="bottom-grid">
-      <div class="panel-card">
-        <h3 class="panel-title">
-          <span>通信ランキング（サービス別）</span>
-          <small style="color:var(--muted);font-weight:400" id="rankingTotalNote">全拠点合計 {total_access:,}人 / 5日間訪問なしで自動除外</small>
-        </h3>
-        <div id="activityStatus">{initial_ranking_html}</div>
-      </div>
-      <div class="panel-card">
-        <h3 class="panel-title">
-          <span>最新通信・訪問履歴</span>
-          <small style="color:var(--muted);font-weight:400">最新8件</small>
-        </h3>
-        <div class="recent-list" id="recentActivity">{initial_recent_html}</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- Large Embedded OpenChat at bottom of School Hub -->
-  <section class="hub-chat-section" id="hub-openchat-section">
-    <div class="hub-chat-header">
-      <div class="hub-chat-title-wrap">
-        <span class="hub-chat-badge">オープンチャット</span>
-        <h2 class="hub-chat-title">💬 School Hub 総合オープンチャット</h2>
-        <span class="hub-chat-sub">👀 見るだけならログイン不要 / 🔑 投稿するにはログインが必要 / 🎬 動画・画像投稿対応</span>
-      </div>
-      <div class="hub-chat-meta-right">
-        <span class="hub-status-pill"><span class="hub-status-dot"></span>オンライン</span>
-        <span class="sh-chat-res-counter" id="hub-chat-res-counter" title="1000レス到達でスレッド自動リセット">0/1000</span>
-        <span class="hub-my-id-btn" id="hub-chat-id-badge" title="ログインするとユーザー名とIDが表示されます">ID:{escape(my_id)}</span>
-      </div>
-    </div>
-    <div class="hub-chat-body-wrapper">
-      <div class="hub-chat-body" id="hub-chat-body"></div>
-      <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">↓ 最新メッセージへ</button>
-    </div>
-    <div class="hub-chat-footer">
-      <div class="hub-reply-banner" id="hub-reply-banner" style="display:none;">
-        <div class="hub-reply-info">
-          <span class="hub-reply-icon">&gt;&gt;返信先:</span>
-          <span class="hub-reply-target" id="hub-reply-target"></span>
-          <span class="hub-reply-text" id="hub-reply-text"></span>
-        </div>
-        <button type="button" class="hub-reply-cancel" id="hub-reply-cancel" title="返信を取り消す">✕</button>
-      </div>
-      <form class="hub-chat-form" id="hub-chat-form">
-        <div class="hub-chat-input-row">
-          <textarea class="hub-chat-input" id="hub-chat-input" placeholder="メッセージを入力... (投稿するにはログインが必要です / 動画・画像対応)" maxlength="200" rows="1" autocomplete="off"></textarea>
-          <button type="button" class="hub-input-clear" id="hub-input-clear" style="display:none;" title="クリア">✕</button>
-          <button type="submit" class="hub-chat-send-btn">送る</button>
-        </div>
-        <div class="hub-chat-meta">
-          <span>👀 閲覧はログイン不要 / 🔑 投稿・画像🖼️・動画🎬の送信はログインが必要 / 送るボタンで投稿</span>
-          <span class="hub-char-count" id="hub-char-count">0/200</span>
-        </div>
-      </form>
-    </div>
-  </section>
-</main>
+<!-- Mobile M3 Bottom Navigation Bar -->
+<nav class="m3-bottom-nav" aria-label="モバイルナビゲーション">
+  <button type="button" class="m3-bottom-nav-item active" data-bottom-filter="ALL">
+    <span class="m3-bottom-nav-pill">🏠</span>
+    <span>すべて</span>
+  </button>
+  <button type="button" class="m3-bottom-nav-item" data-bottom-filter="Watch">
+    <span class="m3-bottom-nav-pill">📺</span>
+    <span>動画</span>
+  </button>
+  <button type="button" class="m3-bottom-nav-item" data-bottom-filter="Games">
+    <span class="m3-bottom-nav-pill">🎮</span>
+    <span>ゲーム</span>
+  </button>
+  <button type="button" class="m3-bottom-nav-item" data-bottom-scroll="#activity">
+    <span class="m3-bottom-nav-pill">📊</span>
+    <span>統計</span>
+  </button>
+  <button type="button" class="m3-bottom-nav-item" data-bottom-scroll="#hub-openchat-section">
+    <span class="m3-bottom-nav-pill">💬</span>
+    <span>チャット</span>
+  </button>
+</nav>
 
 <div class="toast" id="hub-toast" role="status" aria-live="polite"></div>
 
@@ -1416,10 +1956,12 @@ button, input, textarea {{ font: inherit; }}
   let accessPoints = [];
   let isInternalNav = false;
 
+  // --- M3 Theme Management ---
   function applyTheme(theme) {{
-    document.documentElement.setAttribute("data-theme", theme);
+    const resolved = theme === "dark" ? "dark" : "light";
+    document.documentElement.setAttribute("data-theme", resolved);
     const btn = $("themeToggle");
-    if (btn) btn.textContent = theme === "dark" ? "ライト" : "ダーク";
+    if (btn) btn.textContent = resolved === "dark" ? "☀️ ライト" : "🌙 ダーク";
   }}
   const savedTheme = (() => {{
     try {{ return localStorage.getItem(THEME_KEY); }} catch (_) {{ return null; }}
@@ -1430,6 +1972,87 @@ button, input, textarea {{ font: inherit; }}
     try {{ localStorage.setItem(THEME_KEY, next); }} catch (_) {{}}
     applyTheme(next);
     drawAllCharts();
+  }});
+
+  // --- M3 Navigation Drawer & Rail Interactions ---
+  const navDrawer = $("navDrawer");
+  const navDrawerScrim = $("navDrawerScrim");
+  function setDrawerOpen(open) {{
+    if (!navDrawer || !navDrawerScrim) return;
+    navDrawer.classList.toggle("open", Boolean(open));
+    navDrawerScrim.classList.toggle("open", Boolean(open));
+    navDrawerScrim.setAttribute("aria-hidden", open ? "false" : "true");
+  }}
+  $("railMenuBtn")?.addEventListener("click", () => setDrawerOpen(true));
+  $("mobileMenuBtn")?.addEventListener("click", () => setDrawerOpen(true));
+  $("drawerCloseBtn")?.addEventListener("click", () => setDrawerOpen(false));
+  navDrawerScrim?.addEventListener("click", () => setDrawerOpen(false));
+  $("railSearchFab")?.addEventListener("click", () => {{
+    searchInput?.focus();
+    searchInput?.scrollIntoView({{ behavior: "smooth", block: "center" }});
+  }});
+
+  function activateCategoryFilter(filterName) {{
+    activeFilter = filterName || "ALL";
+    document.querySelectorAll("#categoryTabs .tab-btn").forEach(b => {{
+      const isMatch = (b.dataset.filter || "ALL") === activeFilter;
+      b.classList.toggle("active", isMatch);
+      b.setAttribute("aria-selected", isMatch ? "true" : "false");
+    }});
+    document.querySelectorAll(".m3-rail-item[data-rail-filter]").forEach(item => {{
+      const isMatch = item.getAttribute("data-rail-filter") === activeFilter;
+      item.classList.toggle("active", isMatch);
+      if (isMatch) item.setAttribute("aria-current", "page");
+      else item.removeAttribute("aria-current");
+    }});
+    document.querySelectorAll(".m3-bottom-nav-item[data-bottom-filter]").forEach(item => {{
+      item.classList.toggle("active", item.getAttribute("data-bottom-filter") === activeFilter);
+    }});
+    filterCards();
+  }}
+
+  document.querySelectorAll("[data-rail-filter]").forEach(item => {{
+    item.addEventListener("click", (e) => {{
+      e.preventDefault();
+      activateCategoryFilter(item.getAttribute("data-rail-filter") || "ALL");
+      document.getElementById("services-section")?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
+  }});
+  document.querySelectorAll("[data-rail-scroll]").forEach(item => {{
+    item.addEventListener("click", (e) => {{
+      e.preventDefault();
+      const targetSel = item.getAttribute("data-rail-scroll");
+      if (targetSel) document.querySelector(targetSel)?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
+  }});
+  document.querySelectorAll("[data-drawer-filter], [data-drawer-nav]").forEach(item => {{
+    item.addEventListener("click", (e) => {{
+      e.preventDefault();
+      const f = item.getAttribute("data-drawer-filter") || item.getAttribute("data-drawer-nav") || "ALL";
+      setDrawerOpen(false);
+      activateCategoryFilter(f);
+      document.getElementById("services-section")?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
+  }});
+  document.querySelectorAll("[data-drawer-scroll]").forEach(item => {{
+    item.addEventListener("click", (e) => {{
+      e.preventDefault();
+      setDrawerOpen(false);
+      const targetSel = item.getAttribute("data-drawer-scroll");
+      if (targetSel) document.querySelector(targetSel)?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
+  }});
+  document.querySelectorAll("[data-bottom-filter]").forEach(item => {{
+    item.addEventListener("click", () => {{
+      activateCategoryFilter(item.getAttribute("data-bottom-filter") || "ALL");
+      document.getElementById("services-section")?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
+  }});
+  document.querySelectorAll("[data-bottom-scroll]").forEach(item => {{
+    item.addEventListener("click", () => {{
+      const targetSel = item.getAttribute("data-bottom-scroll");
+      if (targetSel) document.querySelector(targetSel)?.scrollIntoView({{ behavior: "smooth", block: "start" }});
+    }});
   }});
 
   function updateClock() {{
@@ -1515,8 +2138,13 @@ button, input, textarea {{ font: inherit; }}
       e.stopPropagation();
       const name = btn.dataset.fav;
       const favs = getFavs();
-      if (favs.has(name)) favs.delete(name);
-      else favs.add(name);
+      if (favs.has(name)) {{
+        favs.delete(name);
+        toast(`「${{name}}」の固定を解除しました`);
+      }} else {{
+        favs.add(name);
+        toast(`「${{name}}」を固定しました`);
+      }}
       saveFavs(favs);
       syncFavUI();
       filterCards();
@@ -1554,10 +2182,13 @@ button, input, textarea {{ font: inherit; }}
     if (e.key === "/" && document.activeElement !== searchInput && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName)) {{
       e.preventDefault();
       searchInput?.focus();
-    }} else if (e.key === "Escape" && document.activeElement === searchInput) {{
-      searchInput.value = "";
-      filterCards();
-      searchInput.blur();
+    }} else if (e.key === "Escape") {{
+      setDrawerOpen(false);
+      if (document.activeElement === searchInput) {{
+        searchInput.value = "";
+        filterCards();
+        searchInput.blur();
+      }}
     }}
   }});
   searchInput?.addEventListener("keydown", (e) => {{
@@ -1607,10 +2238,7 @@ button, input, textarea {{ font: inherit; }}
 
   document.querySelectorAll("#categoryTabs .tab-btn").forEach(btn => {{
     btn.addEventListener("click", () => {{
-      document.querySelectorAll("#categoryTabs .tab-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      activeFilter = btn.dataset.filter || "ALL";
-      filterCards();
+      activateCategoryFilter(btn.dataset.filter || "ALL");
     }});
   }});
 
@@ -1724,6 +2352,15 @@ button, input, textarea {{ font: inherit; }}
   const fmt = (n) => Number(n || 0).toLocaleString("ja-JP");
   const escHtml = (str) => String(str || "").replace(/[&<>"']/g, (c) => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}})[c]);
 
+  function getCssToken(name, fallback) {{
+    try {{
+      const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      return v || fallback;
+    }} catch (_) {{
+      return fallback;
+    }}
+  }}
+
   function drawChart(canvasId, points, valueKey, unitLabel, colorHex, isAreaChart) {{
     const canvas = $(canvasId);
     if (!canvas) return;
@@ -1738,9 +2375,9 @@ button, input, textarea {{ font: inherit; }}
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, w, h);
 
-    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
-    const gridColor = isDark ? "rgba(148,163,184,0.14)" : "rgba(17,24,39,0.08)";
-    const textColor = isDark ? "#9ca3af" : "#6b7280";
+    const gridColor = getCssToken("--md-sys-color-outline-variant", "rgba(120,120,120,0.2)");
+    const textColor = getCssToken("--md-sys-color-on-surface-variant", "#6b7280");
+    const areaFillColor = getCssToken("--md-sys-color-tertiary-container", "rgba(20,108,46,0.18)");
 
     const padL = 34, padR = 10, padT = 12, padB = 22;
     const plotW = Math.max(10, w - padL - padR);
@@ -1781,18 +2418,21 @@ button, input, textarea {{ font: inherit; }}
     canvas.__chartMeta = {{ coords, padL, padR, padT, plotW, plotH, unitLabel }};
 
     if (isAreaChart) {{
+      ctx.save();
       ctx.beginPath();
       ctx.moveTo(coords[0].x, padT + plotH);
       coords.forEach(c => ctx.lineTo(c.x, c.y));
       ctx.lineTo(coords[coords.length - 1].x, padT + plotH);
       ctx.closePath();
-      ctx.fillStyle = isDark ? "rgba(16,185,129,0.16)" : "rgba(5,150,105,0.12)";
+      ctx.globalAlpha = 0.45;
+      ctx.fillStyle = areaFillColor;
       ctx.fill();
+      ctx.restore();
 
       ctx.beginPath();
       coords.forEach((c, i) => (i === 0 ? ctx.moveTo(c.x, c.y) : ctx.lineTo(c.x, c.y)));
       ctx.strokeStyle = colorHex;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.2;
       ctx.stroke();
 
       coords.forEach((c, i) => {{
@@ -1860,8 +2500,10 @@ button, input, textarea {{ font: inherit; }}
   bindChartTooltip("accessCanvas", "accessTooltip", "訪問者数");
 
   function drawAllCharts() {{
-    drawChart("ccuCanvas", ccuPoints, "ccu", "人", "#059669", true);
-    drawChart("accessCanvas", accessPoints, "count", "人", "#2563eb", false);
+    const tertiaryColor = getCssToken("--md-sys-color-tertiary", "#146c2e");
+    const primaryColor = getCssToken("--md-sys-color-primary", "#0b57d0");
+    drawChart("ccuCanvas", ccuPoints, "ccu", "人", tertiaryColor, true);
+    drawChart("accessCanvas", accessPoints, "count", "人", primaryColor, false);
   }}
 
   function updateDashboard(snapshotData) {{
@@ -1891,7 +2533,6 @@ button, input, textarea {{ font: inherit; }}
     if ($("kpiActiveServices")) $("kpiActiveServices").textContent = `稼働サービス: ${{activeServiceCount}}`;
 
     const st = s.storage || {{}};
-    // Update communicating deployment URLs & peer ranking (exclude 0-traffic / 5-day inactive nodes)
     const rawPeerRanking = Array.isArray(s.peer_ranking) && s.peer_ranking.length
       ? s.peer_ranking
       : [{{
@@ -2020,7 +2661,7 @@ button, input, textarea {{ font: inherit; }}
       }}
 
       if (!rows.length) {{
-        rankBox.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:6px 0">過去5日間の通信データなし</div>`;
+        rankBox.innerHTML = `<div class="empty-state-inline">過去5日間の通信データなし</div>`;
       }} else {{
         const maxAcc = Math.max(1, ...rows.map(r => r.acc));
         rows.forEach((r, idx) => {{
@@ -2052,7 +2693,7 @@ button, input, textarea {{ font: inherit; }}
       recentBox.textContent = "";
       const evs = (snapshotData.events || []).slice().reverse().slice(0, 8);
       if (!evs.length) {{
-        recentBox.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:6px 0">履歴なし</div>`;
+        recentBox.innerHTML = `<div class="empty-state-inline">履歴なし</div>`;
       }} else {{
         evs.forEach(e => {{
           const row = document.createElement("div");

@@ -1519,6 +1519,9 @@ async def head_root():
 
 
 from hub_ui import render_home
+import m3_design_system
+
+app.include_router(m3_design_system.router)
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
