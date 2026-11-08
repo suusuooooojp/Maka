@@ -1121,20 +1121,23 @@ async def trump_ws_endpoint(websocket: WebSocket, mode: str):
 # ============================================================================
 
 _HTML_PAGE = r"""<!doctype html>
-<html lang="ja">
+<html lang="ja" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<title>Google</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Google School Hub — トランプ</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
 :root {
-  --bg: #0f172a;
-  --surface: #1e293b;
+  --bg: var(--md-sys-color-surface);
+  --surface: var(--md-sys-color-surface-container);
   --table-green: #14532d;
   --table-border: #3f230f;
-  --text: #f8fafc;
-  --muted: #94a3b8;
-  --accent: #22c55e;
+  --text: var(--md-sys-color-on-surface);
+  --muted: var(--md-sys-color-on-surface-variant);
+  --accent: var(--md-sys-color-primary);
   --gold: #f59e0b;
 }
 * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
@@ -1144,20 +1147,20 @@ html, body {
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Kaku Gothic ProN", "Yu Gothic", sans-serif;
+  font-family: var(--md-sys-typescale-font-plain);
 }
 
 /* =========================================================================
- * 1. Top Header Bar (Simple & Clean)
+ * 1. Top Header Bar (M3 Top App Bar)
  * ========================================================================= */
 .topbar {
-  height: 50px;
+  height: 56px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
-  background: #0b1120;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
+  padding: 0 16px;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
   z-index: 50;
 }
 .topbar-left, .topbar-right {
@@ -1168,40 +1171,42 @@ html, body {
 .btn-top {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 6px 12px;
-  border-radius: 8px;
-  background: #1e293b;
-  border: 1px solid rgba(255,255,255,0.15);
-  color: #fff;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-secondary-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-secondary-container);
   text-decoration: none;
   font-size: 13px;
   font-weight: 700;
   cursor: pointer;
+  transition: filter 0.15s;
 }
-.btn-top:hover { background: #334155; }
+.btn-top:hover { filter: brightness(0.95); }
 .room-badge {
-  font-size: 14px;
-  font-weight: 800;
-  color: #fde047;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--md-sys-color-primary);
   margin-left: 4px;
 }
 .meta-tag {
   font-size: 12px;
   font-weight: 700;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.08);
-  color: #cbd5e1;
+  padding: 4px 12px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-surface-container-high);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  color: var(--md-sys-color-on-surface-variant);
 }
 
 /* =========================================================================
- * 2. Room Selection Lobby Screen (Shown First on Entry!)
+ * 2. Room Selection Lobby Screen (M3 Surface Hierarchy)
  * ========================================================================= */
 .lobby-screen {
   position: fixed;
-  top: 50px; left: 0; right: 0; bottom: 0;
-  background: radial-gradient(circle at 50% 25%, #1e293b 0%, #0f172a 75%);
+  top: 56px; left: 0; right: 0; bottom: 0;
+  background: var(--md-sys-color-surface);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1211,18 +1216,19 @@ html, body {
 }
 .lobby-screen.hidden { display: none; }
 .lobby-container {
-  width: min(94vw, 680px);
+  width: min(94vw, 720px);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
 }
 .lobby-header {
   text-align: center;
 }
 .lobby-header h1 {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   font-size: 26px;
-  font-weight: 900;
+  font-weight: 800;
+  color: var(--md-sys-color-on-surface);
 }
 .lobby-header p {
   margin: 0;
@@ -1234,26 +1240,32 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  background: rgba(255,255,255,0.05);
-  border: 1px solid rgba(255,255,255,0.12);
-  padding: 12px 16px;
-  border-radius: 12px;
+  gap: 12px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  padding: 14px 18px;
+  border-radius: var(--md-sys-shape-corner-large);
+  box-shadow: var(--md-sys-elevation-1);
 }
 .name-box label {
   font-size: 13px;
   font-weight: 700;
-  color: #cbd5e1;
+  color: var(--md-sys-color-on-surface-variant);
 }
 .name-input {
-  background: #0f172a;
-  border: 1px solid rgba(255,255,255,0.22);
-  color: #fff;
-  padding: 8px 12px;
-  border-radius: 8px;
+  background: var(--md-sys-color-surface-container-lowest);
+  border: 1px solid var(--md-sys-color-outline);
+  color: var(--md-sys-color-on-surface);
+  padding: 8px 14px;
+  border-radius: var(--md-sys-shape-corner-small);
   font-size: 14px;
   font-weight: 700;
-  width: 190px;
+  width: 210px;
+  outline: none;
+}
+.name-input:focus {
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 0 0 2px var(--md-sys-color-primary-container);
 }
 
 .room-cards-grid {
@@ -1262,23 +1274,25 @@ html, body {
   gap: 16px;
 }
 .room-card {
-  background: #1e293b;
-  border: 2px solid rgba(255,255,255,0.14);
-  border-radius: 16px;
-  padding: 20px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-extra-large);
+  padding: 22px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 14px;
-  transition: border-color 0.15s, transform 0.15s;
+  box-shadow: var(--md-sys-elevation-1);
+  transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
 }
 .room-card:hover {
-  border-color: #38bdf8;
+  border-color: var(--md-sys-color-primary);
   transform: translateY(-2px);
+  box-shadow: var(--md-sys-elevation-2);
 }
 .room-card-title {
   font-size: 20px;
-  font-weight: 900;
+  font-weight: 800;
   margin: 0 0 6px;
   display: flex;
   align-items: center;
@@ -1287,7 +1301,7 @@ html, body {
 .room-card-desc {
   font-size: 13px;
   color: var(--muted);
-  line-height: 1.45;
+  line-height: 1.5;
   margin: 0;
 }
 .room-stats-row {
@@ -1298,29 +1312,26 @@ html, body {
 }
 .stat-pill {
   font-size: 12px;
-  font-weight: 800;
+  font-weight: 700;
   padding: 4px 10px;
-  border-radius: 999px;
-  background: rgba(34, 197, 94, 0.16);
-  color: #86efac;
-  border: 1px solid rgba(34, 197, 94, 0.35);
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-tertiary-container);
+  color: var(--md-sys-color-on-tertiary-container);
 }
 .stat-pill.full {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fde047;
-  border-color: rgba(245, 158, 11, 0.45);
+  background: var(--md-sys-color-warning-container);
+  color: var(--md-sys-color-on-warning-container);
 }
 .stat-pill.spec {
-  background: rgba(56, 189, 248, 0.16);
-  color: #7dd3fc;
-  border-color: rgba(56, 189, 248, 0.35);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
 }
 .room-members {
   font-size: 12px;
-  color: #cbd5e1;
-  background: rgba(0,0,0,0.22);
-  padding: 8px 10px;
-  border-radius: 8px;
+  color: var(--md-sys-color-on-surface-variant);
+  background: var(--md-sys-color-surface-container-high);
+  padding: 8px 12px;
+  border-radius: var(--md-sys-shape-corner-medium);
 }
 .room-actions {
   display: flex;
@@ -1328,39 +1339,39 @@ html, body {
 }
 .btn-join-room {
   flex: 1;
-  padding: 11px 14px;
-  border-radius: 10px;
+  padding: 11px 16px;
+  border-radius: var(--md-sys-shape-corner-full);
   border: 0;
   font-size: 14px;
-  font-weight: 900;
+  font-weight: 700;
   cursor: pointer;
-  background: #22c55e;
-  color: #fff;
-  transition: opacity 0.15s;
+  background: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  transition: filter 0.15s;
 }
-.btn-join-room:hover { opacity: 0.92; }
+.btn-join-room:hover { filter: brightness(1.06); }
 .btn-spec-room {
-  padding: 11px 14px;
-  border-radius: 10px;
-  border: 1px solid rgba(255,255,255,0.2);
-  background: #334155;
-  color: #e2e8f0;
+  padding: 11px 16px;
+  border-radius: var(--md-sys-shape-corner-full);
+  border: 1px solid var(--md-sys-color-outline);
+  background: var(--md-sys-color-surface-container-highest);
+  color: var(--md-sys-color-on-surface);
   font-size: 13px;
-  font-weight: 800;
+  font-weight: 700;
   cursor: pointer;
 }
-.btn-spec-room:hover { background: #475569; }
+.btn-spec-room:hover { filter: brightness(0.96); }
 
 /* =========================================================================
  * 3. Simple, Easy-to-Play 4-Player Game Screen
  * ========================================================================= */
 .game-screen {
   position: fixed;
-  top: 50px; left: 0; right: 0; bottom: 0;
+  top: 56px; left: 0; right: 0; bottom: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  background: #0f172a;
+  background: var(--bg);
   padding: 10px 14px 12px;
 }
 .game-screen.hidden { display: none; }
@@ -1374,7 +1385,7 @@ html, body {
   background: radial-gradient(ellipse at center, #166534 0%, #14532d 70%, #064e3b 100%);
   border: 8px solid #451a03;
   border-radius: 28px;
-  box-shadow: inset 0 0 40px rgba(0,0,0,0.45), 0 8px 25px rgba(0,0,0,0.5);
+  box-shadow: inset 0 0 40px rgba(0,0,0,0.45), var(--md-sys-elevation-3);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1403,9 +1414,9 @@ html, body {
   color: #fde047;
 }
 .status-pill.alert {
-  background: #dc2626;
-  color: #fff;
-  border-color: #fca5a5;
+  background: var(--md-sys-color-error);
+  color: var(--md-sys-color-on-error);
+  border-color: var(--md-sys-color-error-container);
 }
 
 /* Seated Opponents (Top, Left, Right) */
@@ -1419,6 +1430,7 @@ html, body {
   align-items: center;
   gap: 10px;
   min-width: 155px;
+  color: #f8fafc;
   z-index: 10;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
@@ -1521,6 +1533,7 @@ html, body {
   flex-direction: column;
   gap: 10px;
   max-width: 90%;
+  color: #f8fafc;
 }
 .baba-draw-box.show { display: flex; }
 .baba-cards-list {
@@ -1549,18 +1562,19 @@ html, body {
 }
 
 /* =========================================================================
- * 4. Bottom Player Controls & Easy-to-Click Card Hand
+ * 4. Bottom Player Controls & Easy-to-Click Card Hand (M3 Surface Container)
  * ========================================================================= */
 .player-bottom-panel {
   width: min(100%, 980px);
   margin: 10px auto 0;
-  background: #1e293b;
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 16px;
-  padding: 10px 14px 12px;
+  background: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  box-shadow: var(--md-sys-elevation-1);
 }
 .action-bar {
   display: flex;
@@ -1572,7 +1586,7 @@ html, body {
 .my-info-pill {
   font-size: 14px;
   font-weight: 800;
-  color: #f8fafc;
+  color: var(--md-sys-color-on-surface);
 }
 .action-buttons {
   display: flex;
@@ -1581,20 +1595,20 @@ html, body {
 }
 .btn-act {
   padding: 9px 18px;
-  border-radius: 10px;
+  border-radius: var(--md-sys-shape-corner-full);
   border: 0;
   font-size: 14px;
-  font-weight: 900;
+  font-weight: 700;
   cursor: pointer;
   transition: opacity 0.15s, transform 0.1s;
 }
 .btn-act:disabled {
-  opacity: 0.35;
+  opacity: 0.38;
   cursor: not-allowed;
 }
-.btn-act.play { background: #22c55e; color: #fff; }
-.btn-act.pass { background: #475569; color: #fff; }
-.btn-act.hint { background: #0284c7; color: #fff; }
+.btn-act.play { background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
+.btn-act.pass { background: var(--md-sys-color-surface-container-highest); color: var(--md-sys-color-on-surface); }
+.btn-act.hint { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
 
 /* Clean, Well-Spaced Hand Cards */
 .hand-cards-row {
@@ -1662,11 +1676,11 @@ html, body {
   position: fixed;
   top: 42%; left: 50%;
   transform: translate(-50%, -50%);
-  background: rgba(15, 23, 42, 0.95);
-  border: 2px solid #fde047;
-  color: #fef08a;
+  background: var(--md-sys-color-inverse-surface);
+  border: 2px solid var(--md-sys-color-primary);
+  color: var(--md-sys-color-inverse-on-surface);
   padding: 12px 28px;
-  border-radius: 14px;
+  border-radius: var(--md-sys-shape-corner-large);
   font-size: 22px;
   font-weight: 900;
   z-index: 80;
@@ -1675,11 +1689,12 @@ html, body {
 }
 .toast-banner.show { display: block; }
 
-/* Modals */
+/* Modals (M3 Dialog) */
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(2, 6, 23, 0.8);
+  background: var(--md-sys-color-scrim);
+  backdrop-filter: blur(4px);
   display: none;
   align-items: center;
   justify-content: center;
@@ -1689,28 +1704,29 @@ html, body {
 .modal-overlay.show { display: flex; }
 .modal-box {
   width: min(92vw, 420px);
-  background: #1e293b;
-  border: 1px solid rgba(255,255,255,0.2);
-  border-radius: 16px;
-  padding: 20px;
+  background: var(--md-sys-color-surface-container-high);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-extra-large);
+  padding: 24px;
   text-align: center;
+  box-shadow: var(--md-sys-elevation-3);
 }
 .rank-row-item {
   display: flex;
   justify-content: space-between;
   padding: 9px 12px;
-  border-radius: 8px;
-  background: rgba(255,255,255,0.06);
+  border-radius: var(--md-sys-shape-corner-small);
+  background: var(--md-sys-color-surface-container);
   margin-bottom: 6px;
   font-size: 14px;
-  font-weight: 800;
+  font-weight: 700;
 }
 .rule-row {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 8px 0;
-  border-bottom: 1px solid rgba(255,255,255,0.08);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
   font-size: 13px;
 }
 
@@ -1725,18 +1741,20 @@ html, body {
 </head>
 <body>
 
-<!-- Top Navigation Bar -->
+<!-- Top Navigation Bar (M3 Top App Bar) -->
 <header class="topbar">
   <div class="topbar-left">
     <a class="btn-top" href="/">← School Hub</a>
     <button type="button" class="btn-top" id="btnBackLobby" onclick="returnToLobby()" style="display:none">🚪 ルーム選択へ</button>
-    <span class="room-badge" id="headerRoomTitle">トランプ ルーム選択</span>
+    <span class="room-badge" id="headerRoomTitle">🃏 トランプ ルーム選択</span>
   </div>
   <div class="topbar-right">
     <span class="meta-tag" id="headerSeatMeta" style="display:none">着席 1/4</span>
     <span class="meta-tag" id="headerSpecMeta" style="display:none">観戦 0</span>
     <button type="button" class="btn-top" id="btnRules" onclick="toggleRulesModal(true)" style="display:none">⚙ ルール</button>
     <button type="button" class="btn-top" id="btnSound" onclick="toggleSound()">🔊 音 ON</button>
+    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()">🎨 M3設定</button>
+    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()">🌓</button>
   </div>
 </header>
 

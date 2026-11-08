@@ -109,6 +109,29 @@ def render_home(proxies, request=None):
         )
     cards = "".join(cards_html)
 
+    table_rows_html = []
+    for s in services:
+        name_raw = str(s.get("name", "Service"))
+        name_esc = escape(name_raw)
+        path_esc = escape(str(s.get("path", "/")))
+        cat_label_esc = escape(str(s.get("category_label", "その他")))
+        desc_esc = escape(str(s.get("description", "")))
+        ccu_num = int(svc_ccu_map.get(name_raw) or 0)
+        acc_num = int(svc_counts.get(name_raw) or 0)
+        badge_cls = "md-badge tertiary" if ccu_num > 0 else "md-badge primary"
+        badge_txt = f"稼働中 ({ccu_num:,}人)" if ccu_num > 0 else "待機中 (0人)"
+        table_rows_html.append(
+            f'''<tr data-table-service="{name_esc}">'''
+            f'''<td><strong>{name_esc}</strong><div style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">{desc_esc}</div></td>'''
+            f'''<td><span class="cat-tag">{cat_label_esc}</span></td>'''
+            f'''<td><span class="{badge_cls}" data-table-ccu="{name_esc}">{badge_txt}</span></td>'''
+            f'''<td style="font-variant-numeric:tabular-nums;font-weight:700" data-table-acc="{name_esc}">{acc_num:,}回</td>'''
+            f'''<td><code style="font-size:11px;color:var(--md-sys-color-on-surface-variant)">{path_esc}</code></td>'''
+            f'''<td><a href="{path_esc}" class="md-btn md-btn-tonal" style="min-height:30px;padding:0 12px;font-size:12px;">開く →</a></td>'''
+            f'''</tr>'''
+        )
+    initial_service_table_html = "".join(table_rows_html)
+
     peer_ranking_data = [
         p
         for p in (stats_data.get("peer_ranking") or [])
@@ -1680,6 +1703,7 @@ button, input, textarea, select {{
   <a href="/openchat" class="m3-drawer-link">💬 オープンチャット (全画面)</a>
   <a href="#activity" class="m3-drawer-link" data-drawer-scroll="#activity">📊 統計・リアルタイム稼働</a>
   <a href="#hub-openchat-section" class="m3-drawer-link" data-drawer-scroll="#hub-openchat-section">💭 ページ内チャットへ移動</a>
+  <button type="button" class="m3-drawer-link" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()">🎨 M3 テーマ・表示設定</button>
 </aside>
 
 <div class="m3-app-shell">
@@ -1714,6 +1738,10 @@ button, input, textarea, select {{
         <span class="m3-rail-pill">💬</span>
         <span class="m3-rail-label">チャット</span>
       </a>
+      <button type="button" class="m3-rail-item" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" aria-label="M3設定を開く">
+        <span class="m3-rail-pill">🎨</span>
+        <span class="m3-rail-label">設定</span>
+      </button>
     </div>
   </nav>
 
@@ -1736,6 +1764,7 @@ button, input, textarea, select {{
           <a href="#hub-openchat-section" class="btn btn-primary">💬 オープンチャット</a>
           <span class="meta-pill" id="externalSyncText">{initial_sync_str}</span>
           <span class="meta-pill" id="jstClock">--:--:-- JST</span>
+          <button type="button" class="btn btn-tonal" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" aria-label="表示設定を開く">🎨 設定</button>
           <button type="button" class="btn btn-tonal" id="themeToggle" aria-label="テーマを切り替え">ダーク</button>
         </div>
       </div>
@@ -1860,6 +1889,30 @@ button, input, textarea, select {{
             <div class="recent-list" id="recentActivity">{initial_recent_html}</div>
           </div>
         </div>
+
+        <div class="panel-card" style="margin-top:var(--md-space-3);">
+          <h3 class="panel-title">
+            <span>📋 サービス稼働一覧データテーブル (M3 Data Table)</span>
+            <small class="panel-subtitle">全サービスの稼働ステータス・同時接続・累計アクセス一覧</small>
+          </h3>
+          <div class="md-data-table-wrap">
+            <table class="md-data-table" id="serviceDataTable" aria-label="サービス稼働一覧">
+              <thead>
+                <tr>
+                  <th scope="col">サービス名・概要</th>
+                  <th scope="col">カテゴリ</th>
+                  <th scope="col">ステータス・同接</th>
+                  <th scope="col">累計アクセス</th>
+                  <th scope="col">エンドポイント</th>
+                  <th scope="col">アクション</th>
+                </tr>
+              </thead>
+              <tbody>
+                {initial_service_table_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </section>
 
       <!-- Large Embedded OpenChat at bottom of School Hub -->
@@ -1969,8 +2022,20 @@ button, input, textarea, select {{
   applyTheme(savedTheme);
   $("themeToggle")?.addEventListener("click", () => {{
     const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
-    try {{ localStorage.setItem(THEME_KEY, next); }} catch (_) {{}}
-    applyTheme(next);
+    if (window.SchoolHubM3 && window.SchoolHubM3.setTheme) {{
+      window.SchoolHubM3.setTheme(next);
+    }} else {{
+      try {{ localStorage.setItem(THEME_KEY, next); }} catch (_) {{}}
+      applyTheme(next);
+    }}
+    drawAllCharts();
+  }});
+  window.addEventListener("m3-theme-change", (ev) => {{
+    const t = ev && ev.detail && ev.detail.theme ? ev.detail.theme : document.documentElement.getAttribute("data-theme");
+    applyTheme(t);
+    drawAllCharts();
+  }});
+  window.addEventListener("m3-seed-change", () => {{
     drawAllCharts();
   }});
 
@@ -2611,6 +2676,15 @@ button, input, textarea, select {{
       }}
       if (countEl) {{
         countEl.textContent = `${{fmt(acc)}}回`;
+      }}
+      const tblCcu = document.querySelector(`[data-table-ccu="${{CSS.escape(name)}}"]`);
+      if (tblCcu) {{
+        tblCcu.className = ccu > 0 ? "md-badge tertiary" : "md-badge primary";
+        tblCcu.textContent = ccu > 0 ? `稼働中 (${{fmt(ccu)}}人)` : "待機中 (0人)";
+      }}
+      const tblAcc = document.querySelector(`[data-table-acc="${{CSS.escape(name)}}"]`);
+      if (tblAcc) {{
+        tblAcc.textContent = `${{fmt(acc)}}回`;
       }}
     }});
 

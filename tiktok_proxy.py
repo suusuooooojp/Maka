@@ -1087,20 +1087,22 @@ _TIKTOK_HTML = r"""<!DOCTYPE html>
 <meta charset="utf-8">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
   :root {
-    --bg: #000000;
-    --bg-elevated: #121212;
-    --bg-card: #181818;
-    --bg-hover: rgba(255, 255, 255, 0.06);
-    --bg-input: rgba(255, 255, 255, 0.08);
-    --border: rgba(255, 255, 255, 0.12);
-    --text: #ffffff;
-    --text-secondary: rgba(255, 255, 255, 0.75);
-    --text-muted: rgba(255, 255, 255, 0.5);
-    --pink: #fe2c55;
+    --bg: var(--md-sys-color-surface-dim, #000000);
+    --bg-elevated: var(--md-sys-color-surface-container-low, #121212);
+    --bg-card: var(--md-sys-color-surface-container, #181818);
+    --bg-hover: rgba(255, 255, 255, 0.08);
+    --bg-input: var(--md-sys-color-surface-container-high, rgba(255, 255, 255, 0.08));
+    --border: var(--md-sys-color-outline-variant, rgba(255, 255, 255, 0.12));
+    --text: var(--md-sys-color-on-surface, #ffffff);
+    --text-secondary: var(--md-sys-color-on-surface-variant, rgba(255, 255, 255, 0.75));
+    --text-muted: var(--md-sys-color-outline, rgba(255, 255, 255, 0.5));
+    --pink: var(--md-sys-color-primary, #fe2c55);
     --pink-hover: #ef2950;
-    --cyan: #25f4ee;
+    --cyan: var(--md-sys-color-tertiary, #25f4ee);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -1108,7 +1110,7 @@ _TIKTOK_HTML = r"""<!DOCTYPE html>
     height: 100%;
     background: var(--bg);
     color: var(--text);
-    font-family: "TikTokFont", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    font-family: var(--md-sys-typescale-font-plain, "TikTokFont", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif);
     overflow: hidden;
     user-select: none;
     -webkit-font-smoothing: antialiased;

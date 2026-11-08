@@ -403,6 +403,8 @@ def get_minecraft_html() -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <script>
 // Google Title & Favicon Cloak Protection
 (function(){
@@ -451,8 +453,8 @@ def get_minecraft_html() -> str:
     width: 100vw;
     height: 100vh;
     overflow: hidden;
-    background-color: #000;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    background-color: var(--md-sys-color-surface-dim, #000);
+    font-family: var(--md-sys-typescale-font-plain, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
   }
   #game_frame {
     width: 100vw;

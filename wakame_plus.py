@@ -755,6 +755,10 @@ main {{
       <span class="wkm-rail-pill">ℹ️</span>
       <span>概要</span>
     </a>
+    <button type="button" class="wkm-rail-item" style="border:none;background:transparent;cursor:pointer;" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" aria-label="M3設定を開く">
+      <span class="wkm-rail-pill">🎨</span>
+      <span>設定</span>
+    </button>
   </nav>
 
   <div class="wkm-main-col">
@@ -768,6 +772,7 @@ main {{
         <a href="/">🏠 Hub</a>
         <a href="/wakame/history">履歴</a>
         <a href="/wakame/favorites">マイリスト</a>
+        <button type="button" class="theme-toggle-btn" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" title="M3 表示・テーマ設定" aria-label="表示設定">🎨</button>
         <button type="button" class="theme-toggle-btn" id="wkmThemeToggle" aria-label="テーマ切替">🌙</button>
       </nav>
     </header>

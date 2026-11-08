@@ -4728,17 +4728,19 @@ def _shell_html(initial_target: str) -> str:
 <meta name="theme-color" content="#0f0f0f">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
-:root{{--bg:#0f0f0f;--text:#f2f2f2;--muted:#aaa}}
+:root{{--bg:var(--md-sys-color-surface,#0f0f0f);--text:var(--md-sys-color-on-surface,#f2f2f2);--muted:var(--md-sys-color-on-surface-variant,#aaa)}}
 *{{box-sizing:border-box;touch-action:manipulation}}
-html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;touch-action:manipulation}}
-.stage{{position:fixed;inset:0;width:100%;height:100%;background:#000;touch-action:manipulation}}
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--md-sys-typescale-font-plain,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif);touch-action:manipulation}}
+.stage{{position:fixed;inset:0;width:100%;height:100%;background:var(--md-sys-color-surface-dim,#000);touch-action:manipulation}}
 #frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#000;touch-action:manipulation}}
-#status{{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(17,17,17,.92);color:#e8e8e8;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.18)}}
+#status{{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 14px;border:1px solid var(--md-sys-color-outline-variant,rgba(255,255,255,.16));border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,rgba(17,17,17,.92));color:var(--md-sys-color-on-surface,#e8e8e8);font:11px/1.45 var(--md-sys-typescale-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);white-space:pre-wrap;pointer-events:none;box-shadow:var(--md-sys-elevation-level2,0 6px 20px rgba(0,0,0,.18))}}
 .hidden{{display:none}}
-.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:#0f0f0f;color:var(--muted);font-size:13px;text-align:center}}
+.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#0f0f0f);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
 .cover.hidden{{display:none}}
-.help{{position:fixed;z-index:80;left:10px;right:10px;bottom:10px;display:none;padding:10px 12px;border:1px solid #444;border-radius:8px;background:#171717;color:#ddd;font-size:12px;box-shadow:0 12px 34px rgba(0,0,0,.4)}}
+.help{{position:fixed;z-index:80;left:10px;right:10px;bottom:10px;display:none;padding:12px 16px;border:1px solid var(--md-sys-color-outline-variant,#444);border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,#171717);color:var(--md-sys-color-on-surface,#ddd);font-size:12px;box-shadow:var(--md-sys-elevation-level3,0 12px 34px rgba(0,0,0,.4))}}
 .help.show{{display:block}}
 </style>
 </head>

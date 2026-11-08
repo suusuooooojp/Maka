@@ -1148,10 +1148,12 @@ SCRAMJET_LAUNCHER = r'''<!doctype html>
 <meta charset="utf-8">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
 :root{color-scheme:dark}
-html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f}
-#status{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 12px;border:1px solid rgba(255,255,255,.16);border-radius:7px;background:rgba(17,17,17,.92);color:#e8e8e8;font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;pointer-events:none;box-shadow:0 6px 20px rgba(0,0,0,.18)}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sys-color-surface,#0f0f0f);font-family:var(--md-sys-typescale-font-plain,sans-serif)}
+#status{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 14px;border:1px solid var(--md-sys-color-outline-variant,rgba(255,255,255,.16));border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,rgba(17,17,17,.92));color:var(--md-sys-color-on-surface,#e8e8e8);font:11px/1.45 var(--md-sys-typescale-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);white-space:pre-wrap;pointer-events:none;box-shadow:var(--md-sys-elevation-level2,0 6px 20px rgba(0,0,0,.18))}
 #game{position:absolute;inset:0;width:100%;height:100%;border:0}
 .hidden{display:none}
 </style>

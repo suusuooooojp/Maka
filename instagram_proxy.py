@@ -2540,13 +2540,15 @@ def _shell_html(initial_target: str) -> str:
 <meta name="theme-color" content="#000000">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
 <style>
-:root{{--bg:#000000;--text:#f5f5f5;--muted:#a8a8a8}}
+:root{{--bg:var(--md-sys-color-surface,#000000);--text:var(--md-sys-color-on-surface,#f5f5f5);--muted:var(--md-sys-color-on-surface-variant,#a8a8a8)}}
 *{{box-sizing:border-box}}
-html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}}
-.stage{{position:fixed;inset:0;width:100%;height:100%;background:#000}}
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--md-sys-typescale-font-plain,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif)}}
+.stage{{position:fixed;inset:0;width:100%;height:100%;background:var(--md-sys-color-surface-dim,#000)}}
 #frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#000}}
-.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:#000;color:var(--muted);font-size:14px;text-align:center}}
+.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#000);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
 .cover.hidden{{display:none}}
 </style>
 </head>
