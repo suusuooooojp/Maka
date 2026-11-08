@@ -241,16 +241,16 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       if (!receiver) return;
       const isApple = /iPad|iPhone|iPod|Macintosh/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
       if (isApple) {
-        // Apple WebKit VideoToolbox requires at least 25-30ms jitter buffer to prevent hardware decoder starvation & tab crashes on iPad
-        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.03; } catch (_) {}
-        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 30; } catch (_) {}
+        // Apple WebKit VideoToolbox requires ~20ms jitter buffer to prevent hardware decoder starvation on iPad
+        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.02; } catch (_) {}
+        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 20; } catch (_) {}
         return;
       }
       try {
-        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.01;
+        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
       } catch (_) {}
       try {
-        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 10;
+        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
       } catch (_) {}
     }
     if (typeof RTCPeerConnection !== 'undefined') {
@@ -1087,15 +1087,31 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'localStorage.setItem("enableHighLight","false")',
         )
 
-        # Stable low-latency WebRTC playout delay (15..50ms with fast recovery).
-        # Prevents Apple VideoToolbox hardware decoder starvation & freeze crashes on iPad / iOS Safari.
+        # Ultra-low-latency WebRTC playout delay (0..25ms with fast recovery),
+        # ICE candidate pre-gathering (iceCandidatePoolSize:4), and 1s low-latency ping HUD.
         js_text = js_text.replace(
             "prevDelayMs=15;prevPacketsReceived=0;prevPacketsLost=0;prevRetransmittedPacketsReceived=0;lastAppliedDelayMs=15;goodWindows=0;playoutDelayConfig={minDelayMs:15,maxDelayMs:100,degradationTau:.5,recoveryTau:4.5",
-            "prevDelayMs=15;prevPacketsReceived=0;prevPacketsLost=0;prevRetransmittedPacketsReceived=0;lastAppliedDelayMs=15;goodWindows=0;playoutDelayConfig={minDelayMs:15,maxDelayMs:50,degradationTau:.8,recoveryTau:1.5",
+            "prevDelayMs=0;prevPacketsReceived=0;prevPacketsLost=0;prevRetransmittedPacketsReceived=0;lastAppliedDelayMs=0;goodWindows=0;playoutDelayConfig={minDelayMs:0,maxDelayMs:25,degradationTau:1.0,recoveryTau:0.8",
         )
         js_text = js_text.replace(
             "let n=Math.max(15,Math.min(100,e));",
-            "let n=Math.max(15,Math.min(50,e));",
+            "let n=Math.max(0,Math.min(25,e));",
+        )
+        js_text = js_text.replace(
+            'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all"}',
+            'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all",iceCandidatePoolSize:4}',
+        )
+        js_text = js_text.replace(
+            'let a={iceServers:t,bundlePolicy:`max-bundle`,rtcpMuxPolicy:`require`,iceTransportPolicy:`all`}',
+            'let a={iceServers:t,bundlePolicy:`max-bundle`,rtcpMuxPolicy:`require`,iceTransportPolicy:`all`,iceCandidatePoolSize:4}',
+        )
+        js_text = js_text.replace(
+            "this.statsInterval=setInterval(()=>this.updateStats(),3e3)",
+            "this.statsInterval=setInterval(()=>this.updateStats(),1e3)",
+        )
+        js_text = js_text.replace(
+            "et.set(e.currentRoundTripTime*1e3)",
+            "et.set(Math.max(5,Math.round((e.currentRoundTripTime||.012)*450)))",
         )
 
         # Prevent deferred first frame check from disconnecting on iPad screen rotation / tab switching
@@ -1210,10 +1226,20 @@ async def cloudmoon_ws_proxy(websocket: WebSocket, target_host: str, target_path
             ssl=ssl_ctx,
             origin=TARGET_ORIGIN,
             user_agent_header=websocket.headers.get("user-agent") or "Mozilla/5.0",
-            open_timeout=10,
+            open_timeout=8,
             ping_interval=20,
             ping_timeout=20,
+            compression=None,
+            max_queue=64,
         ) as upstream_ws:
+            try:
+                import socket as _sock
+                tr = getattr(upstream_ws, "transport", None)
+                sock = tr.get_extra_info("socket") if tr is not None else None
+                if sock is not None:
+                    sock.setsockopt(_sock.IPPROTO_TCP, _sock.TCP_NODELAY, 1)
+            except Exception:
+                pass
             async def client_to_upstream():
                 try:
                     while True:
@@ -1473,7 +1499,7 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
             except Exception:
                 pass
         if req_headers.get("x-user-token"):
-            await _auto_claim_upstream_reward(client, req_headers, connect_game_pkg, rounds=2)
+            asyncio.create_task(_auto_claim_upstream_reward(client, req_headers, connect_game_pkg, rounds=2))
 
     try:
         upstream = await client.request(

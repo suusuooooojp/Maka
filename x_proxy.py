@@ -101,7 +101,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261020-v17"
+RUNTIME_REV = "20261108-v18"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -161,9 +161,9 @@ def _patch_controller_api(source: bytes) -> bytes:
         'try{indexedDB.deleteDatabase("__scramjet_controller")}catch(_){}'
         'const _shVaultKey="__sh_cookie_vault_x";'
         "function g(){return Promise.resolve(null)}"
-        "async function w(){try{let r=sessionStorage.getItem(_shVaultKey);return r?u(JSON.parse(r)):null}catch(e){return null}}"
-        "async function k(e,t){try{let s=await w(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1);"
-        "return sessionStorage.setItem(_shVaultKey,JSON.stringify({updatedAt:i,cookies:e})),i}catch(e){return t}}"
+        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};res={updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}try{let ytRaw=localStorage.getItem('__sh_cookie_vault_yt')||sessionStorage.getItem('__sh_cookie_vault_yt');if(ytRaw){let ytObj=u(JSON.parse(ytRaw)),ytCookies=JSON.parse(ytObj?.cookies||'{}'),cur=JSON.parse(res?.cookies||'{}'),changed=false;for(let[ck,cv]of Object.entries(ytCookies)){if(ck.includes('google.com')&&!(ck in cur)){cur[ck]=cv;changed=true}}if(changed)res={updatedAt:Math.max(res?.updatedAt||0,ytObj?.updatedAt||Date.now()),cookies:JSON.stringify(cur)}}}catch(_){}return res}"
+        "async function w(){return _readVaultRaw()}"
+        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0){merged=s.cookies}else{merged=JSON.stringify({...prev,...curr})}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
     )
     text = text.replace(old_idb, new_idb, 1)
     text = text.replace(
@@ -338,12 +338,12 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:e.cookies});",
-        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{return window.top?.__schoolhub_controller?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
+        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
         1,
     )
     text = text.replace(
         "this.cookieJar=new i.cP,this.cookieJar.load(this.init.cookies),",
-        "this.cookieJar=(()=>{try{return window.top?.__schoolhub_controller?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{if(this.cookieJar!==window.top?.__schoolhub_controller?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
+        "this.cookieJar=(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;if(this.cookieJar!==_c?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
         1,
     )
     text = text.replace(
@@ -353,7 +353,7 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "sendSetCookie:async(e,t)=>{await this.transport.sendSetCookie(e,t)}",
-        "sendSetCookie:async(e,t)=>{try{await window.top?.__schoolhub_controller?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
+        "sendSetCookie:async(e,t)=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;await _c?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
         1,
     )
     old_req = (
@@ -370,8 +370,8 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "c?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])"
     )
     new_post = (
-        "(()=>{try{if('undefined'!=typeof window&&window.top&&window.top.__schoolhub_controller?.methods?.initRemoteTransport)"
-        "{window.top.__schoolhub_controller.methods.initRemoteTransport(o.port2);return}}catch(_){}"
+        "(()=>{try{const _c='undefined'!=typeof window&&(window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller);if(_c?.methods?.initRemoteTransport)"
+        "{_c.methods.initRemoteTransport(o.port2);return}}catch(_){}"
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
@@ -391,7 +391,8 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     4. Keep data:image/*, data:font/*, data:audio/*, data:video/* native so inline SVGs
        never get rewritten to /x/~/sj/.../data:... or truncated.
     5. Unrewrite blob: URLs directly on <img> just like <video>/<audio>/<source>.
-    6. Ensure navigator.userAgent and navigator.webdriver match HTTP relay headers.
+    6. Ensure navigator.userAgent, navigator.webdriver, Google GSI postMessage/nonce,
+       and BotGuard Function.prototype.toString / Error.prepareStackTrace work cleanly.
     """
     text = source.decode("utf-8")
     text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
@@ -399,6 +400,137 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     new_code = "let r=e.box.histories.get(t.this),s=null!=t.args[2]?(0,n.Qf)(t.args[2]):null;"
     if old_code in text:
         text = text.replace(old_code, new_code, 1)
+
+    old_storage_mod = (
+        'function n(e,t){let r={get(t,r){switch(r){'
+        'case"getItem":return r=>t.getItem(e.url.host+"@"+r);'
+        'case"setItem":return(r,i)=>t.setItem(e.url.host+"@"+r,i);'
+        'case"removeItem":return r=>t.removeItem(e.url.host+"@"+r);'
+        'case"clear":return()=>{for(let r in(0,i.BR)(t))r.startsWith(e.url.host)&&t.removeItem(r)};'
+        'case"key":return r=>{let n=(0,i.BR)(t).filter(t=>t.startsWith(e.url.host));return t.getItem(n[r])};'
+        'case"length":return(0,i.BR)(t).filter(t=>t.startsWith(e.url.host)).length;'
+        'default:if(r in Object.prototype||"symbol"==typeof r)return(0,i.rF)(t,r);return t.getItem(e.url.host+"@"+r)}},'
+        'set:(t,r,i)=>(t.setItem(e.url.host+"@"+r,i),!0),'
+        'has:(t,r)=>null!==t.getItem(e.url.host+"@"+r),'
+        'ownKeys:t=>(0,i.lK)(t).filter(t=>"string"==typeof t&&t.startsWith(e.url.host)).map(t=>"string"==typeof t?t.substring(e.url.host.length+1):t),'
+        'getOwnPropertyDescriptor(t,r){if(null!==t.getItem(e.url.host+"@"+r))return{value:t.getItem(e.url.host+"@"+r),enumerable:!0,configurable:!0,writable:!0}},'
+        'defineProperty:(t,r,i)=>(t.setItem(e.url.host+"@"+r,i.value),!0)},'
+        "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
+        "delete t.localStorage,delete t.sessionStorage,t.localStorage=n,t.sessionStorage=s}"
+    )
+    new_storage_mod = (
+        'function n(e,t){const _pfx=()=>"x:"+e.url.host+"@";let r={get(t,r){switch(r){'
+        'case"getItem":return r=>t.getItem(_pfx()+r);'
+        'case"setItem":return(r,i)=>t.setItem(_pfx()+r,i);'
+        'case"removeItem":return r=>t.removeItem(_pfx()+r);'
+        'case"clear":return()=>{for(let r in(0,i.BR)(t))r.startsWith(_pfx())&&t.removeItem(r)};'
+        'case"key":return r=>{let n=(0,i.BR)(t).filter(t=>t.startsWith(_pfx()));return n[r]?n[r].substring(_pfx().length):null};'
+        'case"length":return(0,i.BR)(t).filter(t=>t.startsWith(_pfx())).length;'
+        'default:if(r in Object.prototype||"symbol"==typeof r)return(0,i.rF)(t,r);return t.getItem(_pfx()+r)}},'
+        'set:(t,r,i)=>(t.setItem(_pfx()+r,i),!0),'
+        'has:(t,r)=>null!==t.getItem(_pfx()+r),'
+        'ownKeys:t=>(0,i.lK)(t).filter(t=>"string"==typeof t&&t.startsWith(_pfx())).map(t=>"string"==typeof t?t.substring(_pfx().length):t),'
+        'getOwnPropertyDescriptor(t,r){if(null!==t.getItem(_pfx()+r))return{value:t.getItem(_pfx()+r),enumerable:!0,configurable:!0,writable:!0}},'
+        'defineProperty:(t,r,i)=>(t.setItem(_pfx()+r,i.value),!0),'
+        'deleteProperty:(t,r)=>(t.removeItem(_pfx()+r),!0)},'
+        "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
+        "delete t.localStorage,delete t.sessionStorage,"
+        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!1,enumerable:!0}),'
+        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!1,enumerable:!0})}'
+    )
+    if old_storage_mod in text:
+        text = text.replace(old_storage_mod, new_storage_mod, 1)
+
+    old_parent_top_exact = (
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
+        '{get:function(){return e.wrapfn(this.parent,!1)},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
+        '{get:function(){return e.wrapfn(this.top,!1)},set(e){this.top=e},configurable:!1,enumerable:!1})'
+    )
+    new_parent_top_exact = (
+        '(()=>{try{'
+        'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
+        'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
+        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
+        'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
+        'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
+        'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
+        'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
+        '}}'
+        '}catch(_){}})(),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
+        '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
+        '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.top,!1):this.top},set(e){this.top=e},configurable:!1,enumerable:!1})'
+    )
+    if old_parent_top_exact in text:
+        text = text.replace(old_parent_top_exact, new_parent_top_exact, 1)
+
+    old_wrappm = (
+        "(0,s.pS)(t,e.config.globals.wrappostmessagefn,"
+        '{value:function(e){return e&&"function"==typeof e.postMessage?{postMessage:e.postMessage.bind(e)}:e},'
+        "configurable:!1,writable:!1,enumerable:!1})"
+    )
+    new_wrappm = (
+        "(0,s.pS)(t,e.config.globals.wrappostmessagefn,"
+        '{value:function(r){return r&&"function"==typeof r.postMessage?{postMessage:function(...a){const u=this&&o.POLLUTANT in this?this[o.POLLUTANT]:t;try{(0,s.pS)(r,o.POLLUTANT,{value:u,writable:!0,configurable:!0,enumerable:!1})}catch(_){}try{return r.postMessage(...a)}finally{try{delete r[o.POLLUTANT]}catch(_){}}}}:r},'
+        "configurable:!1,writable:!1,enumerable:!1})"
+    )
+    if old_wrappm in text:
+        text = text.replace(old_wrappm, new_wrappm, 1)
+
+    old_smap_push = (
+        '!function(e,t,r){let i=Uint8Array.from(t),n=new DataView(i.buffer),s=new TextDecoder("utf-8"),o=[],a=n.getUint32(0,!0),A=4;'
+        'for(let e=0;e<a;e++){let e=n.getUint32(A,!0);A+=4;let t=n.getUint32(A,!0);A+=4;let r=n.getUint8(A);'
+        'if(A+=1,0==r)o.push({type:r,start:e,size:t});else if(1==r){let a=e+t,l=n.getUint32(A,!0);A+=4;let c=s.decode(i.subarray(A,A+l));o.push({type:r,start:e,end:a,str:c}),A+=l}}'
+        'e.box.sourcemaps[r]=o}(e,t,r)'
+    )
+    new_smap_push = (
+        '(()=>{const o=Uint8Array.from(t);'
+        'try{(top.__sh_smaps||(top.__sh_smaps={}))[r]=o}catch(_){}'
+        '(globalThis.__sh_smaps||(globalThis.__sh_smaps={}))[r]=e.box.sourcemaps[r]=o})()'
+    )
+    if old_smap_push in text:
+        text = text.replace(old_smap_push, new_smap_push, 1)
+
+    old_ftostr_tag = 'if(-1===r)throw n.error("unreachable",e,t,r),new i.$D("unreachable");let o=e.substring(t+2,r).split(" ");if(3!==o.length||"scramtag"!==o[0]||!(0,i.Aw)(+o[1]))throw n.error("invalid tag",e,t,r,o),new i.$D("invalid tag");'
+    new_ftostr_tag = 'if(-1===r)return null;let o=e.substring(t+2,r).split(" ");if(3!==o.length||"scramtag"!==o[0]||!(0,i.Aw)(+o[1]))return null;'
+    if old_ftostr_tag in text:
+        text = text.replace(old_ftostr_tag, new_ftostr_tag, 1)
+
+    old_ftostr = 'u=e.box.sourcemaps[a];if(!u)return n.warn("failed to get rewrites for tag",a),t.return(r);'
+    new_ftostr = (
+        'u=e.box.sourcemaps[a]||globalThis.__sh_smaps?.[a]||(()=>{try{return top.__sh_smaps?.[a]}catch(_){return null}})();'
+        'if(!u)return t.return(r.replace(/\\/\\*scramtag [^*]*\\*\\//g,""));'
+        'if(u instanceof Uint8Array||ArrayBuffer.isView(u)){'
+        'let _i=new Uint8Array(u.buffer,u.byteOffset,u.byteLength),_n=new DataView(_i.buffer,_i.byteOffset,_i.byteLength),_s=new TextDecoder("utf-8"),_o=[],_a=_n.getUint32(0,!0),_A=4;'
+        'for(let _e=0;_e<_a;_e++){let _st=_n.getUint32(_A,!0);_A+=4;let _sz=_n.getUint32(_A,!0);_A+=4;let _tp=_n.getUint8(_A);_A+=1;'
+        'if(0==_tp)_o.push({type:_tp,start:_st,size:_sz});else if(1==_tp){let _ed=_st+_sz,_ln=_n.getUint32(_A,!0);_A+=4;let _tx=_s.decode(_i.subarray(_A,_A+_ln));_o.push({type:_tp,start:_st,end:_ed,str:_tx}),_A+=_ln}}'
+        'u=e.box.sourcemaps[a]=(globalThis.__sh_smaps||(globalThis.__sh_smaps={}))[a]=_o;try{(top.__sh_smaps||(top.__sh_smaps={}))[a]=_o}catch(_){}}'
+    )
+    if old_ftostr in text:
+        text = text.replace(old_ftostr, new_ftostr, 1)
+
+    old_ftostr_end = 'f+=r.slice(m),f=f.replace(`${s}${l} ${a}*/`,""),t.return(f)'
+    new_ftostr_end = 'f+=r.slice(m),f=f.replace(`${s}${l} ${a}*/`,"").replace(/\\/\\*scramtag [^*]*\\*\\//g,""),t.return(f)'
+    if old_ftostr_end in text:
+        text = text.replace(old_ftostr_end, new_ftostr_end, 1)
+
+    old_msg_null = 'origin(){return i.iswindow?"object"==typeof this.data&&"$scramjet$origin"in this.data?this.data.$scramjet$origin:e.url.origin:""},data(){return"object"==typeof this.data&&"$scramjet$data"in this.data?this.data.$scramjet$data:this.data}'
+    new_msg_null = 'origin(){return i.iswindow?"object"==typeof this.data&&null!==this.data&&"$scramjet$origin"in this.data?this.data.$scramjet$origin:e.url.origin:""},data(){return"object"==typeof this.data&&null!==this.data&&"$scramjet$data"in this.data?this.data.$scramjet$data:this.data}'
+    if old_msg_null in text:
+        text = text.replace(old_msg_null, new_msg_null, 1)
+
+    old_smap = "let e=globalThis[r.config.globals.pushsourcemapfn];"
+    new_smap = "let e=(n?.base?.defaultView||globalThis)[r.config.globals.pushsourcemapfn]||globalThis[r.config.globals.pushsourcemapfn];"
+    if old_smap in text:
+        text = text.replace(old_smap, new_smap, 1)
+
+    old_stack = 'let r=(t,r)=>{let n=t.stack;for(let t=0;t<r.length;t++){let s=r[t].getFileName();try{if(e.config.maskedfiles.some(e=>s.endsWith(e))){let e=n.split("\\n"),t=e.find(e=>e.includes(s));e.splice(t,1),n=e.join("\\n");continue}}catch{}try{n=n.replaceAll(s,(0,i.v2)(s,e.context))}catch{}}return n};e.Trap("Error.prepareStackTrace",{get:e=>r,set(e){}})'
+    new_stack = 'let _inSt=!1,_usrSt=null,r=(t,a)=>{if(_inSt)return String(t);_inSt=!0;try{if("function"==typeof _usrSt)return _usrSt(t,a);let n=[String(t)];for(let o=0;o<a.length;o++){let c=a[o],s=String(c),f="";try{f=c.getFileName()||""}catch{}try{const _fc=f.split("?")[0];if(f&&(_fc.includes("/x/runtime/")||_fc.endsWith("scramjet.js")||_fc.endsWith("scramjet.wasm.js")||_fc.endsWith("controller.inject.js")||e.config.maskedfiles.some(m=>_fc.endsWith(m))))continue}catch{}try{s=s.replace(/https?:\\/\\/[^\\s)]+\\/x\\/~\\/sj\\/(?:[^/]+\\/){0,2}(https?(?:%3A|:)[^\\s):]+)/gi,(_,u)=>{try{return decodeURIComponent(u).split("?")[0]}catch{return _}})}catch{}n.push("    at "+s)}return n.join("\\n")}finally{_inSt=!1}};try{Error.prepareStackTrace=r}catch{}e.Trap("Error.prepareStackTrace",{get:()=>_usrSt||r,set(v){_usrSt="function"==typeof v?v:null;try{Error.prepareStackTrace=r}catch{}}})'
+    if old_stack in text:
+        text = text.replace(old_stack, new_stack, 1)
+
     old_rew = 'if(!A||"http:"!=A.protocol&&"https:"!=A.protocol)return e;'
     new_rew = (
         'if(!A||"http:"!=A.protocol&&"https:"!=A.protocol)return e;'
@@ -470,13 +602,38 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         't.args[0]=String(t.args[0]||"").startsWith("blob:")?"blob:"+self.location.origin+new URL(String(t.args[0]).slice(5)).pathname:e.rewriteUrl(t.args[0],{destination:"sharedworker",isModule:r})',
         1,
     )
+    old_fn_ctor = 'e.RawProxy(i.prototype,"constructor",r)'
+    new_fn_ctor = 'Object.defineProperty(i.prototype,"constructor",{value:t.Function,writable:!0,enumerable:!1,configurable:!0})'
+    if old_fn_ctor in text:
+        text = text.replace(old_fn_ctor, new_fn_ctor, 1)
+    old_nonce_rule = '{fn:()=>null,nonce:"*",csp:["iframe"],credentialless:["iframe"]}'
+    new_nonce_rule = '{fn:()=>null,csp:["iframe"],credentialless:["iframe"]}'
+    if old_nonce_rule in text:
+        text = text.replace(old_nonce_rule, new_nonce_rule, 1)
+    old_attr_iter = '"getNamedItemNS"===n?(e,t)=>r[`${e}:${t}`]:'
+    new_attr_iter = '"getNamedItemNS"===n?(e,t)=>r[`${e}:${t}`]:"item"===n?e=>r[e]:n===Symbol.iterator?function*(){const _ks=(0,i.BR)(r);for(let _k=0;_k<_ks.length;_k++)yield t[_ks[_k]]}:'
+    if old_attr_iter in text:
+        text = text.replace(old_attr_iter, new_attr_iter, 1)
+    old_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&r.startsWith(e.context.prefix.href)?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{for(let r of e.config.maskedfiles)if((0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t)).endsWith(r))return!1;return!0}))}})'
+    new_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&(r.startsWith(e.context.prefix.href)||r.includes("/x/runtime/media-relay"))?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{const _nm=(0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t))||"",_nc=_nm.split("?")[0];if(_nc.includes("/x/runtime/scramjet")||_nc.includes("/x/runtime/controller")||_nc.endsWith("scramjet.wasm.js"))return!1;for(let r of e.config.maskedfiles)if(_nc.endsWith(r))return!1;return!0}))}})'
+    if old_perf in text:
+        text = text.replace(old_perf, new_perf, 1)
+    old_wasm_init = "(0,n.QR)({module:new WebAssembly.Module(i)});"
+    new_wasm_init = "0===c.length&&(0,n.QR)({module:new WebAssembly.Module(i)});"
+    if old_wasm_init in text:
+        text = text.replace(old_wasm_init, new_wasm_init, 1)
     preamble = (
-        'try{if(typeof navigator!=="undefined"){'
-        'if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}'
-        'if(String(navigator.userAgent||"").includes("HeadlessChrome/")){'
+        'try{if(typeof window!=="undefined"){'
+        'try{delete window.IdentityCredential;delete Window.prototype.IdentityCredential;}catch(_){}'
+        'try{delete window.FederatedCredential;delete Window.prototype.FederatedCredential;}catch(_){}'
+        '}'
+        'if(typeof navigator!=="undefined"){'
+        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
+        'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
+        'if(String(navigator.userAgent||"").includes("HeadlessChrome/")&&_np){'
         'const _ua=navigator.userAgent.replace(/HeadlessChrome\\//g,"Chrome/");'
-        'Object.defineProperty(navigator,"userAgent",{get:()=>_ua,configurable:true});'
-        'Object.defineProperty(navigator,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),configurable:true});'
+        'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
+        'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
         '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
@@ -484,7 +641,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'globalThis.Blob=new Proxy(_OrigBlob,{construct(target,args,newTarget){try{const parts=args[0],opts=args[1];if(Array.isArray(parts)&&parts.length>0&&typeof parts[0]==="string"&&(String(opts?.type||"").includes("javascript")||parts[0].includes("onmessage")||parts[0].includes("onconnect"))){args=[[_wShim,...parts],opts];}}catch(_){}return Reflect.construct(target,args,newTarget);}});'
         '}}catch(_){}\n'
     )
-    if not text.startswith("try{if(typeof navigator"):
+    if not text.startswith("try{if(typeof window") and not text.startswith("try{if(typeof navigator"):
         text = preamble + text
     return text.encode("utf-8")
 
@@ -1441,22 +1598,33 @@ async def x_sj_direct_fallback(rest: str, request: Request):
 
 def _normalize_x_set_cookie(cookie_val: str, host: str) -> str:
     """Ensure cookies set by x.com / api.x.com / jf.x.com share Domain=.x.com
-    in Scramjet's CookieJar so login/guest/CSRF cookies work across subdomains."""
-    if not cookie_val or not (host == "x.com" or host.endswith(".x.com")):
+    and cookies set by accounts.google.com share Domain=.google.com in Scramjet's CookieJar."""
+    if not cookie_val:
         return cookie_val
     first_semi = cookie_val.find(";")
     name_val = cookie_val if first_semi < 0 else cookie_val[:first_semi]
     cookie_name = name_val.split("=", 1)[0].strip()
     if cookie_name.startswith("__Host-"):
         return cookie_val
-    if re.search(r";\s*domain\s*=", cookie_val, re.I):
-        return re.sub(
-            r"(;\s*domain\s*=\s*)x\.com\b",
-            r"\1.x.com",
-            cookie_val,
-            flags=re.I,
-        )
-    return cookie_val.rstrip("; ") + "; Domain=.x.com"
+    if host == "x.com" or host.endswith(".x.com"):
+        if re.search(r";\s*domain\s*=", cookie_val, re.I):
+            return re.sub(
+                r"(;\s*domain\s*=\s*)x\.com\b",
+                r"\1.x.com",
+                cookie_val,
+                flags=re.I,
+            )
+        return cookie_val.rstrip("; ") + "; Domain=.x.com"
+    if host == "google.com" or host.endswith(".google.com"):
+        if re.search(r";\s*domain\s*=", cookie_val, re.I):
+            return re.sub(
+                r"(;\s*domain\s*=\s*)google\.com\b",
+                r"\1.google.com",
+                cookie_val,
+                flags=re.I,
+            )
+        return cookie_val.rstrip("; ") + "; Domain=.google.com"
+    return cookie_val
 
 
 def _select_curl_impersonate(ua: str) -> str:
@@ -1683,6 +1851,68 @@ async def x_http_relay(request: Request):
     if cookie_str:
         header_dict["Cookie"] = cookie_str
 
+    orig_ref = ""
+    has_origin = False
+    for hk in list(header_dict.keys()):
+        hkl = hk.lower()
+        if hkl == "referer":
+            orig_ref = header_dict.pop(hk)
+        elif hkl == "origin":
+            has_origin = True
+            header_dict.pop(hk)
+
+    if host in ("x.com", "www.x.com", "mobile.x.com", "api.x.com", "twitter.com", "api.twitter.com"):
+        if has_origin or method == "POST" or host in ("api.x.com", "api.twitter.com"):
+            header_dict["Origin"] = "https://x.com"
+        if (
+            not orig_ref
+            or "/~/sj/" in orig_ref
+            or ".onrender.com" in orig_ref
+            or ".ai.studio" in orig_ref
+            or "localhost" in orig_ref
+            or "127.0.0.1" in orig_ref
+        ):
+            header_dict["Referer"] = "https://x.com/"
+        else:
+            header_dict["Referer"] = orig_ref
+    elif host == "jf.x.com":
+        if has_origin or method == "POST":
+            header_dict["Origin"] = "https://jf.x.com"
+        if (
+            not orig_ref
+            or "/~/sj/" in orig_ref
+            or ".onrender.com" in orig_ref
+            or ".ai.studio" in orig_ref
+            or "localhost" in orig_ref
+            or "127.0.0.1" in orig_ref
+        ):
+            header_dict["Referer"] = "https://x.com/"
+        else:
+            header_dict["Referer"] = orig_ref
+    elif host in AUTH_HOSTS or host.endswith(".google.com") or host == "google.com":
+        if (parsed.path or "").startswith("/gsi/"):
+            header_dict["Origin"] = "https://x.com"
+            header_dict["Referer"] = "https://x.com/"
+        else:
+            if has_origin or method == "POST":
+                header_dict["Origin"] = f"https://{host}"
+            if (
+                not orig_ref
+                or "/~/sj/" in orig_ref
+                or ".onrender.com" in orig_ref
+                or ".ai.studio" in orig_ref
+                or "localhost" in orig_ref
+                or "127.0.0.1" in orig_ref
+            ):
+                header_dict["Referer"] = f"https://{host}/"
+            else:
+                header_dict["Referer"] = orig_ref
+    else:
+        if orig_ref and "/~/sj/" not in orig_ref:
+            header_dict["Referer"] = orig_ref
+        if has_origin:
+            header_dict["Origin"] = "https://x.com"
+
     has_auth_token = bool(re.search(r"(?:^|[;\s])auth_token=[^;\s]+", cookie_str))
     req_path = parsed.path or "/"
 
@@ -1805,6 +2035,7 @@ async def x_http_relay(request: Request):
         bool(cookie_parts)
         or any(k.lower() in ("authorization", "x-csrf-token", "x-guest-token") for k in header_dict)
         or host in AUTH_HOSTS
+        or host.endswith(".google.com")
         or host == "jf.x.com"
         or (parsed.path or "").startswith(("/i/flow/", "/i/jf/", "/login", "/logout", "/account/"))
     )
@@ -1837,9 +2068,27 @@ async def x_http_relay(request: Request):
             return _pack_relay_response(c_status, c_text, c_headers, c_body)
 
     impersonate_profile = "chrome131" if is_unauthed_home_doc else _select_curl_impersonate(client_ua)
-    if impersonate_profile.startswith("safari"):
+    if impersonate_profile.startswith("safari") or is_unauthed_home_doc:
         for k_del in [k for k in header_dict if k.lower().startswith("sec-ch-ua")]:
             header_dict.pop(k_del, None)
+    else:
+        has_ch_ua = any(k.lower() == "sec-ch-ua" for k in header_dict)
+        if not has_ch_ua:
+            m_ver = re.search(r"Chrome/(\d+)", client_ua)
+            c_maj = m_ver.group(1) if m_ver else "131"
+            header_dict["sec-ch-ua"] = f'"Google Chrome";v="{c_maj}", "Chromium";v="{c_maj}", "Not_A Brand";v="24"'
+            header_dict["sec-ch-ua-mobile"] = "?1" if "Mobile" in client_ua else "?0"
+            if "Macintosh" in client_ua or "Mac OS X" in client_ua:
+                ch_plat = '"macOS"'
+            elif "Android" in client_ua:
+                ch_plat = '"Android"'
+            elif "CrOS" in client_ua:
+                ch_plat = '"Chrome OS"'
+            elif "Linux" in client_ua:
+                ch_plat = '"Linux"'
+            else:
+                ch_plat = '"Windows"'
+            header_dict["sec-ch-ua-platform"] = ch_plat
 
     ephemeral_session: StatelessCurlSession | None = None
     try:
@@ -1940,6 +2189,23 @@ async def x_http_relay(request: Request):
             .replace(
                 b"https://x.com/explore",
                 b"https://x.com/home",
+            )
+        )
+
+    if (
+        status == 200
+        and host == "accounts.google.com"
+        and req_path.startswith("/gsi/client")
+        and resp_body
+    ):
+        resp_body = (
+            resp_body.replace(
+                b'"IdentityCredential"in window',
+                b"false",
+            )
+            .replace(
+                b'"FederatedCredential"in window',
+                b"false",
             )
         )
 
@@ -2612,6 +2878,24 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           ? new ArrayBuffer(0)
           : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
         const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
+        if (controller) {{
+          try {{
+            const setCookieEntries = [];
+            for (const [k, v] of respHeaders) {{
+              if (String(k || "").toLowerCase() === "set-cookie" && v) {{
+                let scStr = String(v);
+                scStr = scStr.replace(/;\\s*domain=google\\.com\\b/gi, "; Domain=.google.com");
+                scStr = scStr.replace(/;\\s*domain=x\\.com\\b/gi, "; Domain=.x.com");
+                setCookieEntries.push({{ url: urlStr, cookie: scStr }});
+              }}
+            }}
+            if (setCookieEntries.length > 0) {{
+              controller.applyCookieSyncEntries?.(setCookieEntries);
+              await controller.persistCookies?.();
+              await controller.propagateCookieSync?.(setCookieEntries, {{}});
+            }}
+          }} catch (_) {{}}
+        }}
         const statusNum = Number(meta.status || 200);
         if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
           try {{

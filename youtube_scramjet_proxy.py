@@ -130,7 +130,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261108-v31"
+RUNTIME_REV = "20261108-v32"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -196,7 +196,7 @@ def _patch_controller_api(source: bytes) -> bytes:
         'try{indexedDB.deleteDatabase("__scramjet_controller")}catch(_){}'
         'const _shVaultKey="__sh_cookie_vault_yt";'
         "function g(){return Promise.resolve(null)}"
-        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};return{updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){return a.updatedAt>=b.updatedAt?a:b}}return a||b||null}"
+        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};res={updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}try{let xRaw=localStorage.getItem('__sh_cookie_vault_x')||sessionStorage.getItem('__sh_cookie_vault_x');if(xRaw){let xObj=u(JSON.parse(xRaw)),xCookies=JSON.parse(xObj?.cookies||'{}'),cur=JSON.parse(res?.cookies||'{}'),changed=false;for(let[ck,cv]of Object.entries(xCookies)){if(ck.includes('google.com')&&!(ck in cur)){cur[ck]=cv;changed=true}}if(changed)res={updatedAt:Math.max(res?.updatedAt||0,xObj?.updatedAt||Date.now()),cookies:JSON.stringify(cur)}}}catch(_){}return res}"
         "async function w(){return _readVaultRaw()}"
         "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0){merged=s.cookies}else{merged=JSON.stringify({...prev,...curr})}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
     )
@@ -392,12 +392,12 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:e.cookies});",
-        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{return window.top?.__schoolhub_controller?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
+        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
         1,
     )
     text = text.replace(
         "this.cookieJar=new i.cP,this.cookieJar.load(this.init.cookies),",
-        "this.cookieJar=(()=>{try{return window.top?.__schoolhub_controller?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{if(this.cookieJar!==window.top?.__schoolhub_controller?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
+        "this.cookieJar=(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;if(this.cookieJar!==_c?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
         1,
     )
     text = text.replace(
@@ -407,7 +407,7 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "sendSetCookie:async(e,t)=>{await this.transport.sendSetCookie(e,t)}",
-        "sendSetCookie:async(e,t)=>{try{await window.top?.__schoolhub_controller?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
+        "sendSetCookie:async(e,t)=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;await _c?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
         1,
     )
     old_req = (
@@ -424,8 +424,8 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "c?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])"
     )
     new_post = (
-        "(()=>{try{if('undefined'!=typeof window&&window.top&&window.top.__schoolhub_controller?.methods?.initRemoteTransport)"
-        "{window.top.__schoolhub_controller.methods.initRemoteTransport(o.port2);return}}catch(_){}"
+        "(()=>{try{const _c='undefined'!=typeof window&&(window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller);if(_c?.methods?.initRemoteTransport)"
+        "{_c.methods.initRemoteTransport(o.port2);return}}catch(_){}"
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
@@ -637,7 +637,11 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     if old_wasm_init in text:
         text = text.replace(old_wasm_init, new_wasm_init, 1)
     preamble = (
-        'try{if(typeof navigator!=="undefined"){'
+        'try{if(typeof window!=="undefined"){'
+        'try{delete window.IdentityCredential;delete Window.prototype.IdentityCredential;}catch(_){}'
+        'try{delete window.FederatedCredential;delete Window.prototype.FederatedCredential;}catch(_){}'
+        '}'
+        'if(typeof navigator!=="undefined"){'
         'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
         'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
         'if(String(navigator.userAgent||"").includes("HeadlessChrome/")&&_np){'
@@ -645,11 +649,11 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
         'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
         '}}'
-        'if(typeof document!=="undefined"&&typeof location!=="undefined"&&location.pathname.includes("/youtube/~/sj/")&&!String(document.cookie||"").includes("PREF=")){'
+        'if(typeof document!=="undefined"&&typeof location!=="undefined"&&location.pathname.includes("/youtube/~/sj/")&&location.pathname.includes("youtube.com")&&!String(document.cookie||"").includes("PREF=")){'
         'document.cookie="PREF=f6=400&hl=ja&gl=JP; path=/; max-age=31536000";'
         '}}catch(_){}\n'
     )
-    if not text.startswith("try{if(typeof navigator"):
+    if not text.startswith("try{if(typeof window") and not text.startswith("try{if(typeof navigator"):
         text = preamble + text
     return text.encode("utf-8")
 
@@ -4074,7 +4078,7 @@ async def youtube_http_relay(request: Request):
     if is_yt_host or host.endswith(".youtube.com") or host == "youtube.com":
         if has_origin or method == "POST":
             header_dict["Origin"] = "https://www.youtube.com"
-        if not orig_ref or "/youtube/~/sj/" in orig_ref or ".onrender.com" in orig_ref or "localhost" in orig_ref or "127.0.0.1" in orig_ref:
+        if not orig_ref or "/youtube/~/sj/" in orig_ref or ".onrender.com" in orig_ref or ".ai.studio" in orig_ref or "localhost" in orig_ref or "127.0.0.1" in orig_ref:
             if req_vid:
                 header_dict["Referer"] = f"https://www.youtube.com/watch?v={req_vid}"
             elif "/playables" in (parsed.path or ""):
@@ -4083,15 +4087,30 @@ async def youtube_http_relay(request: Request):
                 header_dict["Referer"] = "https://www.youtube.com/"
         else:
             header_dict["Referer"] = orig_ref
+    elif host in AUTH_HOSTS or host.endswith(".google.com") or host == "google.com":
+        if has_origin or method == "POST":
+            header_dict["Origin"] = f"https://{host}"
+        if (
+            not orig_ref
+            or "/~/sj/" in orig_ref
+            or ".onrender.com" in orig_ref
+            or ".ai.studio" in orig_ref
+            or "localhost" in orig_ref
+            or "127.0.0.1" in orig_ref
+            or "youtube.com" in orig_ref
+        ):
+            header_dict["Referer"] = f"https://{host}/"
+        else:
+            header_dict["Referer"] = orig_ref
     elif host.endswith((".usercontent.goog", ".playables.usercontent.goog")):
         if has_origin or method == "POST":
             header_dict["Origin"] = "https://www.youtube.com"
         header_dict["Referer"] = "https://www.youtube.com/"
     else:
-        if orig_ref:
+        if orig_ref and "/~/sj/" not in orig_ref:
             header_dict["Referer"] = orig_ref
         if has_origin:
-            header_dict["Origin"] = "https://www.youtube.com"
+            header_dict["Origin"] = f"https://{host}"
 
     stream_task = (
         asyncio.create_task(_resolve_stream_info(req_vid)) if req_vid else None
