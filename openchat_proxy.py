@@ -804,10 +804,13 @@ def _sync_postgres_openchat() -> bool:
                         time_str TEXT NOT NULL,
                         ts DOUBLE PRECISION NOT NULL,
                         reply_json TEXT NOT NULL DEFAULT '',
-                        image_data TEXT NOT NULL DEFAULT ''
+                        image_data TEXT NOT NULL DEFAULT '',
+                        video_data TEXT NOT NULL DEFAULT ''
                     );
                     ALTER TABLE schoolhub_openchat_messages
                         ADD COLUMN IF NOT EXISTS image_data TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE schoolhub_openchat_messages
+                        ADD COLUMN IF NOT EXISTS video_data TEXT NOT NULL DEFAULT '';
                     CREATE TABLE IF NOT EXISTS schoolhub_openchat_names (
                         norm_name TEXT PRIMARY KEY,
                         client_id TEXT NOT NULL,
@@ -878,11 +881,12 @@ def _sync_postgres_openchat() -> bool:
                     cur.execute(
                         """
                         INSERT INTO schoolhub_openchat_messages
-                        (id, sender_id, client_id, service, text, time_str, ts, reply_json, image_data)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        (id, sender_id, client_id, service, text, time_str, ts, reply_json, image_data, video_data)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (id) DO UPDATE SET
                             sender_id = EXCLUDED.sender_id,
-                            reply_json = EXCLUDED.reply_json
+                            reply_json = EXCLUDED.reply_json,
+                            video_data = EXCLUDED.video_data
                         """,
                         (
                             m_id,
@@ -894,13 +898,14 @@ def _sync_postgres_openchat() -> bool:
                             m_ts,
                             json.dumps(m["replyTo"], ensure_ascii=False) if m.get("replyTo") else "",
                             str(m.get("image") or ""),
+                            str(m.get("video") or ""),
                         ),
                     )
                     _PG_SYNCED_MSG_IDS.add(m_id)
                 # 3. Pull remote messages newer than _RESET_EPOCH_TS
                 cur.execute(
                     """
-                    SELECT id, sender_id, client_id, service, text, time_str, ts, reply_json, image_data
+                    SELECT id, sender_id, client_id, service, text, time_str, ts, reply_json, image_data, video_data
                     FROM schoolhub_openchat_messages
                     WHERE ts > %s
                     ORDER BY ts DESC
@@ -910,7 +915,7 @@ def _sync_postgres_openchat() -> bool:
                 )
                 rows = cur.fetchall()
                 remote_msgs = []
-                for r_id, r_sid, r_cid, r_svc, r_txt, r_time, r_ts, r_rep, r_img in reversed(rows):
+                for r_id, r_sid, r_cid, r_svc, r_txt, r_time, r_ts, r_rep, r_img, r_vid in reversed(rows):
                     item = {
                         "id": r_id,
                         "senderId": _canonicalize_sid(r_sid, r_cid),
@@ -927,6 +932,8 @@ def _sync_postgres_openchat() -> bool:
                             pass
                     if r_img:
                         item["image"] = r_img
+                    if r_vid:
+                        item["video"] = r_vid
                     remote_msgs.append(item)
                 if remote_msgs:
                     _merge_messages(remote_msgs)
@@ -1018,9 +1025,93 @@ def _clean_image(raw_img) -> str:
         return ""
     if s.startswith(("data:image/jpeg;base64,", "data:image/jpg;base64,", "data:image/png;base64,", "data:image/webp;base64,", "data:image/gif;base64,")):
         return s
-    if s.startswith(("https://", "http://")) and len(s) <= 1024:
+    if s.startswith(("https://", "http://", "/openchat/media/")) and len(s) <= 1024:
         return s
     return ""
+
+
+def _clean_video(raw_vid) -> str:
+    if not raw_vid or not isinstance(raw_vid, str):
+        return ""
+    s = raw_vid.strip()
+    if len(s) > 12_000_000:
+        return ""
+    if s.startswith(("/openchat/media/", "https://", "http://")) and len(s) <= 1024:
+        return s
+    if s.startswith(("data:video/mp4;base64,", "data:video/webm;base64,", "data:video/ogg;base64,", "data:video/quicktime;base64,")):
+        return s
+    return ""
+
+
+# --- OpenChat Login Authentication (Required for Posting, Not Required for Viewing) ---
+_AUTH_SIGN_SECRET = b"schoolhub_openchat_auth_secret_v1"
+_MEDIA_TMP_DIR = "/tmp/openchat_media"
+_MEDIA_PERSIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openchat_media")
+for _d in (_MEDIA_TMP_DIR, _MEDIA_PERSIST_DIR):
+    try:
+        os.makedirs(_d, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _sign_auth_token(username: str, trip: str = "") -> str:
+    u_clean = _clean_str(username, 24)
+    t_clean = _clean_str(trip, 24).lstrip("#").lstrip("◆").strip()
+    if not u_clean:
+        return ""
+    payload_str = json.dumps({"u": u_clean, "t": t_clean, "v": 1}, ensure_ascii=False, separators=(",", ":"))
+    b64 = base64.urlsafe_b64encode(payload_str.encode("utf-8")).decode("ascii").rstrip("=")
+    sig = hmac.new(_AUTH_SIGN_SECRET, b64.encode("ascii"), hashlib.sha256).hexdigest()[:20]
+    return f"{b64}.{sig}"
+
+
+def _verify_auth_token(token: str) -> dict | None:
+    if not token or not isinstance(token, str) or "." not in token:
+        return None
+    parts = token.strip().split(".")
+    if len(parts) != 2:
+        return None
+    b64, sig = parts[0], parts[1]
+    expected = hmac.new(_AUTH_SIGN_SECRET, b64.encode("ascii"), hashlib.sha256).hexdigest()[:20]
+    if not hmac.compare_digest(sig, expected):
+        return None
+    try:
+        pad = "=" * ((4 - len(b64) % 4) % 4)
+        raw = base64.urlsafe_b64decode((b64 + pad).encode("ascii")).decode("utf-8")
+        obj = json.loads(raw)
+        if isinstance(obj, dict) and obj.get("u"):
+            return {
+                "username": _clean_str(obj.get("u"), 24),
+                "tripKey": _clean_str(obj.get("t") or "", 24),
+            }
+    except Exception:
+        pass
+    return None
+
+
+def _extract_auth_user(scope_or_req, data: dict = None, incoming_msg: dict = None) -> dict | None:
+    tok = ""
+    if isinstance(incoming_msg, dict):
+        tok = str(incoming_msg.get("authToken") or "").strip()
+    if not tok and isinstance(data, dict):
+        tok = str(data.get("authToken") or "").strip()
+    if not tok and scope_or_req is not None:
+        try:
+            headers = getattr(scope_or_req, "headers", None) or {}
+            if hasattr(headers, "get"):
+                tok = str(headers.get("x-openchat-auth") or "").strip()
+        except Exception:
+            pass
+    if not tok and scope_or_req is not None:
+        try:
+            q = getattr(scope_or_req, "query_params", None)
+            if q and hasattr(q, "get"):
+                tok = str(q.get("auth") or "").strip()
+        except Exception:
+            pass
+    if not tok and scope_or_req is not None:
+        tok = _extract_cookie_val(scope_or_req, "sh_openchat_auth")
+    return _verify_auth_token(tok)
 
 
 def _clean_reply(raw_reply) -> dict | None:
@@ -1072,7 +1163,8 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
         mid = _clean_str(item.get("id"), 64)
         text = _clean_str(item.get("text"), 300)
         image = _clean_image(item.get("image"))
-        if not mid or (not text and not image):
+        video = _clean_video(item.get("video"))
+        if not mid or (not text and not image and not video):
             continue
         if (
             mid.startswith("sys_")
@@ -1098,6 +1190,9 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
                 updated = True
             if item.get("trip") and not ex.get("trip"):
                 ex["trip"] = _clean_str(item.get("trip"), 16)
+                updated = True
+            if video and not ex.get("video"):
+                ex["video"] = video
                 updated = True
             if item.get("service") and ex.get("service") in ("", "Web", "School Hub", "ホーム") and item.get("service") not in ("Web", "System"):
                 ex["service"] = _clean_str(item.get("service"), 32)
@@ -1125,6 +1220,8 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
             clean_msg["trip"] = _clean_str(item.get("trip"), 16)
         if image:
             clean_msg["image"] = image
+        if video:
+            clean_msg["video"] = video
         if client_id:
             clean_msg["clientId"] = client_id
         r = _clean_reply(item.get("replyTo"))
@@ -1383,29 +1480,283 @@ async def openchat_page():
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <style>
   body, html {
-    margin: 0; padding: 0; width: 100%; height: 100%; background: #0f172a; color: #f8fafc;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 0; width: 100%; height: 100%; background: #f8f9fa; color: #202124;
+    font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans JP", sans-serif;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
   }
-  .oc-wrap { text-align: center; padding: 24px; }
-  .oc-title { font-size: 24px; font-weight: 700; margin-bottom: 8px; color: #60a5fa; }
-  .oc-sub { color: #94a3b8; font-size: 14px; margin-bottom: 20px; }
-  .oc-btn {
-    display: inline-block; padding: 10px 20px; background: #2563eb; color: #fff;
-    text-decoration: none; border-radius: 8px; font-weight: 600; font-size: 14px;
+  .oc-wrap {
+    text-align: center; padding: 32px 28px; background: #ffffff;
+    border: 1px solid #dadce0; border-radius: 24px;
+    box-shadow: 0 4px 20px rgba(60, 64, 67, 0.08);
+    max-width: 440px; width: calc(100% - 32px);
   }
+  .oc-logo {
+    font-size: 28px; font-weight: 700; margin-bottom: 10px; letter-spacing: -0.02em;
+  }
+  .oc-logo .g-b { color: #4285F4; }
+  .oc-logo .g-r { color: #EA4335; }
+  .oc-logo .g-y { color: #FBBC05; }
+  .oc-logo .g-g { color: #34A853; }
+  .oc-title { font-size: 20px; font-weight: 700; margin-bottom: 8px; color: #202124; }
+  .oc-sub { color: #5f6368; font-size: 14px; line-height: 1.6; margin-bottom: 22px; }
+  .oc-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 10px 24px; background: #1a73e8; color: #fff;
+    text-decoration: none; border-radius: 999px; font-weight: 600; font-size: 14px;
+    box-shadow: 0 1px 3px rgba(26, 115, 232, 0.3);
+  }
+  .oc-btn:hover { background: #1557b0; }
 </style>
 </head>
 <body>
 <div class="oc-wrap">
-  <div class="oc-title">💬 School Hub OpenChat</div>
-  <div class="oc-sub">右下のチャットボタンから会話できます</div>
+  <div class="oc-logo"><span class="g-b">G</span><span class="g-r">o</span><span class="g-y">o</span><span class="g-b">g</span><span class="g-g">l</span><span class="g-r">e</span> <span style="color:#5f6368;font-weight:500;font-size:20px;">Chat</span></div>
+  <div class="oc-title">💬 オープンチャット</div>
+  <div class="oc-sub">閲覧はログイン不要で誰でも見られます。<br>チャット・画像・動画を投稿するにはログインしてください。</div>
   <a class="oc-btn" href="/">ホームに戻る</a>
 </div>
 <script src="/openchat/chat.js" defer></script>
 </body>
 </html>"""
     )
+
+
+async def login_openchat(request: Request):
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    username = _clean_str(data.get("username") or data.get("name") or data.get("user") or "", 24)
+    password = _clean_str(data.get("password") or data.get("pass") or data.get("tripKey") or data.get("trip") or "", 32)
+    cid = _clean_str(data.get("clientId") or "", 64)
+    tok = _clean_str(data.get("token") or data.get("ipToken") or "", 64)
+    if "#" in username and not password:
+        parts = username.split("#", 1)
+        username = parts[0].strip()
+        password = parts[1].strip()
+    username = re.sub(r"[\r\n\t]", "", username).strip()
+    password = password.strip().lstrip("#").lstrip("◆").strip()
+    if not username:
+        return JSONResponse(
+            {"ok": False, "error": "ユーザー名を入力してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+    auth_token = _sign_auth_token(username, password)
+    my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=password, custom_name=username)
+    trip_code = _calculate_tripcode(password) if password else ""
+    signed_token = _sign_id(my_id)
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "loggedIn": True,
+            "authToken": auth_token,
+            "username": username,
+            "myId": my_id,
+            "name": username,
+            "token": signed_token,
+            "trip": trip_code,
+            "onlineCount": _get_online_count(),
+        },
+        headers=_CORS_HEADERS,
+    )
+    is_https = False
+    try:
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+        is_https = "https" in proto
+    except Exception:
+        pass
+    resp.set_cookie(
+        key="sh_openchat_auth",
+        value=auth_token,
+        max_age=365 * 24 * 3600,
+        path="/",
+        samesite="none" if is_https else "lax",
+        secure=is_https,
+        httponly=False,
+    )
+    _add_fixed_id_cookie(resp, my_id, cid=cid, trip=password)
+    return resp
+
+
+async def logout_openchat(request: Request):
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+    resp = JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
+    resp.delete_cookie(key="sh_openchat_auth", path="/")
+    return resp
+
+
+async def auth_status_openchat(request: Request):
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+    auth_user = _extract_auth_user(request)
+    if not auth_user:
+        return JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
+    trip_key = auth_user.get("tripKey") or ""
+    trip_code = _calculate_tripcode(trip_key) if trip_key else ""
+    return JSONResponse(
+        {
+            "ok": True,
+            "loggedIn": True,
+            "username": auth_user.get("username"),
+            "trip": trip_code,
+            "authToken": _sign_auth_token(auth_user.get("username") or "", trip_key),
+        },
+        headers=_CORS_HEADERS,
+    )
+
+
+async def upload_chat_media(request: Request):
+    """Upload a video or image attachment for OpenChat (requires login)."""
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+    data = {}
+    raw_bytes = b""
+    mime_type = "video/mp4"
+    ext = "mp4"
+    ct = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ct:
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid json"}, status_code=400, headers=_CORS_HEADERS)
+    auth_user = _extract_auth_user(request, data=data)
+    if not auth_user:
+        return JSONResponse(
+            {"ok": False, "error": "login_required", "message": "動画やメッセージを投稿するにはログインが必要です"},
+            status_code=401,
+            headers=_CORS_HEADERS,
+        )
+    if data and data.get("dataUrl"):
+        durl = str(data.get("dataUrl") or "").strip()
+        m = re.match(r"^data:(video/[a-zA-Z0-9.+-]+|image/[a-zA-Z0-9.+-]+);base64,(.+)$", durl, flags=re.DOTALL)
+        if not m:
+            return JSONResponse({"ok": False, "error": "unsupported media format"}, status_code=400, headers=_CORS_HEADERS)
+        mime_type = m.group(1).lower()
+        b64_data = m.group(2)
+        try:
+            raw_bytes = base64.b64decode(b64_data)
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid base64"}, status_code=400, headers=_CORS_HEADERS)
+    else:
+        try:
+            raw_bytes = await request.body()
+            hdr_mime = (request.headers.get("x-media-type") or ct.split(";")[0] or "video/mp4").strip().lower()
+            if hdr_mime.startswith(("video/", "image/")):
+                mime_type = hdr_mime
+        except Exception:
+            return JSONResponse({"ok": False, "error": "read error"}, status_code=400, headers=_CORS_HEADERS)
+
+    if not raw_bytes:
+        return JSONResponse({"ok": False, "error": "empty file"}, status_code=400, headers=_CORS_HEADERS)
+    if len(raw_bytes) > 25 * 1024 * 1024:
+        return JSONResponse({"ok": False, "error": "ファイルサイズが大きすぎます (最大25MB)"}, status_code=413, headers=_CORS_HEADERS)
+
+    if "webm" in mime_type:
+        ext = "webm"
+    elif "ogg" in mime_type:
+        ext = "ogv"
+    elif "quicktime" in mime_type or "mov" in mime_type:
+        ext = "mov"
+    elif "png" in mime_type:
+        ext = "png"
+    elif "jpeg" in mime_type or "jpg" in mime_type:
+        ext = "jpg"
+    elif "gif" in mime_type:
+        ext = "gif"
+    elif "webp" in mime_type:
+        ext = "webp"
+    else:
+        ext = "mp4"
+
+    digest = hashlib.sha256(raw_bytes).hexdigest()[:20]
+    media_id = f"m_{int(time.time())}_{digest}.{ext}"
+    for d in (_MEDIA_TMP_DIR, _MEDIA_PERSIST_DIR):
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, media_id), "wb") as f:
+                f.write(raw_bytes)
+        except Exception:
+            pass
+
+    media_url = f"/openchat/media/{media_id}"
+    return JSONResponse(
+        {
+            "ok": True,
+            "url": media_url,
+            "mediaId": media_id,
+            "mediaType": mime_type,
+            "size": len(raw_bytes),
+        },
+        headers=_CORS_HEADERS,
+    )
+
+
+@router.api_route("/openchat/media/{media_id}", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
+async def serve_chat_media(media_id: str, request: Request):
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_CORS_HEADERS)
+    clean_name = os.path.basename(str(media_id or "").strip())
+    if not re.match(r"^[A-Za-z0-9_.-]+$", clean_name):
+        return Response(status_code=404, headers=_CORS_HEADERS)
+    fpath = ""
+    for d in (_MEDIA_TMP_DIR, _MEDIA_PERSIST_DIR):
+        cand = os.path.join(d, clean_name)
+        if os.path.isfile(cand):
+            fpath = cand
+            break
+    if not fpath:
+        return Response(status_code=404, headers=_CORS_HEADERS)
+
+    ext = clean_name.rsplit(".", 1)[-1].lower() if "." in clean_name else "mp4"
+    mime_map = {
+        "mp4": "video/mp4",
+        "webm": "video/webm",
+        "ogv": "video/ogg",
+        "mov": "video/quicktime",
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+    }
+    content_type = mime_map.get(ext, "application/octet-stream")
+    file_size = os.path.getsize(fpath)
+    base_headers = {
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=86400",
+    }
+    if request.method == "HEAD":
+        base_headers["Content-Length"] = str(file_size)
+        return Response(status_code=200, media_type=content_type, headers=base_headers)
+
+    range_header = request.headers.get("range") or request.headers.get("Range")
+    if range_header and range_header.startswith("bytes="):
+        try:
+            range_spec = range_header.split("=", 1)[1].strip()
+            start_str, end_str = range_spec.split("-", 1)
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+            start = max(0, min(start, file_size - 1))
+            end = max(start, min(end, file_size - 1))
+            length = end - start + 1
+            with open(fpath, "rb") as f:
+                f.seek(start)
+                chunk = f.read(length)
+            base_headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+            base_headers["Content-Length"] = str(len(chunk))
+            return Response(content=chunk, status_code=206, media_type=content_type, headers=base_headers)
+        except Exception:
+            pass
+
+    with open(fpath, "rb") as f:
+        body = f.read()
+    base_headers["Content-Length"] = str(len(body))
+    return Response(content=body, status_code=200, media_type=content_type, headers=base_headers)
 
 
 @router.api_route("/openchat/history", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
@@ -1426,6 +1777,9 @@ async def get_chat_history(request: Request = None):
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
+    auth_user = _extract_auth_user(request)
+    if auth_user and auth_user.get("tripKey") and not trip:
+        trip = auth_user["tripKey"]
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=trip)
     _touch_active_client(cid, my_id, scope_or_req=request, source="openchat")
     trip_code = _calculate_tripcode(trip) if trip else ""
@@ -1435,7 +1789,9 @@ async def get_chat_history(request: Request = None):
         {
             "ok": True,
             "myId": my_id,
-            "name": my_id,
+            "name": (auth_user.get("username") if auth_user else None) or my_id,
+            "loggedIn": bool(auth_user),
+            "username": auth_user.get("username") if auth_user else "",
             "token": signed_token,
             "trip": trip_code,
             "onlineCount": _get_online_count(),
@@ -1467,7 +1823,8 @@ def _get_clean_messages() -> list[dict]:
         item = dict(m)
         sid = _canonicalize_sid(item.get("senderId") or "ANON0000", str(item.get("clientId") or ""))
         item["senderId"] = sid
-        item["name"] = sid
+        if not item.get("name"):
+            item["name"] = sid
         clean_msgs.append(item)
     res = clean_msgs[-_MAX_MESSAGES:]
     _CLEAN_MSGS_CACHE_KEY = key
@@ -1491,6 +1848,7 @@ async def sync_chat_messages(request: Request):
     trip = ""
     raw_name = ""
     sync_svc = ""
+    data = {}
     try:
         data = await request.json()
         cid = _clean_str(data.get("clientId"), 64)
@@ -1499,7 +1857,8 @@ async def sync_chat_messages(request: Request):
         raw_name = _clean_str(data.get("name"), 40)
         sync_svc = _clean_str(data.get("service"), 32)
         peer_map = data.get("cidMap")
-        if isinstance(peer_map, dict):
+        is_peer_sync = isinstance(peer_map, dict)
+        if is_peer_sync:
             map_changed = False
             for k, v in peer_map.items():
                 if k and v:
@@ -1515,7 +1874,8 @@ async def sync_chat_messages(request: Request):
                 was_reset = True
                 asyncio.create_task(_broadcast_reset())
         incoming = data.get("messages", [])
-        if incoming:
+        auth_user = _extract_auth_user(request, data=data)
+        if incoming and (is_peer_sync or auth_user):
             prev_ep = _RESET_EPOCH_TS
             added = _merge_messages(incoming)
             if _RESET_EPOCH_TS > prev_ep:
@@ -1529,6 +1889,9 @@ async def sync_chat_messages(request: Request):
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
+    auth_user = _extract_auth_user(request, data=data)
+    if auth_user and auth_user.get("tripKey") and not trip:
+        trip = auth_user["tripKey"]
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=trip)
     if cid:
         _touch_active_client(cid, my_id, service=sync_svc, scope_or_req=request, source="openchat")
@@ -1539,7 +1902,9 @@ async def sync_chat_messages(request: Request):
         {
             "ok": True,
             "myId": my_id,
-            "name": my_id,
+            "name": (auth_user.get("username") if auth_user else None) or my_id,
+            "loggedIn": bool(auth_user),
+            "username": auth_user.get("username") if auth_user else "",
             "token": signed_token,
             "trip": trip_code,
             "onlineCount": _get_online_count(),
@@ -1579,15 +1944,36 @@ async def send_chat_message(request: Request):
             asyncio.create_task(_broadcast_reset())
 
     incoming_msg = data.get("message") if isinstance(data.get("message"), dict) else data
+    is_forwarded = bool(incoming_msg.get("forwarded"))
+
+    # Require login for posting messages (viewing does not require login)
+    auth_user = _extract_auth_user(request, data=data, incoming_msg=incoming_msg)
+    if not is_forwarded and not auth_user:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "login_required",
+                "message": "チャットを投稿するにはログインが必要です（閲覧はログイン不要です）",
+            },
+            status_code=401,
+            headers=_CORS_HEADERS,
+        )
+
     text = _clean_str(incoming_msg.get("text"), 300)
     image = _clean_image(incoming_msg.get("image"))
-    if not text and not image:
+    video = _clean_video(incoming_msg.get("video"))
+    if not text and not image and not video:
         return JSONResponse({"ok": False, "error": "empty message"}, status_code=400, headers=_CORS_HEADERS)
 
     client_id = _clean_str(incoming_msg.get("clientId") or data.get("clientId"), 64)
     tok = _clean_str(incoming_msg.get("token") or incoming_msg.get("ipToken") or data.get("token") or data.get("ipToken"), 64)
     trip_key = _clean_str(incoming_msg.get("tripKey") or incoming_msg.get("trip") or data.get("tripKey") or data.get("trip"), 64)
     raw_user_name = _clean_str(incoming_msg.get("name") or data.get("name"), 40)
+    if auth_user:
+        if auth_user.get("username"):
+            raw_user_name = auth_user["username"]
+        if auth_user.get("tripKey") and not trip_key:
+            trip_key = auth_user["tripKey"]
     if "#" in raw_user_name:
         parts = raw_user_name.split("#", 1)
         raw_user_name = parts[0].strip()
@@ -1600,7 +1986,6 @@ async def send_chat_message(request: Request):
     trip_key = trip_key.strip().lstrip("#").lstrip("◆").strip()
     service = _clean_str(incoming_msg.get("service") or "Web", 32)
 
-    is_forwarded = bool(incoming_msg.get("forwarded"))
     peer_map = data.get("cidMap")
     if isinstance(peer_map, dict):
         map_changed = False
@@ -1633,7 +2018,7 @@ async def send_chat_message(request: Request):
                 "ok": True,
                 "message": existing,
                 "myId": sender_id,
-                "name": sender_id,
+                "name": raw_user_name or sender_id,
                 "token": signed_tok,
                 "trip": trip_code,
                 "onlineCount": _get_online_count(),
@@ -1660,7 +2045,7 @@ async def send_chat_message(request: Request):
                 "ok": True,
                 "message": {"id": mid, "senderId": sender_id, "service": service, "text": text, "time": time_str, "ts": ts},
                 "myId": sender_id,
-                "name": sender_id,
+                "name": raw_user_name or sender_id,
                 "token": signed_tok,
                 "trip": trip_code,
                 "onlineCount": _get_online_count(),
@@ -1671,7 +2056,7 @@ async def send_chat_message(request: Request):
     msg = {
         "id": mid,
         "senderId": sender_id,
-        "name": sender_id,
+        "name": raw_user_name or sender_id,
         "service": service,
         "text": text,
         "time": time_str,
@@ -1681,6 +2066,8 @@ async def send_chat_message(request: Request):
         msg["trip"] = trip_code
     if image:
         msg["image"] = image
+    if video:
+        msg["video"] = video
     if client_id:
         msg["clientId"] = client_id
     r = _clean_reply(incoming_msg.get("replyTo"))
@@ -1710,7 +2097,7 @@ async def send_chat_message(request: Request):
             "ok": True,
             "message": msg,
             "myId": sender_id,
-            "name": sender_id,
+            "name": raw_user_name or sender_id,
             "token": signed_tok,
             "trip": trip_code,
             "onlineCount": _get_online_count(),
@@ -1752,6 +2139,12 @@ async def openchat_websocket(websocket: WebSocket):
         ws_trip = _extract_cookie_val(websocket, "sh_openchat_trip") or ""
     if not ws_name:
         ws_name = _extract_cookie_val(websocket, "sh_openchat_name") or ""
+    ws_auth = _extract_auth_user(websocket)
+    if ws_auth:
+        if ws_auth.get("username"):
+            ws_name = ws_auth["username"]
+        if ws_auth.get("tripKey") and not ws_trip:
+            ws_trip = ws_auth["tripKey"]
     ws_trip = ws_trip.strip().lstrip("#").lstrip("◆").strip()
     ws_ip_id = _get_ip_id(websocket, client_id=ws_cid, ip_token=ws_tok, trip_key=ws_trip, custom_name=ws_name)
     ws_trip_code = _calculate_tripcode(ws_trip) if ws_trip else ""
@@ -1768,6 +2161,8 @@ async def openchat_websocket(websocket: WebSocket):
                 "type": "init",
                 "myId": ws_ip_id,
                 "name": ws_name or ws_ip_id,
+                "loggedIn": bool(ws_auth),
+                "username": ws_auth.get("username") if ws_auth else "",
                 "token": ws_signed_tok,
                 "trip": ws_trip_code,
                 "onlineCount": _get_online_count(),
@@ -1801,12 +2196,15 @@ async def openchat_websocket(websocket: WebSocket):
                     sync_svc = _clean_str(data.get("service") or ws_svc, 32)
                     if sync_svc:
                         ws_svc = sync_svc
+                    sync_auth = _extract_auth_user(websocket, data=data)
+                    if sync_auth and sync_auth.get("username"):
+                        sync_name = sync_auth["username"]
                     ws_ip_id = _get_ip_id(websocket, client_id=sync_cid, ip_token=sync_tok, trip_key=sync_trip, custom_name=sync_name) or ws_ip_id
                     ws_trip_code = _calculate_tripcode(sync_trip) if sync_trip else ""
                     ws_signed_tok = _sign_id(ws_ip_id)
                     _touch_active_client(sync_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
                     incoming = data.get("messages", [])
-                    if incoming:
+                    if incoming and sync_auth:
                         prev_ep = _RESET_EPOCH_TS
                         _merge_messages(incoming)
                         if _RESET_EPOCH_TS > prev_ep:
@@ -1822,6 +2220,8 @@ async def openchat_websocket(websocket: WebSocket):
                                 "type": "init",
                                 "myId": ws_ip_id,
                                 "name": sync_name or ws_ip_id,
+                                "loggedIn": bool(sync_auth),
+                                "username": sync_auth.get("username") if sync_auth else "",
                                 "token": ws_signed_tok,
                                 "trip": ws_trip_code,
                                 "onlineCount": _get_online_count(),
@@ -1840,14 +2240,23 @@ async def openchat_websocket(websocket: WebSocket):
                     if isinstance(data.get("message"), dict)
                     else data
                 )
+                msg_auth = _extract_auth_user(websocket, data=data, incoming_msg=incoming_msg)
+                if not msg_auth:
+                    await websocket.send_text(
+                        json.dumps({"type": "auth_required", "error": "login_required", "message": "投稿するにはログインが必要です"})
+                    )
+                    continue
                 text = _clean_str(incoming_msg.get("text"), 300)
                 image = _clean_image(incoming_msg.get("image"))
-                if not text and not image:
+                video = _clean_video(incoming_msg.get("video"))
+                if not text and not image and not video:
                     continue
                 tok = _clean_str(incoming_msg.get("token") or incoming_msg.get("ipToken") or data.get("token") or data.get("ipToken"), 64)
                 client_id = _clean_str(incoming_msg.get("clientId") or data.get("clientId"), 64)
                 trip_key = _clean_str(incoming_msg.get("tripKey") or incoming_msg.get("trip") or data.get("tripKey") or data.get("trip") or ws_trip, 64)
-                raw_user_name = _clean_str(incoming_msg.get("name") or data.get("name"), 40)
+                raw_user_name = _clean_str(msg_auth.get("username") or incoming_msg.get("name") or data.get("name"), 40)
+                if msg_auth.get("tripKey") and not trip_key:
+                    trip_key = msg_auth["tripKey"]
                 if "#" in raw_user_name:
                     parts = raw_user_name.split("#", 1)
                     raw_user_name = parts[0].strip()
@@ -1907,6 +2316,8 @@ async def openchat_websocket(websocket: WebSocket):
                     msg["trip"] = trip_code
                 if image:
                     msg["image"] = image
+                if video:
+                    msg["video"] = video
                 if client_id:
                     msg["clientId"] = client_id
                 r = _clean_reply(incoming_msg.get("replyTo"))
@@ -2000,6 +2411,11 @@ for pfx in _PREFIXES:
     router.add_api_route(f"{pfx}/history", get_chat_history, methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
     router.add_api_route(f"{pfx}/sync", sync_chat_messages, methods=["POST", "OPTIONS"], include_in_schema=False)
     router.add_api_route(f"{pfx}/send", send_chat_message, methods=["POST", "OPTIONS"], include_in_schema=False)
+    router.add_api_route(f"{pfx}/login", login_openchat, methods=["POST", "OPTIONS"], include_in_schema=False)
+    router.add_api_route(f"{pfx}/logout", logout_openchat, methods=["POST", "OPTIONS"], include_in_schema=False)
+    router.add_api_route(f"{pfx}/auth-status", auth_status_openchat, methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+    router.add_api_route(f"{pfx}/upload", upload_chat_media, methods=["POST", "OPTIONS"], include_in_schema=False)
+    router.add_api_route(f"{pfx}/media/{{media_id}}", serve_chat_media, methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
     router.add_api_route(f"{pfx}/claim", claim_chat_name, methods=["POST", "OPTIONS"], include_in_schema=False)
     router.add_api_route(f"{pfx}/claim-name", claim_chat_name, methods=["POST", "OPTIONS"], include_in_schema=False)
     router.add_api_route(f"{pfx}/claim_name", claim_chat_name, methods=["POST", "OPTIONS"], include_in_schema=False)
@@ -3581,6 +3997,182 @@ _CLIENT_JS = r"""
     .sh-chat-msg-img:hover {
       border-color: rgba(74, 222, 128, 0.6);
     }
+    .sh-chat-msg-video-wrap {
+      margin-top: 6px;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      width: 100%;
+    }
+    .sh-chat-msg-video {
+      max-width: 100%;
+      width: 100%;
+      max-height: 240px;
+      border-radius: 10px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: #000;
+      object-fit: contain;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+    }
+    .sh-login-gate-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      background: rgba(26, 115, 232, 0.14);
+      border: 1px solid rgba(66, 133, 244, 0.45);
+      border-radius: 8px;
+      padding: 6px 10px;
+      margin-bottom: 5px;
+      font-size: 11px;
+      color: #e8f0fe;
+    }
+    .sh-login-gate-bar.is-logged-in {
+      background: rgba(52, 168, 83, 0.14);
+      border-color: rgba(52, 168, 83, 0.45);
+      color: #ceead6;
+    }
+    .sh-login-action-btn {
+      background: #1a73e8;
+      color: #ffffff;
+      border: none;
+      border-radius: 999px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .sh-login-action-btn:hover {
+      background: #1557b0;
+    }
+    .sh-logout-action-btn {
+      background: rgba(255, 255, 255, 0.12);
+      color: #e2e8f0;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 999px;
+      padding: 3px 10px;
+      font-size: 10px;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .sh-logout-action-btn:hover {
+      background: rgba(239, 68, 68, 0.25);
+      border-color: rgba(239, 68, 68, 0.5);
+    }
+    #sh-login-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.72);
+      backdrop-filter: blur(6px);
+      -webkit-backdrop-filter: blur(6px);
+      z-index: 2147483646;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    #sh-login-modal.open {
+      display: flex !important;
+    }
+    .sh-google-login-card {
+      background: #ffffff;
+      color: #202124;
+      border-radius: 24px;
+      border: 1px solid #dadce0;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+      width: 100%;
+      max-width: 360px;
+      padding: 24px 24px 20px;
+      font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-sizing: border-box;
+      animation: shModalPop 0.16s ease-out;
+    }
+    .sh-google-logo-row {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      letter-spacing: -0.02em;
+    }
+    .sh-google-login-title {
+      font-size: 18px;
+      font-weight: 700;
+      color: #202124;
+      text-align: center;
+      margin: 0 0 4px;
+    }
+    .sh-google-login-sub {
+      font-size: 12px;
+      color: #5f6368;
+      text-align: center;
+      margin: 0 0 16px;
+      line-height: 1.5;
+    }
+    .sh-google-field {
+      margin-bottom: 12px;
+    }
+    .sh-google-field label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      color: #3c4043;
+      margin-bottom: 4px;
+    }
+    .sh-google-input {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: #202124;
+      background: #ffffff;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+    .sh-google-input:focus {
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px rgba(26, 115, 232, 0.2);
+    }
+    .sh-google-login-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .sh-google-btn-cancel {
+      background: transparent;
+      color: #1a73e8;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 16px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .sh-google-btn-cancel:hover {
+      background: rgba(26, 115, 232, 0.08);
+    }
+    .sh-google-btn-submit {
+      background: #1a73e8;
+      color: #ffffff;
+      border: none;
+      border-radius: 999px;
+      padding: 8px 22px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(26, 115, 232, 0.3);
+    }
+    .sh-google-btn-submit:hover {
+      background: #1557b0;
+    }
     #sh-img-lightbox {
       position: fixed;
       inset: 0;
@@ -3663,7 +4255,7 @@ _CLIENT_JS = r"""
   const rootEl = document.createElement('div');
   rootEl.id = 'sh-chat-root';
   rootEl.innerHTML = `
-    <button id="sh-chat-toggle-btn" title="オープンチャットを開く (Enterキーでも開けます)">
+    <button id="sh-chat-toggle-btn" title="オープンチャットを開く">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
       </svg>
@@ -3697,8 +4289,12 @@ _CLIENT_JS = r"""
         </div>
       </div>
 
-      <!-- Footer & Input with Reply Banner and Image Preview Banner -->
+      <!-- Footer & Input with Login Gate, Reply Banner, and Media Preview Banner -->
       <div class="sh-chat-footer">
+        <div class="sh-login-gate-bar" id="sh-login-gate-bar">
+          <span id="sh-login-gate-text">👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
+          <button type="button" class="sh-login-action-btn" id="sh-login-open-btn">ログインして投稿</button>
+        </div>
         <div class="sh-reply-banner" id="sh-reply-banner" style="display:none;">
           <div class="sh-reply-info">
             <span class="sh-reply-icon">>>返信先:</span>
@@ -3710,22 +4306,24 @@ _CLIENT_JS = r"""
         <div class="sh-img-preview-banner" id="sh-img-preview-banner" style="display:none;">
           <div class="sh-img-preview-info">
             <img id="sh-img-preview-thumb" class="sh-img-preview-thumb" alt="preview" />
-            <span class="sh-img-preview-label" id="sh-img-preview-label">画像を添付中 (書き込むで投稿)</span>
+            <span class="sh-img-preview-label" id="sh-img-preview-label">メディアを添付中 (送るボタンで投稿)</span>
           </div>
-          <button type="button" class="sh-reply-cancel-btn" id="sh-reply-cancel-btn" title="画像を取り消す">✕</button>
+          <button type="button" class="sh-reply-cancel-btn" id="sh-img-preview-cancel" title="添付を取り消す">✕</button>
         </div>
         <form class="sh-chat-form" id="sh-chat-form">
           <div class="sh-chat-input-row">
-            <button type="button" class="sh-chat-img-btn" id="sh-chat-img-btn" title="画像を添付 (Ctrl+V貼り付け・ドロップも対応)">🖼️</button>
-            <input type="file" id="sh-chat-file-input" accept="image/*" style="display:none;" />
+            <button type="button" class="sh-chat-img-btn" id="sh-chat-img-btn" title="画像を添付 (Ctrl+V貼り付け・ドロップ対応)">🖼️</button>
+            <button type="button" class="sh-chat-img-btn" id="sh-chat-vid-btn" title="動画を投稿 (MP4/WebM/MOV 最大25MB)">🎬</button>
+            <input type="file" id="sh-chat-file-input" accept="image/*,video/*" style="display:none;" />
+            <input type="file" id="sh-chat-video-input" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/*" style="display:none;" />
             <div class="sh-chat-input-wrap">
-              <textarea class="sh-chat-input" id="sh-chat-input" placeholder="レスを書き込む... (Enterで投稿 / Shift+Enterで改行)" maxlength="200" rows="1" autocomplete="off"></textarea>
+              <textarea class="sh-chat-input" id="sh-chat-input" placeholder="メッセージを入力... (送るボタンで投稿)" maxlength="200" rows="1" autocomplete="off"></textarea>
               <button type="button" class="sh-input-clear-btn" id="sh-input-clear-btn" title="入力をクリア">✕</button>
             </div>
-            <button type="submit" class="sh-chat-send-btn" id="sh-chat-send-btn">書き込む</button>
+            <button type="submit" class="sh-chat-send-btn" id="sh-chat-send-btn">送る</button>
           </div>
           <div class="sh-chat-input-meta">
-            <span>🔒 IP専用ID固定 / Shift+Enterで改行</span>
+            <span id="sh-input-hint-label">🎬 画像・動画投稿対応 / 送るボタンで送信</span>
             <span class="sh-char-count" id="sh-char-count">0/200</span>
           </div>
         </form>
@@ -3744,9 +4342,8 @@ _CLIENT_JS = r"""
             <input type="text" class="sh-modal-input" id="sh-modal-trip-input" placeholder="例: @ または pass123" maxlength="24" autocomplete="off" />
           </div>
           <div class="sh-modal-hint">
-            ※名前は個別IDで固定されています。<br>
-            ※トリップを設定すると「ID◆トリップ」として表示されます。<br>
-            ※チャット入力欄で「/trip [文字]」を入力しても設定できます。
+            ※閲覧はログイン不要です。<br>
+            ※トリップを設定すると「ID◆トリップ」として表示されます。
           </div>
           <div class="sh-modal-curr-id">
             <span>表示プレビュー: </span>
@@ -3771,6 +4368,33 @@ _CLIENT_JS = r"""
         </svg>
       </div>
     </div>
+
+    <!-- Google-Inspired Login Modal for Posting -->
+    <div id="sh-login-modal">
+      <div class="sh-google-login-card" id="sh-login-card">
+        <div class="sh-google-logo-row">
+          <span style="color:#4285F4">G</span><span style="color:#EA4335">o</span><span style="color:#FBBC05">o</span><span style="color:#4285F4">g</span><span style="color:#34A853">l</span><span style="color:#EA4335">e</span>
+        </div>
+        <div class="sh-google-login-title">オープンチャットにログイン</div>
+        <div class="sh-google-login-sub">見るだけならログイン不要です。<br>チャットや動画を投稿するにはログインしてください。</div>
+        <form id="sh-login-form">
+          <div class="sh-google-field">
+            <label for="sh-login-username">ニックネーム / ユーザー名 (必須)</label>
+            <input type="text" id="sh-login-username" class="sh-google-input" placeholder="例: たろう" maxlength="24" required autocomplete="username" />
+          </div>
+          <div class="sh-google-field">
+            <label for="sh-login-password">パスワード / トリップキー (任意)</label>
+            <input type="password" id="sh-login-password" class="sh-google-input" placeholder="設定すると◆トリップが付きます" maxlength="24" autocomplete="current-password" />
+          </div>
+          <div id="sh-login-error" style="display:none;color:#d93025;font-size:12px;margin-bottom:8px;font-weight:600;"></div>
+          <div class="sh-google-login-actions">
+            <button type="button" class="sh-google-btn-cancel" id="sh-login-cancel-btn">見るだけにする</button>
+            <button type="submit" class="sh-google-btn-submit" id="sh-login-submit-btn">ログイン</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="sh-img-lightbox" title="クリックで閉じる">
       <button type="button" id="sh-img-lightbox-close" title="閉じる">✕</button>
       <img id="sh-img-lightbox-target" alt="拡大画像" />
@@ -3800,9 +4424,22 @@ _CLIENT_JS = r"""
   const resCounterEl = document.getElementById('sh-chat-res-counter');
   const hubResCounterEl = document.getElementById('hub-chat-res-counter');
 
-  // Image attachment & lightbox elements
+  // Login elements
+  const loginGateBar = document.getElementById('sh-login-gate-bar');
+  const loginGateText = document.getElementById('sh-login-gate-text');
+  const loginOpenBtn = document.getElementById('sh-login-open-btn');
+  const loginModal = document.getElementById('sh-login-modal');
+  const loginForm = document.getElementById('sh-login-form');
+  const loginUsernameInput = document.getElementById('sh-login-username');
+  const loginPasswordInput = document.getElementById('sh-login-password');
+  const loginErrorEl = document.getElementById('sh-login-error');
+  const loginCancelBtn = document.getElementById('sh-login-cancel-btn');
+
+  // Image & Video attachment & lightbox elements
   const imgBtn = document.getElementById('sh-chat-img-btn');
+  const vidBtn = document.getElementById('sh-chat-vid-btn');
   const fileInput = document.getElementById('sh-chat-file-input');
+  const videoInput = document.getElementById('sh-chat-video-input');
   const imgPreviewBanner = document.getElementById('sh-img-preview-banner');
   const imgPreviewThumb = document.getElementById('sh-img-preview-thumb');
   const imgPreviewLabel = document.getElementById('sh-img-preview-label');
@@ -3840,15 +4477,32 @@ _CLIENT_JS = r"""
   const hubIdBadge = document.getElementById('hub-chat-id-badge');
   const hubScrollBottom = document.getElementById('hub-chat-scroll-bottom');
 
-  // Dynamically inject image button & preview banner into Hub embedded chat if present
+  // Dynamically inject login bar, image & video buttons, and preview banner into Hub embedded chat if present
   let hubImgBtn = document.getElementById('hub-chat-img-btn');
+  let hubVidBtn = document.getElementById('hub-chat-vid-btn');
   let hubFileInput = document.getElementById('hub-chat-file-input');
+  let hubVideoInput = document.getElementById('hub-chat-video-input');
   let hubImgPreviewBanner = document.getElementById('hub-img-preview-banner');
   let hubImgPreviewThumb = document.getElementById('hub-img-preview-thumb');
   let hubImgPreviewLabel = document.getElementById('hub-img-preview-label');
   let hubImgPreviewCancel = document.getElementById('hub-img-preview-cancel');
+  let hubLoginGateBar = document.getElementById('hub-login-gate-bar');
+  let hubLoginGateText = document.getElementById('hub-login-gate-text');
+  let hubLoginOpenBtn = document.getElementById('hub-login-open-btn');
   if (hubChatForm && hubChatInput) {
     const hubFooter = hubChatForm.parentElement;
+    if (hubFooter && !hubLoginGateBar) {
+      hubLoginGateBar = document.createElement('div');
+      hubLoginGateBar.id = 'hub-login-gate-bar';
+      hubLoginGateBar.className = 'sh-login-gate-bar';
+      hubLoginGateBar.innerHTML = `
+        <span id="hub-login-gate-text">👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
+        <button type="button" class="sh-login-action-btn" id="hub-login-open-btn">ログインして投稿</button>
+      `;
+      hubFooter.insertBefore(hubLoginGateBar, hubChatForm);
+      hubLoginGateText = document.getElementById('hub-login-gate-text');
+      hubLoginOpenBtn = document.getElementById('hub-login-open-btn');
+    }
     if (hubFooter && !hubImgPreviewBanner) {
       hubImgPreviewBanner = document.createElement('div');
       hubImgPreviewBanner.id = 'hub-img-preview-banner';
@@ -3857,9 +4511,9 @@ _CLIENT_JS = r"""
       hubImgPreviewBanner.innerHTML = `
         <div class="sh-img-preview-info">
           <img id="hub-img-preview-thumb" class="sh-img-preview-thumb" alt="preview" />
-          <span class="sh-img-preview-label" id="hub-img-preview-label">画像を添付中 (送信で投稿)</span>
+          <span class="sh-img-preview-label" id="hub-img-preview-label">メディアを添付中 (送るで投稿)</span>
         </div>
-        <button type="button" class="sh-reply-cancel-btn" id="hub-img-preview-cancel" title="画像を取り消す">✕</button>
+        <button type="button" class="sh-reply-cancel-btn" id="hub-img-preview-cancel" title="添付を取り消す">✕</button>
       `;
       hubFooter.insertBefore(hubImgPreviewBanner, hubChatForm);
       hubImgPreviewThumb = document.getElementById('hub-img-preview-thumb');
@@ -3877,10 +4531,25 @@ _CLIENT_JS = r"""
       hubFileInput = document.createElement('input');
       hubFileInput.type = 'file';
       hubFileInput.id = 'hub-chat-file-input';
-      hubFileInput.accept = 'image/*';
+      hubFileInput.accept = 'image/*,video/*';
       hubFileInput.style.display = 'none';
       hubRow.insertBefore(hubImgBtn, hubChatInput);
       hubRow.insertBefore(hubFileInput, hubChatInput);
+    }
+    if (hubRow && !hubVidBtn) {
+      hubVidBtn = document.createElement('button');
+      hubVidBtn.type = 'button';
+      hubVidBtn.id = 'hub-chat-vid-btn';
+      hubVidBtn.className = 'sh-chat-img-btn';
+      hubVidBtn.title = '動画を投稿 (MP4/WebM/MOV)';
+      hubVidBtn.textContent = '🎬';
+      hubVideoInput = document.createElement('input');
+      hubVideoInput.type = 'file';
+      hubVideoInput.id = 'hub-chat-video-input';
+      hubVideoInput.accept = 'video/mp4,video/webm,video/ogg,video/quicktime,video/*';
+      hubVideoInput.style.display = 'none';
+      hubRow.insertBefore(hubVidBtn, hubChatInput);
+      hubRow.insertBefore(hubVideoInput, hubChatInput);
     }
   }
 
@@ -3891,6 +4560,208 @@ _CLIENT_JS = r"""
   const knownMsgIds = new Set();
   let currentReplyTo = null;
   let stagedImageData = '';
+  let stagedVideoUrl = '';
+  let pendingSendAfterLogin = null;
+
+  // --- Authentication State Management (Login required for posting, not viewing) ---
+  function getStoredAuthToken() {
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)sh_openchat_auth=([^;]+)/);
+      if (m && m[1]) return decodeURIComponent(m[1]).trim();
+    } catch (_) {}
+    try {
+      return (localStorage.getItem('sh_openchat_auth') || '').trim();
+    } catch (_) {}
+    return '';
+  }
+
+  function getStoredAuthUsername() {
+    try {
+      return (localStorage.getItem('sh_openchat_auth_user') || '').trim();
+    } catch (_) {}
+    return '';
+  }
+
+  let currentAuthToken = getStoredAuthToken();
+  let currentAuthUser = getStoredAuthUsername();
+
+  function setAuthState(token, username, tripCode) {
+    currentAuthToken = String(token || '').trim();
+    currentAuthUser = String(username || '').trim();
+    try {
+      if (currentAuthToken) {
+        document.cookie = 'sh_openchat_auth=' + encodeURIComponent(currentAuthToken) + '; path=/; max-age=31536000; SameSite=Lax';
+        localStorage.setItem('sh_openchat_auth', currentAuthToken);
+        if (currentAuthUser) localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
+      } else {
+        document.cookie = 'sh_openchat_auth=; path=/; max-age=0; SameSite=Lax';
+        localStorage.removeItem('sh_openchat_auth');
+        localStorage.removeItem('sh_openchat_auth_user');
+      }
+    } catch (_) {}
+    if (tripCode !== undefined) {
+      currentTripCode = String(tripCode || '').trim();
+      setStoredTripCode(currentTripCode);
+    }
+    updateAuthUi();
+  }
+
+  function isLoggedIn() {
+    return Boolean(currentAuthToken && currentAuthToken.includes('.'));
+  }
+
+  function updateAuthUi() {
+    const logged = isLoggedIn();
+    const displayUser = currentAuthUser || currentSenderId || 'ログイン済';
+    const tripSuffix = currentTripCode ? '◆' + currentTripCode : '';
+    if (loginGateBar && loginGateText && loginOpenBtn) {
+      if (logged) {
+        loginGateBar.classList.add('is-logged-in');
+        loginGateText.textContent = '✅ ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        loginOpenBtn.textContent = 'ログアウト';
+        loginOpenBtn.className = 'sh-logout-action-btn';
+      } else {
+        loginGateBar.classList.remove('is-logged-in');
+        loginGateText.textContent = '👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        loginOpenBtn.textContent = 'ログインして投稿';
+        loginOpenBtn.className = 'sh-login-action-btn';
+      }
+    }
+    if (hubLoginGateBar && hubLoginGateText && hubLoginOpenBtn) {
+      if (logged) {
+        hubLoginGateBar.classList.add('is-logged-in');
+        hubLoginGateText.textContent = '✅ ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        hubLoginOpenBtn.textContent = 'ログアウト';
+        hubLoginOpenBtn.className = 'sh-logout-action-btn';
+      } else {
+        hubLoginGateBar.classList.remove('is-logged-in');
+        hubLoginGateText.textContent = '👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        hubLoginOpenBtn.textContent = 'ログインして投稿';
+        hubLoginOpenBtn.className = 'sh-login-action-btn';
+      }
+    }
+    if (input) {
+      input.placeholder = logged
+        ? 'メッセージを入力... (送るボタンで投稿)'
+        : '投稿するには「ログインして投稿」を押してください (閲覧は自由)';
+    }
+    if (hubChatInput) {
+      hubChatInput.placeholder = logged
+        ? 'メッセージや動画を投稿... (送るボタンで送信)'
+        : '投稿するにはログインしてください (見るだけならログイン不要)';
+    }
+  }
+
+  function openLoginModal(onSuccessCallback) {
+    pendingSendAfterLogin = typeof onSuccessCallback === 'function' ? onSuccessCallback : null;
+    if (!loginModal) return;
+    if (loginErrorEl) loginErrorEl.style.display = 'none';
+    if (loginUsernameInput && !loginUsernameInput.value) {
+      loginUsernameInput.value = currentAuthUser || '';
+    }
+    loginModal.classList.add('open');
+    setTimeout(() => {
+      if (loginUsernameInput) loginUsernameInput.focus();
+    }, 60);
+  }
+
+  function closeLoginModal() {
+    if (loginModal) loginModal.classList.remove('open');
+  }
+
+  async function handleLoginOrLogoutClick(e) {
+    if (e) e.stopPropagation();
+    if (isLoggedIn()) {
+      try {
+        await fetch(getApiUrl('/openchat/logout'), { method: 'POST' });
+      } catch (_) {}
+      setAuthState('', '', '');
+      appendSystemNotice('ログアウトしました（閲覧は引き続きログイン不要です）。');
+    } else {
+      openLoginModal();
+    }
+  }
+
+  if (loginOpenBtn) {
+    loginOpenBtn.addEventListener('click', handleLoginOrLogoutClick);
+  }
+  if (hubLoginOpenBtn) {
+    hubLoginOpenBtn.addEventListener('click', handleLoginOrLogoutClick);
+  }
+  if (loginCancelBtn) {
+    loginCancelBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      pendingSendAfterLogin = null;
+      closeLoginModal();
+    });
+  }
+  if (loginModal) {
+    loginModal.addEventListener('click', (e) => {
+      if (e.target === loginModal) {
+        pendingSendAfterLogin = null;
+        closeLoginModal();
+      }
+    });
+  }
+  if (loginForm) {
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const uname = loginUsernameInput ? loginUsernameInput.value.trim() : '';
+      const upass = loginPasswordInput ? loginPasswordInput.value.trim() : '';
+      if (!uname) {
+        if (loginErrorEl) {
+          loginErrorEl.textContent = 'ニックネームを入力してください';
+          loginErrorEl.style.display = 'block';
+        }
+        return;
+      }
+      try {
+        const res = await fetch(getApiUrl('/openchat/login'), {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-OpenChat-Client-Id': currentClientId,
+            ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {})
+          },
+          body: JSON.stringify({
+            username: uname,
+            password: upass,
+            clientId: currentClientId,
+            token: currentIpToken
+          })
+        });
+        const data = await res.json().catch(() => null);
+        if (!res.ok || !data || !data.ok) {
+          if (loginErrorEl) {
+            loginErrorEl.textContent = (data && data.error) || 'ログインに失敗しました';
+            loginErrorEl.style.display = 'block';
+          }
+          return;
+        }
+        if (upass) setStoredTripKey(upass);
+        setStoredCustomName(data.username || uname);
+        setAuthState(data.authToken, data.username || uname, data.trip || '');
+        if (data.myId) {
+          applyServerMyId(data.myId, data.token, data.trip);
+        }
+        closeLoginModal();
+        appendSystemNotice('✅ ' + (data.username || uname) + ' としてログインしました！チャット・動画投稿が可能です。');
+        if (pendingSendAfterLogin) {
+          const fn = pendingSendAfterLogin;
+          pendingSendAfterLogin = null;
+          fn();
+        }
+      } catch (_) {
+        if (loginErrorEl) {
+          loginErrorEl.textContent = '通信エラーが発生しました';
+          loginErrorEl.style.display = 'block';
+        }
+      }
+    });
+  }
+
+  updateAuthUi();
 
   // --- Sound Toggle State ---
   function updateSoundBtn() {
@@ -4328,22 +5199,24 @@ _CLIENT_JS = r"""
       localStorage.setItem('sh_openchat_ip_id', currentSenderId);
     } catch (_) {}
     const tripHtmlBadge = currentTripCode ? ' <span class="sh-2ch-trip">◆' + escapeHtml(currentTripCode) + '</span>' : '';
+    const displayLabel = isLoggedIn() && currentAuthUser ? escapeHtml(currentAuthUser) + ' (ID:' + escapeHtml(currentSenderId) + ')' : 'ID:' + escapeHtml(currentSenderId);
     if (myIdBadge) {
-      myIdBadge.innerHTML = 'ID:' + escapeHtml(currentSenderId) + tripHtmlBadge;
+      myIdBadge.innerHTML = displayLabel + tripHtmlBadge;
       myIdBadge.style.color = getIdColor(currentSenderId);
       myIdBadge.style.cursor = 'pointer';
-      myIdBadge.title = 'クリックで合言葉・名前設定 (キャッシュやブラウザを変えても同じIDに)';
+      myIdBadge.title = 'クリックでログイン・トリップ設定';
     }
     if (hubIdBadge) {
-      hubIdBadge.innerHTML = 'ID:' + escapeHtml(currentSenderId) + tripHtmlBadge;
+      hubIdBadge.innerHTML = displayLabel + tripHtmlBadge;
       hubIdBadge.style.color = getIdColor(currentSenderId);
       hubIdBadge.style.cursor = 'pointer';
-      hubIdBadge.title = 'クリックで合言葉・名前設定 (キャッシュやブラウザを変えても同じIDに)';
+      hubIdBadge.title = 'クリックでログイン・トリップ設定';
     }
     if (modalCurrIdVal) {
       modalCurrIdVal.innerHTML = escapeHtml(currentSenderId) + tripHtmlBadge;
       modalCurrIdVal.style.color = getIdColor(currentSenderId);
     }
+    updateAuthUi();
     const myNorm = normalizeName(currentSenderId);
     document.querySelectorAll('.sh-chat-msg').forEach(grp => {
       const isMine = (grp.dataset.senderNorm === myNorm);
@@ -4431,7 +5304,11 @@ _CLIENT_JS = r"""
     myIdBadge.style.cursor = 'pointer';
     myIdBadge.addEventListener('click', (e) => {
       e.stopPropagation();
-      openIdModal();
+      if (!isLoggedIn()) {
+        openLoginModal();
+      } else {
+        openIdModal();
+      }
     });
   }
 
@@ -4439,7 +5316,11 @@ _CLIENT_JS = r"""
     hubIdBadge.style.cursor = 'pointer';
     hubIdBadge.addEventListener('click', (e) => {
       e.stopPropagation();
-      openIdModal();
+      if (!isLoggedIn()) {
+        openLoginModal();
+      } else {
+        openIdModal();
+      }
     });
   }
 
@@ -4523,15 +5404,19 @@ _CLIENT_JS = r"""
 
   applyServerMyId(currentSenderId, currentIpToken);
 
-  // Hotkeys: Enter to open/focus, Esc to close
+  // Hotkeys: Esc to close modals/chat (Never auto-open or auto-send on Enter in CloudMoon)
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
+      if (loginModal && loginModal.classList.contains('open')) {
+        closeLoginModal();
+        return;
+      }
       if (imgLightbox && imgLightbox.classList.contains('open')) {
         closeImageLightbox();
         return;
       }
-      if (stagedImageData) {
-        setStagedImage('');
+      if (stagedImageData || stagedVideoUrl) {
+        clearStagedMedia();
         return;
       }
       if (currentReplyTo) {
@@ -4549,14 +5434,6 @@ _CLIENT_JS = r"""
       if (isOpen) {
         toggleChat(false);
         return;
-      }
-    }
-    if (e.key === 'Enter' && !isOpen) {
-      const active = document.activeElement;
-      const isInput = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
-      if (!isInput) {
-        e.preventDefault();
-        toggleChat(true);
       }
     }
   });
@@ -4668,7 +5545,7 @@ _CLIENT_JS = r"""
     input.focus();
   });
 
-  // Feature 8: Japanese IME Safeguard & Enter to Send / Shift+Enter for Newline
+  // Japanese IME Safeguard & Button-only submission on CloudMoon (or Enter newline)
   let isComposing = false;
   let justComposed = false;
 
@@ -4682,21 +5559,23 @@ _CLIENT_JS = r"""
   });
 
   input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
     if (e.key === 'Enter') {
       if (isComposing || e.isComposing || e.keyCode === 229 || justComposed) {
-        return; // IME conversion commit - do not submit
+        return;
       }
-      if (e.shiftKey) {
+      // On CloudMoon or when Shift is pressed, never auto-submit on Enter; require clicking "送る"
+      if (detectService() === 'CloudMoon' || e.shiftKey) {
         setTimeout(() => autoResizeTextarea(input), 0);
         return;
       }
       e.preventDefault();
-      e.stopPropagation();
       const val = input.value;
-      input.value = '';
-      autoResizeTextarea(input);
-      updateInputMeta();
-      sendMessage(val);
+      sendMessage(val, undefined, undefined, () => {
+        input.value = '';
+        autoResizeTextarea(input);
+        updateInputMeta();
+      });
     }
   });
 
@@ -4733,7 +5612,7 @@ _CLIENT_JS = r"""
     hubChatInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         if (hubComposing || e.isComposing || e.keyCode === 229 || hubJustComposed) {
-          return; // IME conversion commit
+          return;
         }
         if (e.shiftKey) {
           setTimeout(() => autoResizeTextarea(hubChatInput), 0);
@@ -4742,16 +5621,17 @@ _CLIENT_JS = r"""
         e.preventDefault();
         e.stopPropagation();
         const val = hubChatInput.value;
-        hubChatInput.value = '';
-        autoResizeTextarea(hubChatInput);
-        if (hubCharCount) hubCharCount.textContent = '0/200';
-        if (hubChatClear) hubChatClear.style.display = 'none';
-        sendMessage(val);
+        sendMessage(val, undefined, undefined, () => {
+          hubChatInput.value = '';
+          autoResizeTextarea(hubChatInput);
+          if (hubCharCount) hubCharCount.textContent = '0/200';
+          if (hubChatClear) hubChatClear.style.display = 'none';
+        });
       }
     });
   }
 
-  // --- Image Compression, Preview, Lightbox & Drag/Drop/Paste ---
+  // --- Image & Video Attachment, Upload, Preview, Lightbox & Drag/Drop/Paste ---
   function openImageLightbox(src) {
     if (!src || !imgLightbox || !imgLightboxTarget) return;
     imgLightboxTarget.src = src;
@@ -4775,24 +5655,55 @@ _CLIENT_JS = r"""
     });
   }
 
+  function clearStagedMedia() {
+    stagedImageData = '';
+    stagedVideoUrl = '';
+    if (imgPreviewBanner) imgPreviewBanner.style.display = 'none';
+    if (hubImgPreviewBanner) hubImgPreviewBanner.style.display = 'none';
+    if (fileInput) fileInput.value = '';
+    if (videoInput) videoInput.value = '';
+    if (hubFileInput) hubFileInput.value = '';
+    if (hubVideoInput) hubVideoInput.value = '';
+  }
+
   function setStagedImage(dataUrl, labelText) {
     stagedImageData = dataUrl || '';
     if (!stagedImageData) {
-      if (imgPreviewBanner) imgPreviewBanner.style.display = 'none';
-      if (hubImgPreviewBanner) hubImgPreviewBanner.style.display = 'none';
-      if (fileInput) fileInput.value = '';
-      if (hubFileInput) hubFileInput.value = '';
+      if (!stagedVideoUrl) clearStagedMedia();
       return;
     }
+    stagedVideoUrl = '';
     const kb = Math.max(1, Math.round((stagedImageData.length * 0.75) / 1024));
-    const desc = labelText || `画像を添付中 (${kb}KB) - 送信で投稿`;
+    const desc = labelText || `🖼️ 画像を添付中 (${kb}KB) - 送るで投稿`;
     if (imgPreviewBanner && imgPreviewThumb && imgPreviewLabel) {
+      imgPreviewThumb.style.display = 'block';
       imgPreviewThumb.src = stagedImageData;
       imgPreviewLabel.textContent = desc;
       imgPreviewBanner.style.display = 'flex';
     }
     if (hubImgPreviewBanner && hubImgPreviewThumb && hubImgPreviewLabel) {
+      hubImgPreviewThumb.style.display = 'block';
       hubImgPreviewThumb.src = stagedImageData;
+      hubImgPreviewLabel.textContent = desc;
+      hubImgPreviewBanner.style.display = 'flex';
+    }
+  }
+
+  function setStagedVideo(videoUrl, labelText) {
+    stagedVideoUrl = videoUrl || '';
+    if (!stagedVideoUrl) {
+      if (!stagedImageData) clearStagedMedia();
+      return;
+    }
+    stagedImageData = '';
+    const desc = labelText || '🎬 動画を添付完了 - 送るボタンで投稿';
+    if (imgPreviewBanner && imgPreviewThumb && imgPreviewLabel) {
+      imgPreviewThumb.style.display = 'none';
+      imgPreviewLabel.textContent = desc;
+      imgPreviewBanner.style.display = 'flex';
+    }
+    if (hubImgPreviewBanner && hubImgPreviewThumb && hubImgPreviewLabel) {
+      hubImgPreviewThumb.style.display = 'none';
       hubImgPreviewLabel.textContent = desc;
       hubImgPreviewBanner.style.display = 'flex';
     }
@@ -4804,7 +5715,6 @@ _CLIENT_JS = r"""
         reject(new Error('not_image'));
         return;
       }
-      // Keep small GIFs intact so animation works
       if (file.type === 'image/gif' && file.size <= 350 * 1024) {
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ''));
@@ -4855,8 +5765,58 @@ _CLIENT_JS = r"""
     });
   }
 
+  async function handleVideoFileSelected(file, focusTarget) {
+    if (!file) return;
+    if (!isLoggedIn()) {
+      openLoginModal(() => handleVideoFileSelected(file, focusTarget));
+      return;
+    }
+    if (file.size > 25 * 1024 * 1024) {
+      appendSystemNotice('⚠️ 動画サイズは最大25MBまで対応しています。');
+      return;
+    }
+    setStagedVideo('uploading', '⏳ 動画をアップロード中... (' + Math.max(1, Math.round(file.size / 1024)) + 'KB)');
+    try {
+      const res = await fetch(getApiUrl('/openchat/upload'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': file.type || 'video/mp4',
+          'X-Media-Type': file.type || 'video/mp4',
+          'X-OpenChat-Client-Id': currentClientId,
+          ...(currentAuthToken ? { 'X-OpenChat-Auth': currentAuthToken } : {})
+        },
+        body: file
+      });
+      const data = await res.json().catch(() => null);
+      if (res.status === 401 || (data && data.error === 'login_required')) {
+        clearStagedMedia();
+        setAuthState('', '', '');
+        openLoginModal(() => handleVideoFileSelected(file, focusTarget));
+        return;
+      }
+      if (res.ok && data && data.ok && data.url) {
+        const mb = (file.size / (1024 * 1024)).toFixed(1);
+        setStagedVideo(data.url, `🎬 動画添付済 (${mb}MB) - 送るボタンで投稿`);
+        if (focusTarget) focusTarget.focus();
+      } else {
+        clearStagedMedia();
+        appendSystemNotice('⚠️ 動画のアップロードに失敗しました: ' + ((data && data.error) || 'エラー'));
+      }
+    } catch (_) {
+      clearStagedMedia();
+      appendSystemNotice('⚠️ 動画のアップロード中に通信エラーが発生しました。');
+    }
+  }
+
   async function handleImageFileSelected(file, focusTarget) {
     if (!file) return;
+    if (file.type && file.type.startsWith('video/')) {
+      return handleVideoFileSelected(file, focusTarget);
+    }
+    if (!isLoggedIn()) {
+      openLoginModal(() => handleImageFileSelected(file, focusTarget));
+      return;
+    }
     try {
       const dataUrl = await compressImageFile(file);
       if (dataUrl && dataUrl.length <= 640000) {
@@ -4869,6 +5829,10 @@ _CLIENT_JS = r"""
   if (imgBtn && fileInput) {
     imgBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!isLoggedIn()) {
+        openLoginModal(() => fileInput.click());
+        return;
+      }
       fileInput.click();
     });
     fileInput.addEventListener('change', (e) => {
@@ -4876,15 +5840,33 @@ _CLIENT_JS = r"""
       if (f) handleImageFileSelected(f, input);
     });
   }
+  if (vidBtn && videoInput) {
+    vidBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!isLoggedIn()) {
+        openLoginModal(() => videoInput.click());
+        return;
+      }
+      videoInput.click();
+    });
+    videoInput.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleVideoFileSelected(f, input);
+    });
+  }
   if (imgPreviewCancel) {
     imgPreviewCancel.addEventListener('click', (e) => {
       e.stopPropagation();
-      setStagedImage('');
+      clearStagedMedia();
     });
   }
   if (hubImgBtn && hubFileInput) {
     hubImgBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      if (!isLoggedIn()) {
+        openLoginModal(() => hubFileInput.click());
+        return;
+      }
       hubFileInput.click();
     });
     hubFileInput.addEventListener('change', (e) => {
@@ -4892,20 +5874,34 @@ _CLIENT_JS = r"""
       if (f) handleImageFileSelected(f, hubChatInput);
     });
   }
+  if (hubVidBtn && hubVideoInput) {
+    hubVidBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!isLoggedIn()) {
+        openLoginModal(() => hubVideoInput.click());
+        return;
+      }
+      hubVideoInput.click();
+    });
+    hubVideoInput.addEventListener('change', (e) => {
+      const f = e.target.files && e.target.files[0];
+      if (f) handleVideoFileSelected(f, hubChatInput);
+    });
+  }
   if (hubImgPreviewCancel) {
     hubImgPreviewCancel.addEventListener('click', (e) => {
       e.stopPropagation();
-      setStagedImage('');
+      clearStagedMedia();
     });
   }
 
-  // Support Ctrl+V image paste in floating chat & Hub chat
-  function onPasteImage(e, targetInput) {
+  // Support Ctrl+V image/video paste in floating chat & Hub chat
+  function onPasteMedia(e, targetInput) {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (it.type && it.type.indexOf('image/') === 0) {
+      if (it.type && (it.type.indexOf('image/') === 0 || it.type.indexOf('video/') === 0)) {
         const f = it.getAsFile();
         if (f) {
           e.preventDefault();
@@ -4915,12 +5911,12 @@ _CLIENT_JS = r"""
       }
     }
   }
-  panel.addEventListener('paste', (e) => onPasteImage(e, input));
+  panel.addEventListener('paste', (e) => onPasteMedia(e, input));
   if (hubChatForm) {
-    hubChatForm.addEventListener('paste', (e) => onPasteImage(e, hubChatInput));
+    hubChatForm.addEventListener('paste', (e) => onPasteMedia(e, hubChatInput));
   }
 
-  // Support drag & drop images onto floating chat & Hub chat
+  // Support drag & drop images/videos onto floating chat & Hub chat
   panel.addEventListener('dragover', (e) => {
     e.preventDefault();
     e.stopPropagation();
@@ -4947,7 +5943,7 @@ _CLIENT_JS = r"""
     });
     hubSection.addEventListener('drop', (e) => {
       const files = e.dataTransfer && e.dataTransfer.files;
-      if (files && files.length > 0 && files[0].type && files[0].type.startsWith('image/')) {
+      if (files && files.length > 0 && files[0].type && (files[0].type.startsWith('image/') || files[0].type.startsWith('video/'))) {
         e.preventDefault();
         e.stopPropagation();
         handleImageFileSelected(files[0], hubChatInput);
@@ -5129,6 +6125,7 @@ _CLIENT_JS = r"""
   }
 
   function flushUnsent() {
+    if (!isLoggedIn()) return;
     try {
       const raw = localStorage.getItem(UNSENT_KEY);
       if (!raw) return;
@@ -5142,9 +6139,10 @@ _CLIENT_JS = r"""
           headers: {
             'Content-Type': 'application/json',
             'X-OpenChat-Client-Id': currentClientId,
-            ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {})
+            ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
+            ...(currentAuthToken ? { 'X-OpenChat-Auth': currentAuthToken } : {})
           },
-          body: JSON.stringify({ message: m, clientId: currentClientId, token: currentIpToken })
+          body: JSON.stringify({ message: m, clientId: currentClientId, token: currentIpToken, authToken: currentAuthToken })
         }).then(r => r.json()).then(res => {
           if (res && res.myId) applyServerMyId(res.myId, res.token);
           if (checkAndApplyResetEpoch(res)) return;
@@ -5254,7 +6252,7 @@ _CLIENT_JS = r"""
         <div class="sh-chat-reply-quote" data-target-id="${escapeHtml(msg.replyTo.id)}" title="クリックで返信元のレスへ移動">
           <span class="sh-reply-quote-icon">&gt;&gt;</span>
           <span class="sh-reply-quote-id">ID:${escapeHtml(replySender)}</span>
-          <span class="sh-reply-quote-text">${escapeHtml(msg.replyTo.text || '[画像]')}</span>
+          <span class="sh-reply-quote-text">${escapeHtml(msg.replyTo.text || '[メディア]')}</span>
         </div>
       `;
     }
@@ -5268,12 +6266,18 @@ _CLIENT_JS = r"""
       : (isConcat ? `<div class="sh-chat-msg-text">${concatResPrefix}</div>` : '');
 
     let imgSrc = msg.image || '';
-    if (!imgSrc && hasText) {
-      const mUrl = String(msg.text).trim().match(/^(https?:\/\/[^\s]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?)$/i);
-      if (mUrl) imgSrc = mUrl[1];
+    let vidSrc = msg.video || '';
+    if (!imgSrc && !vidSrc && hasText) {
+      const mImg = String(msg.text).trim().match(/^(https?:\/\/[^\s]+\.(?:png|jpe?g|gif|webp)(?:\?[^\s]*)?)$/i);
+      if (mImg) imgSrc = mImg[1];
+      const mVid = String(msg.text).trim().match(/^(https?:\/\/[^\s]+\.(?:mp4|webm|ogv|mov)(?:\?[^\s]*)?)$/i);
+      if (mVid) vidSrc = mVid[1];
     }
     const imgHtml = imgSrc
       ? `<div class="sh-chat-msg-img-wrap"><img src="${escapeHtml(imgSrc)}" class="sh-chat-msg-img" loading="lazy" alt="画像" title="クリックで拡大表示" /></div>`
+      : '';
+    const vidHtml = vidSrc
+      ? `<div class="sh-chat-msg-video-wrap"><video src="${escapeHtml(vidSrc)}" class="sh-chat-msg-video" controls playsinline webkit-playsinline preload="metadata"></video></div>`
       : '';
 
     const concatTimeHtml = isConcat ? `<span class="sh-chat-concat-time">${sTime}</span>` : '';
@@ -5284,6 +6288,7 @@ _CLIENT_JS = r"""
         <div class="sh-chat-entry-content">
           ${textHtml}
           ${imgHtml}
+          ${vidHtml}
         </div>
         ${concatTimeHtml}
       </div>
@@ -5293,11 +6298,12 @@ _CLIENT_JS = r"""
       </div>
     `;
 
+    const mediaLabel = hasText ? msg.text : (vidSrc ? '🎬 [動画]' : '🖼️ [画像]');
     const concatNoEl = entry.querySelector('.sh-chat-concat-no');
     if (concatNoEl) {
       concatNoEl.addEventListener('click', (e) => {
         e.stopPropagation();
-        setReplyTarget(msg.id, cleanSender, hasText ? msg.text : '🖼️ [画像]', resNo);
+        setReplyTarget(msg.id, cleanSender, mediaLabel, resNo);
       });
     }
 
@@ -5308,6 +6314,13 @@ _CLIENT_JS = r"""
         openImageLightbox(imgSrc);
       });
       imgEl.addEventListener('load', () => {
+        scrollToBottom(false);
+      });
+    }
+
+    const vidEl = entry.querySelector('.sh-chat-msg-video');
+    if (vidEl) {
+      vidEl.addEventListener('loadedmetadata', () => {
         scrollToBottom(false);
       });
     }
@@ -5331,7 +6344,7 @@ _CLIENT_JS = r"""
     if (replyBtn) {
       replyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        setReplyTarget(msg.id, cleanSender, hasText ? msg.text : '🖼️ [画像]', resNo);
+        setReplyTarget(msg.id, cleanSender, mediaLabel, resNo);
       });
     }
 
@@ -5339,7 +6352,7 @@ _CLIENT_JS = r"""
     if (copyBtn) {
       copyBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        copyTextToClipboard(msg.text || (imgSrc ? '[画像]' : ''), copyBtn);
+        copyTextToClipboard(msg.text || vidSrc || (imgSrc ? '[画像]' : ''), copyBtn);
       });
     }
 
@@ -5373,11 +6386,11 @@ _CLIENT_JS = r"""
     el.dataset.trip = (msg.trip && String(msg.trip).trim()) || '';
     el.dataset.name = (msg.name && String(msg.name).trim()) || '';
     el.dataset.service = rawSvc;
-    const sId = escapeHtml(cleanSender);
     const idColor = getIdColor(cleanSender);
     const sSvc = escapeHtml(rawSvc);
     const sTime = escapeHtml(formatMsgTime(msg));
-    const sName = escapeHtml(cleanSender);
+    const customName = (msg.name && String(msg.name).trim() && cleanIdDisplay(msg.name) !== cleanSender) ? String(msg.name).trim() : '';
+    const sName = customName ? `${escapeHtml(customName)} (${escapeHtml(cleanSender)})` : escapeHtml(cleanSender);
     const sTrip = escapeHtml(msg.trip && String(msg.trip).trim() ? String(msg.trip).trim() : '');
     const tripHtml = sTrip ? `<span class="sh-2ch-trip">◆${sTrip}</span>` : '';
 
@@ -5398,7 +6411,8 @@ _CLIENT_JS = r"""
       noEl.addEventListener('click', (e) => {
         e.stopPropagation();
         const hasText = Boolean(msg.text && String(msg.text).trim());
-        setReplyTarget(msg.id, cleanSender, hasText ? msg.text : '🖼️ [画像]', resNo);
+        const mediaLabel = hasText ? msg.text : (msg.video ? '🎬 [動画]' : '🖼️ [画像]');
+        setReplyTarget(msg.id, cleanSender, mediaLabel, resNo);
       });
     }
 
@@ -5492,6 +6506,10 @@ _CLIENT_JS = r"""
     }
     if (msg.name && cached.name !== msg.name) {
       cached.name = msg.name;
+      changed = true;
+    }
+    if (msg.video && cached.video !== msg.video) {
+      cached.video = msg.video;
       changed = true;
     }
     if (msg.service && cached.service !== msg.service) {
@@ -5615,9 +6633,10 @@ _CLIENT_JS = r"""
           const myTrip = getStoredTripKey();
           ws.send(JSON.stringify({
             type: 'sync',
-            messages: localMessageCache.slice(-80),
+            messages: isLoggedIn() ? localMessageCache.slice(-80) : [],
             clientId: currentClientId,
             token: currentIpToken,
+            authToken: currentAuthToken,
             tripKey: myTrip,
             service: detectService()
           }));
@@ -5628,6 +6647,11 @@ _CLIENT_JS = r"""
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          if (data && data.type === 'auth_required') {
+            setAuthState('', '', '');
+            openLoginModal();
+            return;
+          }
           if (data && data.myId) {
             applyServerMyId(data.myId, data.token, data.trip);
           }
@@ -5700,15 +6724,18 @@ _CLIENT_JS = r"""
     try {
       flushUnsent();
       const myTrip = getStoredTripKey();
-      const outgoing = localMessageCache.filter(m => {
-        if (!m) return false;
-        if (m.isLocal || m.service === 'System' || m.senderId === 'SYS' || String(m.id || '').startsWith('sys_') || m.name === 'システム') return false;
-        return true;
-      });
+      const outgoing = isLoggedIn()
+        ? localMessageCache.filter(m => {
+            if (!m) return false;
+            if (m.isLocal || m.service === 'System' || m.senderId === 'SYS' || String(m.id || '').startsWith('sys_') || m.name === 'システム') return false;
+            return true;
+          }).slice(-100)
+        : [];
       const payload = {
-        messages: outgoing.slice(-100),
+        messages: outgoing,
         clientId: currentClientId,
         token: currentIpToken,
+        authToken: currentAuthToken,
         tripKey: myTrip,
         service: detectService()
       };
@@ -5719,6 +6746,7 @@ _CLIENT_JS = r"""
           'X-OpenChat-Client-Id': currentClientId,
           'X-OpenChat-Service': detectService(),
           ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
+          ...(currentAuthToken ? { 'X-OpenChat-Auth': currentAuthToken } : {}),
           ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
         },
         body: JSON.stringify(payload)
@@ -5750,6 +6778,7 @@ _CLIENT_JS = r"""
           'X-OpenChat-Client-Id': currentClientId,
           'X-OpenChat-Service': detectService(),
           ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
+          ...(currentAuthToken ? { 'X-OpenChat-Auth': currentAuthToken } : {}),
           ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
         }
       });
@@ -5770,14 +6799,30 @@ _CLIENT_JS = r"""
   }
 
   let lastSendTs = 0;
-  async function sendMessage(text, imageDataUrl) {
+  async function sendMessage(text, imageDataUrl, videoUrl, onAcceptedClearInput) {
     const cleanText = (text || '').trim();
     const cleanImg = imageDataUrl || stagedImageData || '';
-    if (!cleanText && !cleanImg) return;
+    const cleanVid = (videoUrl || stagedVideoUrl || '');
+    if (cleanVid === 'uploading') {
+      appendSystemNotice('⏳ 動画のアップロード完了まで少々お待ちください。');
+      return;
+    }
+    if (!cleanText && !cleanImg && !cleanVid) return;
+
+    // Require Login to post messages or videos (viewing is open without login)
+    if (!isLoggedIn()) {
+      openLoginModal(() => {
+        sendMessage(cleanText, cleanImg, cleanVid, onAcceptedClearInput);
+      });
+      return;
+    }
+
+    if (typeof onAcceptedClearInput === 'function') {
+      onAcceptedClearInput();
+    }
 
     const cmdText = cleanText.replace(/^[／]/, '/').trim();
 
-    // Check if user is posting @System message (make it visible only to sender)
     if (/^[＠@]system\b|^[＠@]システム\b/i.test(cmdText)) {
       const noticeBody = cmdText.replace(/^[＠@](?:system|システム)\s*/i, '').trim();
       appendSystemNotice(noticeBody || 'システムメッセージ');
@@ -5788,6 +6833,11 @@ _CLIENT_JS = r"""
       const spaceIdx = cmdText.indexOf(' ');
       const cmd = (spaceIdx === -1 ? cmdText : cmdText.slice(0, spaceIdx)).toLowerCase();
       const arg = (spaceIdx === -1 ? '' : cmdText.slice(spaceIdx + 1)).trim();
+
+      if (cmd === '/logout') {
+        handleLoginOrLogoutClick();
+        return;
+      }
 
       if (cmd === '/trip') {
         if (!arg) {
@@ -5834,31 +6884,8 @@ _CLIENT_JS = r"""
         return;
       }
 
-      if (cmd === '/name' || cmd === '/id') {
-        appendSystemNotice('名前は個別ID (' + (currentSenderId || '個別ID') + ') で固定されています。\nトリップ(◆の後)を変更するには /trip [文字] を入力してください (例: /trip pass123)');
-        return;
-      }
-
-      if (cmd === '/resetid') {
-        setStoredTripKey('');
-        setStoredTripCode('');
-        currentTripCode = '';
-        fetch(getApiUrl('/openchat/claim'), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-OpenChat-Client-Id': currentClientId },
-          body: JSON.stringify({ clientId: currentClientId, tripKey: '' })
-        }).then(r => r.json()).then(d => {
-          if (d && d.myId) applyServerMyId(d.myId, d.token, '');
-          if (d && (typeof d.onlineCount === 'number' || typeof d.count === 'number')) updateOnlineCount(d.onlineCount || d.count);
-          appendSystemNotice('トリップを初期化しました。');
-        }).catch(() => {
-          appendSystemNotice('トリップを初期化しました。');
-        });
-        return;
-      }
-
       if (cmd === '/help') {
-        appendSystemNotice('【チャットコマンド一覧】\n・/trip [文字] : トリップ(◆の後)を設定 (例: /trip pass123)\n・/trip : 現在のトリップを確認\n・/trip off : トリップを解除\n・/help : コマンド一覧を表示\n※名前は個別IDで固定されています。');
+        appendSystemNotice('【チャットコマンド一覧】\n・/trip [文字] : トリップ(◆の後)を設定\n・/trip off : トリップを解除\n・/logout : ログアウト\n・/help : コマンド一覧を表示');
         return;
       }
     }
@@ -5869,9 +6896,10 @@ _CLIENT_JS = r"""
 
     const myId = currentSenderId || getSenderId();
     const myTrip = getStoredTripKey() || currentTripCode;
+    const myDisplayName = currentAuthUser || myId;
 
-    if (stagedImageData) {
-      setStagedImage('');
+    if (stagedImageData || stagedVideoUrl) {
+      clearStagedMedia();
     }
 
     const now = new Date();
@@ -5883,7 +6911,7 @@ _CLIENT_JS = r"""
     const msg = {
       id: 'msg_' + Date.now() + '_' + Math.floor(100 + Math.random() * 900),
       senderId: myId,
-      name: myId,
+      name: myDisplayName,
       clientId: currentClientId,
       service: detectService(),
       text: cleanText,
@@ -5896,6 +6924,9 @@ _CLIENT_JS = r"""
     }
     if (cleanImg) {
       msg.image = cleanImg;
+    }
+    if (cleanVid) {
+      msg.video = cleanVid;
     }
     if (currentReplyTo) {
       msg.replyTo = { ...currentReplyTo };
@@ -5914,17 +6945,24 @@ _CLIENT_JS = r"""
         'X-OpenChat-Client-Id': currentClientId,
         'X-OpenChat-Service': msg.service,
         ...(currentIpToken ? { 'X-OpenChat-IP-Token': currentIpToken } : {}),
+        ...(currentAuthToken ? { 'X-OpenChat-Auth': currentAuthToken } : {}),
         ...(myTrip ? { 'X-OpenChat-Trip-Key': myTrip } : {})
       },
       body: JSON.stringify({
         message: msg,
         clientId: currentClientId,
         token: currentIpToken,
+        authToken: currentAuthToken,
         tripKey: myTrip,
         service: msg.service
       })
     }).then(async (r) => {
       const data = await r.json().catch(() => null);
+      if (r.status === 401 || (data && data.error === 'login_required')) {
+        setAuthState('', '', '');
+        openLoginModal();
+        return;
+      }
       if (data && data.myId) {
         applyServerMyId(data.myId, data.token, data.trip);
       }
@@ -5952,8 +6990,9 @@ _CLIENT_JS = r"""
           message: msg,
           clientId: currentClientId,
           token: currentIpToken,
+          authToken: currentAuthToken,
           tripKey: myTrip,
-          name: myId,
+          name: myDisplayName,
           service: msg.service
         }));
       } catch (_) {}
@@ -5965,10 +7004,11 @@ _CLIENT_JS = r"""
     e.stopPropagation();
     if (isComposing || justComposed) return;
     const val = input.value;
-    input.value = '';
-    autoResizeTextarea(input);
-    updateInputMeta();
-    sendMessage(val);
+    sendMessage(val, undefined, undefined, () => {
+      input.value = '';
+      autoResizeTextarea(input);
+      updateInputMeta();
+    });
   });
 
   // Hub embedded chat form submission
@@ -5978,11 +7018,12 @@ _CLIENT_JS = r"""
       e.stopPropagation();
       if (hubComposing || hubJustComposed) return;
       const val = hubChatInput.value;
-      hubChatInput.value = '';
-      autoResizeTextarea(hubChatInput);
-      if (hubCharCount) hubCharCount.textContent = '0/200';
-      if (hubChatClear) hubChatClear.style.display = 'none';
-      sendMessage(val);
+      sendMessage(val, undefined, undefined, () => {
+        hubChatInput.value = '';
+        autoResizeTextarea(hubChatInput);
+        if (hubCharCount) hubCharCount.textContent = '0/200';
+        if (hubChatClear) hubChatClear.style.display = 'none';
+      });
     });
   }
   if (hubScrollBottom && hubChatBody) {

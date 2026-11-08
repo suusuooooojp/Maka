@@ -232,64 +232,81 @@ def render_home(proxies, request=None):
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#111827">
+<meta name="theme-color" content="#ffffff">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <style>
 :root {{
-  --bg: #f3f4f6;
+  --bg: #f8f9fa;
   --surface: #ffffff;
-  --surface-2: #f9fafb;
-  --surface-hover: #f3f4f6;
-  --text: #111827;
-  --muted: #6b7280;
-  --border: #d1d5db;
-  --border-subtle: #e5e7eb;
-  --accent: #2563eb;
-  --accent-soft: rgba(37,99,235,0.08);
-  --green: #059669;
-  --green-soft: rgba(5,150,105,0.10);
-  --radius: 6px;
+  --surface-2: #f1f3f4;
+  --surface-hover: #e8f0fe;
+  --text: #202124;
+  --muted: #5f6368;
+  --border: #dadce0;
+  --border-subtle: #e8eaed;
+  --accent: #1a73e8;
+  --accent-hover: #1557b0;
+  --accent-soft: #e8f0fe;
+  --green: #188038;
+  --green-soft: #e6f4ea;
+  --radius: 16px;
+  --radius-sm: 10px;
+  --shadow-sm: 0 1px 2px rgba(60,64,67,0.12), 0 1px 3px 1px rgba(60,64,67,0.06);
+  --shadow-md: 0 1px 6px rgba(32,33,36,0.18);
 }}
 [data-theme="dark"] {{
-  --bg: #0f172a;
-  --surface: #1e293b;
-  --surface-2: #0f172a;
-  --surface-hover: #334155;
-  --text: #f3f4f6;
-  --muted: #9ca3af;
-  --border: #334155;
-  --border-subtle: #1e293b;
-  --accent: #3b82f6;
-  --accent-soft: rgba(59,130,246,0.14);
-  --green: #10b981;
-  --green-soft: rgba(16,185,129,0.14);
+  --bg: #131314;
+  --surface: #1e1f20;
+  --surface-2: #282a2c;
+  --surface-hover: #303134;
+  --text: #e8eaed;
+  --muted: #9aa0a6;
+  --border: #3c4043;
+  --border-subtle: #2d2e31;
+  --accent: #8ab4f8;
+  --accent-hover: #aecbfa;
+  --accent-soft: rgba(138,180,248,0.16);
+  --green: #81c995;
+  --green-soft: rgba(129,201,149,0.16);
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.4);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.5);
 }}
 * {{ box-sizing: border-box; touch-action: manipulation; }}
 html, body {{
   margin: 0;
   min-height: 100%;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  font-family: "Google Sans", Roboto, -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
   background: var(--bg);
   color: var(--text);
-  line-height: 1.4;
-  font-size: 13.5px;
+  line-height: 1.5;
+  font-size: 14px;
   touch-action: manipulation;
   -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
 }}
 a {{ color: inherit; text-decoration: none; }}
-button, input {{ font: inherit; }}
+button, input, textarea {{ font: inherit; }}
+
+/* Google 4-Color Top Accent Bar */
+.google-color-bar {{
+  height: 4px;
+  width: 100%;
+  background: linear-gradient(90deg, #4285F4 0% 25%, #EA4335 25% 50%, #FBBC05 50% 75%, #34A853 75% 100%);
+}}
 
 /* Header */
 .topbar {{
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 40;
 }}
 .topbar-inner {{
-  max-width: 1180px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 8px 16px;
+  padding: 10px 20px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -298,27 +315,45 @@ button, input {{ font: inherit; }}
 }}
 .brand {{
   font-weight: 700;
-  font-size: 15px;
-  letter-spacing: -0.01em;
+  font-size: 18px;
+  letter-spacing: -0.02em;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+}}
+.google-wordmark {{
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}}
+.google-wordmark .g-b {{ color: #4285F4; }}
+.google-wordmark .g-r {{ color: #EA4335; }}
+.google-wordmark .g-y {{ color: #FBBC05; }}
+.google-wordmark .g-g {{ color: #34A853; }}
+.google-wordmark .g-sub {{
+  color: var(--muted);
+  font-size: 15px;
+  font-weight: 600;
+  margin-left: 6px;
+  letter-spacing: 0;
 }}
 .live-badge {{
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  padding: 4px 10px;
+  border-radius: 999px;
   background: var(--green-soft);
   color: var(--green);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }}
 .live-dot {{
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--green);
 }}
@@ -332,229 +367,269 @@ button, input {{ font: inherit; }}
   font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
-  padding: 3px 8px;
+  padding: 4px 10px;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: 999px;
   background: var(--surface-2);
 }}
 .btn {{
-  padding: 4px 10px;
-  border-radius: 4px;
+  padding: 6px 14px;
+  border-radius: 999px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }}
-.btn:hover {{ background: var(--surface-hover); }}
+.btn:hover {{
+  background: var(--surface-hover);
+  border-color: var(--accent);
+}}
+.btn-primary {{
+  background: #1a73e8;
+  color: #ffffff;
+  border-color: #1a73e8;
+}}
+.btn-primary:hover {{
+  background: #1557b0;
+  color: #ffffff;
+}}
 
 /* Main Layout */
 .container {{
-  max-width: 1180px;
+  max-width: 1200px;
   margin: 0 auto;
-  padding: 14px 16px 40px;
+  padding: 18px 20px 48px;
 }}
 
-/* Control Bar (Search + Quick Launch + Tabs) */
+/* Google Search Inspired Control Panel */
 .control-panel {{
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
-  margin-bottom: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-sm);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }}
 .omnibox {{
   display: flex;
-  gap: 6px;
+  gap: 10px;
   flex-wrap: wrap;
+  align-items: center;
 }}
 .search-wrap {{
-  flex: 1 1 260px;
+  flex: 1 1 300px;
   position: relative;
   display: flex;
   align-items: center;
 }}
+.search-icon {{
+  position: absolute;
+  left: 14px;
+  color: var(--muted);
+  font-size: 14px;
+  pointer-events: none;
+}}
 #search {{
   width: 100%;
-  padding: 6px 56px 6px 10px;
-  border-radius: 4px;
+  padding: 10px 64px 10px 38px;
+  border-radius: 999px;
   border: 1px solid var(--border);
-  background: var(--surface-2);
+  background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
+  box-shadow: 0 1px 4px rgba(32,33,36,0.1);
+  transition: border-color 0.15s, box-shadow 0.15s;
 }}
 #search:focus {{
   border-color: var(--accent);
-  background: var(--surface);
+  box-shadow: 0 1px 6px rgba(26,115,232,0.28);
 }}
 .search-clear {{
   position: absolute;
-  right: 28px;
+  right: 34px;
   border: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  font-size: 12px;
-  padding: 2px 5px;
+  font-size: 15px;
+  padding: 2px 6px;
   display: none;
 }}
 .search-kbd {{
   position: absolute;
-  right: 7px;
+  right: 12px;
   font-size: 11px;
-  padding: 0 5px;
-  border-radius: 3px;
-  background: var(--surface);
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
   border: 1px solid var(--border);
   color: var(--muted);
   pointer-events: none;
 }}
 .quick-actions {{
   display: flex;
-  gap: 6px;
+  gap: 8px;
   flex-wrap: wrap;
 }}
 .filter-row {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
 }}
 .tabs {{
   display: flex;
-  gap: 4px;
+  gap: 6px;
   flex-wrap: wrap;
 }}
 .tab-btn {{
-  padding: 4px 10px;
-  border-radius: 4px;
-  border: 1px solid transparent;
-  background: transparent;
+  padding: 6px 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
   color: var(--muted);
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
+  transition: all 0.15s;
 }}
 .tab-btn:hover {{
   color: var(--text);
-  background: var(--surface-hover);
+  background: var(--surface-2);
 }}
 .tab-btn.active {{
-  background: var(--accent);
-  color: #fff;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent);
 }}
 .tab-count {{
-  font-size: 11px;
+  font-size: 11.5px;
   opacity: 0.85;
-  margin-left: 2px;
+  margin-left: 3px;
 }}
 .recent-bar {{
   display: none;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-  font-size: 11.5px;
+  font-size: 12px;
 }}
 .recent-bar.visible {{ display: flex; }}
-.recent-label {{ color: var(--muted); }}
+.recent-label {{ color: var(--muted); font-weight: 500; }}
 .recent-chip {{
-  padding: 2px 7px;
-  border-radius: 3px;
+  padding: 3px 10px;
+  border-radius: 999px;
   background: var(--surface-2);
   border: 1px solid var(--border);
-  font-size: 11.5px;
+  font-size: 12px;
+  font-weight: 500;
 }}
-.recent-chip:hover {{ border-color: var(--accent); }}
+.recent-chip:hover {{ border-color: var(--accent); color: var(--accent); }}
 
-/* Service Grid */
+/* Service Grid (Google Material 3 Cards) */
 .grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
 }}
 .card {{
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 12px;
+  padding: 14px 16px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  transition: border-color 0.12s;
+  gap: 8px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
 }}
 .card:hover {{
   border-color: var(--accent);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
 }}
 .card-head {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 8px;
 }}
 .card-title {{
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
 }}
 .card-title b {{
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }}
 .cat-tag {{
-  font-size: 10.5px;
-  padding: 1px 5px;
-  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
   background: var(--surface-2);
   color: var(--muted);
   border: 1px solid var(--border-subtle);
   white-space: nowrap;
 }}
 .fav-btn {{
-  width: 22px;
-  height: 22px;
-  border-radius: 3px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
   border: 1px solid transparent;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
   padding: 0;
-  font-size: 13px;
+  font-size: 15px;
   line-height: 1;
 }}
 .fav-btn:hover, .fav-btn.pinned {{
-  color: #d97706;
+  color: #fbbc04;
+  background: var(--surface-2);
 }}
 .card-sub {{
   color: var(--muted);
-  font-size: 11.5px;
+  font-size: 12.5px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 6px;
+  line-height: 1.45;
 }}
 .card-path {{
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
-  opacity: 0.75;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  opacity: 0.85;
 }}
 .card-foot {{
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 8px;
   border-top: 1px solid var(--border-subtle);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 11.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }}
 .service-status {{
@@ -564,10 +639,10 @@ button, input {{ font: inherit; }}
   color: var(--muted);
 }}
 .status-dot {{
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #9ca3af;
+  background: #9aa0a6;
 }}
 .service-status.active {{
   color: var(--green);
@@ -578,21 +653,23 @@ button, input {{ font: inherit; }}
 }}
 .service-access-count {{
   color: var(--muted);
+  font-weight: 500;
 }}
 .empty-search {{
   display: none;
-  padding: 16px;
+  padding: 20px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--muted);
-  font-size: 12.5px;
-  margin-top: 8px;
+  font-size: 13.5px;
+  margin-top: 10px;
+  text-align: center;
 }}
 
 /* Statistics Section */
 .stats-section {{
-  margin-top: 16px;
+  margin-top: 22px;
 }}
 .section-header {{
   display: flex;
@@ -600,7 +677,7 @@ button, input {{ font: inherit; }}
   justify-content: space-between;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }}
 .section-title-group {{
   display: flex;
@@ -610,32 +687,33 @@ button, input {{ font: inherit; }}
 }}
 .section-title-group h2 {{
   margin: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
 }}
 .section-title-group span {{
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
 }}
 .range-switch {{
   display: inline-flex;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 2px;
-  gap: 2px;
+  border-radius: 999px;
+  padding: 3px;
+  gap: 3px;
 }}
 .range-btn {{
   border: 0;
   background: transparent;
   color: var(--muted);
-  padding: 3px 8px;
-  border-radius: 3px;
-  font-size: 11.5px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
   cursor: pointer;
 }}
 .range-btn.active {{
-  background: var(--accent);
+  background: #1a73e8;
   color: #fff;
 }}
 
@@ -643,29 +721,31 @@ button, input {{ font: inherit; }}
 .kpi-grid {{
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
+  margin-bottom: 10px;
 }}
 .kpi-card {{
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-sm);
 }}
 .kpi-label {{
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--muted);
+  font-weight: 600;
   display: flex;
   justify-content: space-between;
 }}
 .kpi-value {{
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
-  margin: 2px 0;
+  margin: 4px 0 2px;
   font-variant-numeric: tabular-nums;
 }}
 .kpi-sub {{
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }}
@@ -674,15 +754,16 @@ button, input {{ font: inherit; }}
 .charts-grid {{
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
+  margin-bottom: 10px;
 }}
 .chart-card {{
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
   position: relative;
+  box-shadow: var(--shadow-sm);
 }}
 .chart-head {{
   display: flex;
@@ -692,12 +773,12 @@ button, input {{ font: inherit; }}
   margin-bottom: 6px;
 }}
 .chart-title {{
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   margin: 0;
 }}
 .chart-badge {{
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }}
@@ -715,11 +796,11 @@ button, input {{ font: inherit; }}
 .chart-tooltip {{
   position: absolute;
   pointer-events: none;
-  background: rgba(17, 24, 39, 0.92);
-  color: #f9fafb;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 11px;
+  background: rgba(32, 33, 36, 0.94);
+  color: #f8f9fa;
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 11.5px;
   white-space: nowrap;
   opacity: 0;
   transition: opacity 0.1s;
@@ -730,24 +811,28 @@ button, input {{ font: inherit; }}
 .bottom-grid {{
   display: grid;
   grid-template-columns: 1.2fr 1fr;
-  gap: 8px;
+  gap: 10px;
+  margin-top: 10px;
 }}
 .panel-card {{
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  box-shadow: var(--shadow-sm);
 }}
 .panel-title {{
   margin: 0 0 8px;
-  font-size: 12.5px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
 }}
 .rank-row {{
-  padding: 5px 0;
+  padding: 6px 0;
   border-bottom: 1px solid var(--border-subtle);
 }}
 .rank-row:last-child {{ border-bottom: 0; }}
@@ -755,15 +840,48 @@ button, input {{ font: inherit; }}
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
-  margin-bottom: 3px;
+  font-size: 12.5px;
+  margin-bottom: 4px;
+  gap: 8px;
+  flex-wrap: wrap;
 }}
-.rank-name {{ font-weight: 500; }}
+.rank-name-wrap {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}}
+.rank-badge {{
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--muted);
+}}
+.rank-badge.rank-1 {{ background: #fef7e0; color: #b06000; }}
+.rank-badge.rank-2 {{ background: #e8f0fe; color: #1a73e8; }}
+.rank-badge.rank-3 {{ background: #fce8e6; color: #c5221f; }}
+.peer-status-badge {{
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+}}
+.peer-status-badge.online {{
+  background: var(--green-soft);
+  color: var(--green);
+}}
+.peer-status-badge.standby {{
+  background: var(--surface-2);
+  color: var(--muted);
+}}
+.rank-name {{ font-weight: 600; }}
 .rank-metrics {{
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }}
 .rank-ccu-pill {{
@@ -771,17 +889,19 @@ button, input {{ font: inherit; }}
 }}
 .rank-ccu-pill.active {{
   color: var(--green);
-  font-weight: 600;
+  font-weight: 700;
 }}
 .rank-bar-bg {{
   width: 100%;
-  height: 4px;
+  height: 5px;
+  border-radius: 999px;
   background: var(--surface-2);
   overflow: hidden;
 }}
 .rank-bar-fill {{
   height: 100%;
-  background: var(--accent);
+  border-radius: 999px;
+  background: #1a73e8;
 }}
 .recent-list {{
   display: flex;
@@ -792,27 +912,29 @@ button, input {{ font: inherit; }}
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 5px 0;
+  padding: 6px 0;
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 12px;
+  font-size: 12.5px;
 }}
 .recent-row:last-child {{ border-bottom: 0; }}
-.recent-svc {{ font-weight: 500; }}
+.recent-svc {{ font-weight: 600; }}
 .recent-time {{
   color: var(--muted);
-  font-size: 11px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }}
 .toast {{
   position: fixed;
-  right: 14px;
-  bottom: 14px;
+  right: 16px;
+  bottom: 16px;
   z-index: 100;
-  padding: 7px 12px;
-  border-radius: 4px;
-  background: #111827;
-  color: #f9fafb;
-  font-size: 12px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: #202124;
+  color: #f8f9fa;
+  font-size: 12.5px;
+  font-weight: 500;
+  box-shadow: var(--shadow-md);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.15s;
@@ -827,12 +949,12 @@ button, input {{ font: inherit; }}
 
 /* Hub Embedded OpenChat Section */
 .hub-chat-section {{
-  margin-top: 16px;
-  background: #0b0f19 !important;
+  margin-top: 22px;
+  background: #0d1017 !important;
   border: 1px solid #1e293b !important;
   border-radius: var(--radius);
   overflow: hidden;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.22);
   display: flex;
   flex-direction: column;
 }}
@@ -840,36 +962,36 @@ button, input {{ font: inherit; }}
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  background: #0f172a !important;
+  padding: 14px 18px;
+  background: #111827 !important;
   border-bottom: 1px solid #1e293b !important;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
 }}
 .hub-chat-title-wrap {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   flex-wrap: wrap;
 }}
 .hub-chat-badge {{
-  background: #ef4444;
+  background: #1a73e8;
   color: #fff;
-  font-size: 10px;
-  font-weight: 800;
-  padding: 2px 6px;
-  border-radius: 4px;
-  letter-spacing: 0.05em;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 999px;
+  letter-spacing: 0.03em;
 }}
 .hub-chat-title {{
   margin: 0;
-  font-size: 15px;
+  font-size: 16px;
   font-weight: 700;
   color: #f8fafc !important;
 }}
 .hub-chat-sub {{
   font-size: 12px;
-  color: #94a3b8 !important;
+  color: #cbd5e1 !important;
 }}
 .hub-chat-meta-right {{
   display: flex;
@@ -880,16 +1002,16 @@ button, input {{ font: inherit; }}
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
-  color: var(--green);
+  font-size: 12px;
+  color: #4ade80;
   font-weight: 600;
 }}
 .hub-status-dot {{
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 6px var(--green);
+  background: #22c55e;
+  box-shadow: 0 0 6px #22c55e;
 }}
 .hub-status-dot.reconnecting {{
   background: #f59e0b;
@@ -898,21 +1020,20 @@ button, input {{ font: inherit; }}
 .hub-my-id-btn {{
   font-size: 12px;
   font-weight: 700;
-  color: #38bdf8;
-  background: rgba(56, 189, 248, 0.12);
-  border: 1px solid rgba(56, 189, 248, 0.3);
-  padding: 3px 8px;
-  border-radius: 6px;
+  color: #8ab4f8;
+  background: rgba(138, 180, 248, 0.14);
+  border: 1px solid rgba(138, 180, 248, 0.35);
+  padding: 4px 10px;
+  border-radius: 999px;
   cursor: pointer;
   transition: all 0.15s;
 }}
 .hub-my-id-btn:hover {{
-  background: rgba(56, 189, 248, 0.22);
-  transform: scale(1.04);
+  background: rgba(138, 180, 248, 0.24);
 }}
 .hub-chat-body-wrapper {{
   position: relative;
-  height: 440px;
+  height: 460px;
   display: flex;
   flex-direction: column;
 }}
@@ -921,12 +1042,12 @@ button, input {{ font: inherit; }}
   min-height: 0 !important;
   overflow-y: scroll !important;
   overflow-x: hidden !important;
-  padding: 14px 16px;
+  padding: 14px 18px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
   overscroll-behavior: contain;
-  background: #0b0f19 !important;
+  background: #0d1017 !important;
   color: #f8fafc !important;
 }}
 .hub-chat-body::-webkit-scrollbar {{
@@ -941,25 +1062,25 @@ button, input {{ font: inherit; }}
   bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
-  background: var(--accent);
+  background: #1a73e8;
   color: #fff;
   border: none;
   font-size: 12px;
   font-weight: 700;
-  padding: 6px 14px;
-  border-radius: 20px;
+  padding: 6px 16px;
+  border-radius: 999px;
   cursor: pointer;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
   transition: all 0.15s;
   z-index: 5;
 }}
 .hub-chat-scroll-btn:hover {{
-  filter: brightness(1.1);
+  background: #1557b0;
   transform: translateX(-50%) translateY(-2px);
 }}
 .hub-chat-footer {{
-  padding: 10px 14px;
-  background: #0f172a !important;
+  padding: 12px 16px;
+  background: #111827 !important;
   border-top: 1px solid #1e293b !important;
 }}
 .hub-reply-banner {{
@@ -967,12 +1088,12 @@ button, input {{ font: inherit; }}
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  background: rgba(37, 99, 235, 0.22) !important;
-  border: 1px solid rgba(56, 189, 248, 0.4) !important;
-  border-radius: 6px;
-  padding: 5px 10px;
+  background: rgba(26, 115, 232, 0.22) !important;
+  border: 1px solid rgba(138, 180, 248, 0.4) !important;
+  border-radius: 8px;
+  padding: 6px 10px;
   margin-bottom: 8px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: #f1f5f9 !important;
 }}
 .hub-reply-info {{
@@ -983,11 +1104,11 @@ button, input {{ font: inherit; }}
   white-space: nowrap;
 }}
 .hub-reply-icon {{
-  color: #38bdf8;
+  color: #8ab4f8;
   font-weight: 700;
 }}
 .hub-reply-target {{
-  color: #38bdf8;
+  color: #8ab4f8;
   font-weight: 700;
 }}
 .hub-reply-text {{
@@ -1015,15 +1136,15 @@ button, input {{ font: inherit; }}
 }}
 .hub-chat-input {{
   flex: 1;
-  min-height: 38px;
-  max-height: 100px;
+  min-height: 40px;
+  max-height: 110px;
   resize: none;
   background: rgba(255, 255, 255, 0.08) !important;
   border: 1px solid #334155 !important;
-  border-radius: var(--radius);
-  padding: 8px 32px 8px 12px;
+  border-radius: 12px;
+  padding: 9px 34px 9px 14px;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
   font-family: inherit;
   color: #f8fafc !important;
   outline: none;
@@ -1032,18 +1153,18 @@ button, input {{ font: inherit; }}
   overflow-y: auto;
 }}
 .hub-chat-input:focus {{
-  border-color: #38bdf8 !important;
+  border-color: #8ab4f8 !important;
 }}
 .hub-chat-input::placeholder {{
-  color: #64748b !important;
+  color: #94a3b8 !important;
 }}
 .hub-input-clear {{
   position: absolute;
-  right: 76px;
-  top: 10px;
+  right: 92px;
+  top: 11px;
   background: #334155;
   border: none;
-  color: #94a3b8;
+  color: #cbd5e1;
   width: 18px;
   height: 18px;
   border-radius: 50%;
@@ -1056,42 +1177,49 @@ button, input {{ font: inherit; }}
   z-index: 2;
 }}
 .hub-chat-send-btn {{
-  background: var(--accent);
+  background: #1a73e8;
   color: #fff;
   border: none;
-  border-radius: var(--radius);
-  padding: 0 18px;
-  font-size: 13px;
+  border-radius: 999px;
+  padding: 0 20px;
+  font-size: 13.5px;
   font-weight: 700;
   cursor: pointer;
   transition: all 0.15s;
-  height: 38px;
+  height: 40px;
   align-self: flex-end;
 }}
 .hub-chat-send-btn:hover {{
-  filter: brightness(1.1);
+  background: #1557b0;
 }}
 .hub-chat-meta {{
   display: flex;
   justify-content: space-between;
   align-items: center;
-  font-size: 11px;
+  font-size: 11.5px;
   color: #94a3b8 !important;
   padding: 0 2px;
+  flex-wrap: wrap;
+  gap: 6px;
 }}
 </style>
 </head>
 <body>
+<div class="google-color-bar"></div>
 <header class="topbar">
   <div class="topbar-inner">
     <div class="brand">
-      <a href="/">School Hub</a>
+      <a href="/" class="google-wordmark" aria-label="Google School Hub">
+        <span class="g-b">G</span><span class="g-r">o</span><span class="g-y">o</span><span class="g-b">g</span><span class="g-g">l</span><span class="g-r">e</span>
+        <span class="g-sub">School Hub</span>
+      </a>
       <span class="live-badge" title="現在の同時接続数">
         <span class="live-dot"></span>
         <span>同接 <strong id="heroLiveCcu">{live_ccu:,}人</strong></span>
       </span>
     </div>
     <div class="topbar-right">
+      <a href="#hub-openchat-section" class="btn btn-primary">💬 オープンチャット</a>
       <span class="meta-pill" id="externalSyncText">{initial_sync_str}</span>
       <span class="meta-pill" id="jstClock">--:--:-- JST</span>
       <button type="button" class="btn" id="themeToggle">ダーク</button>
@@ -1103,41 +1231,42 @@ button, input {{ font: inherit; }}
   <section class="control-panel">
     <div class="omnibox">
       <div class="search-wrap">
-        <input id="search" type="search" placeholder="サービス絞り込み / URLまたは検索語を入力してEnter" autocomplete="off">
+        <span class="search-icon">🔍</span>
+        <input id="search" type="search" placeholder="Google検索 / サービス名・URLを入力してEnter" autocomplete="off">
         <button type="button" class="search-clear" id="searchClear" title="クリア">×</button>
         <span class="search-kbd">/</span>
       </div>
       <div class="quick-actions">
-        <button type="button" class="btn" id="quickYoutube">YouTube検索</button>
-        <button type="button" class="btn" id="quickWakame">わかめtube</button>
-        <button type="button" class="btn" id="quickBrowser">Interstellar</button>
+        <button type="button" class="btn" id="quickYoutube">▶ YouTube検索</button>
+        <button type="button" class="btn" id="quickWakame">🎬 わかめtube</button>
+        <button type="button" class="btn" id="quickBrowser">🌐 Interstellar</button>
       </div>
     </div>
 
     <div class="filter-row">
       <div class="tabs" id="categoryTabs" role="tablist">
         <button type="button" class="tab-btn active" data-filter="ALL">すべて<span class="tab-count">({counts["ALL"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Games">ゲーム<span class="tab-count">({counts["Games"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Watch">動画・SNS<span class="tab-count">({counts["Watch"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="Browser">ブラウザ<span class="tab-count">({counts["Browser"]})</span></button>
-        <button type="button" class="tab-btn" data-filter="FAV">固定<span class="tab-count" id="favTabCount">(0)</span></button>
+        <button type="button" class="tab-btn" data-filter="Games">🎮 ゲーム<span class="tab-count">({counts["Games"]})</span></button>
+        <button type="button" class="tab-btn" data-filter="Watch">📺 動画・SNS<span class="tab-count">({counts["Watch"]})</span></button>
+        <button type="button" class="tab-btn" data-filter="Browser">🌐 ブラウザ<span class="tab-count">({counts["Browser"]})</span></button>
+        <button type="button" class="tab-btn" data-filter="FAV">★ 固定<span class="tab-count" id="favTabCount">(0)</span></button>
       </div>
       <div class="recent-bar" id="recentBar">
-        <span class="recent-label">履歴:</span>
-        <div id="recentChips" style="display:flex;gap:4px;flex-wrap:wrap"></div>
+        <span class="recent-label">最近使ったサービス:</span>
+        <div id="recentChips" style="display:flex;gap:6px;flex-wrap:wrap"></div>
       </div>
     </div>
   </section>
 
   <div class="grid" id="grid">{cards}</div>
   <div class="empty-search" id="emptySearch">
-    一致するサービスがありません。Enterキーで検索またはURLを開きます。
+    一致するサービスがありません。EnterキーでYouTube検索またはURLを開きます。
   </div>
 
   <section class="stats-section" id="activity">
     <div class="section-header">
       <div class="section-title-group">
-        <h2>統計・稼働状況</h2>
+        <h2>📊 統計・リアルタイム稼働状況</h2>
         <span id="statsMetaNote">0.5s 外部DB・マルチRender同期</span>
       </div>
       <div class="range-switch" role="group">
@@ -1223,19 +1352,19 @@ button, input {{ font: inherit; }}
   <section class="hub-chat-section" id="hub-openchat-section">
     <div class="hub-chat-header">
       <div class="hub-chat-title-wrap">
-        <span class="hub-chat-badge">実況チャット</span>
-        <h2 class="hub-chat-title">📋 School Hub 総合実況スレッド</h2>
-        <span class="hub-chat-sub">全URL・全サービス共通 / 端末別専用ID＆合言葉（トリップ）対応 / 1000レスで自動リセット</span>
+        <span class="hub-chat-badge">オープンチャット</span>
+        <h2 class="hub-chat-title">💬 School Hub 総合オープンチャット</h2>
+        <span class="hub-chat-sub">👀 見るだけならログイン不要 / 🔑 投稿するにはログインが必要 / 🎬 動画・画像投稿対応</span>
       </div>
       <div class="hub-chat-meta-right">
         <span class="hub-status-pill"><span class="hub-status-dot"></span>オンライン</span>
         <span class="sh-chat-res-counter" id="hub-chat-res-counter" title="1000レス到達でスレッド自動リセット">0/1000</span>
-        <span class="hub-my-id-btn" id="hub-chat-id-badge" title="クリックで合言葉・名前設定 (キャッシュやブラウザを変えても同じIDに)" style="cursor:pointer;">ID:{escape(my_id)}</span>
+        <span class="hub-my-id-btn" id="hub-chat-id-badge" title="ログインするとユーザー名とIDが表示されます">ID:{escape(my_id)}</span>
       </div>
     </div>
     <div class="hub-chat-body-wrapper">
       <div class="hub-chat-body" id="hub-chat-body"></div>
-      <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">↓ 最新レスへ</button>
+      <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">↓ 最新メッセージへ</button>
     </div>
     <div class="hub-chat-footer">
       <div class="hub-reply-banner" id="hub-reply-banner" style="display:none;">
@@ -1248,12 +1377,12 @@ button, input {{ font: inherit; }}
       </div>
       <form class="hub-chat-form" id="hub-chat-form">
         <div class="hub-chat-input-row">
-          <textarea class="hub-chat-input" id="hub-chat-input" placeholder="レスを書き込む... (Enterで投稿 / Shift+Enterで改行)" maxlength="200" rows="1" autocomplete="off"></textarea>
+          <textarea class="hub-chat-input" id="hub-chat-input" placeholder="メッセージを入力... (投稿するにはログインが必要です / 動画・画像対応)" maxlength="200" rows="1" autocomplete="off"></textarea>
           <button type="button" class="hub-input-clear" id="hub-input-clear" style="display:none;" title="クリア">✕</button>
-          <button type="submit" class="hub-chat-send-btn">書き込む</button>
+          <button type="submit" class="hub-chat-send-btn">送る</button>
         </div>
         <div class="hub-chat-meta">
-          <span>🔒 IPごとに専用ID自動割当（変更不可・どのURLでも同一ID） / Shift+Enterで改行 / 1000レス完走で自動リセット</span>
+          <span>👀 閲覧はログイン不要 / 🔑 投稿・画像🖼️・動画🎬の送信はログインが必要 / 送るボタンで投稿</span>
           <span class="hub-char-count" id="hub-char-count">0/200</span>
         </div>
       </form>

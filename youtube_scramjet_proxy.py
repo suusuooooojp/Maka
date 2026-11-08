@@ -1856,27 +1856,39 @@ async def _refresh_total_length(vid: str, final_url: str):
 
 
 async def _resolve_stream_info_impl(video_id: str) -> tuple[str, int, float]:
+    # Prioritize companion itag=18 muxed MP4 stream first so _STREAM_HEAD_CACHE and _STREAM_META_CACHE stay 100% consistent
     comp_task = asyncio.create_task(_probe_companion_stream_info(video_id))
-    vr_task = asyncio.create_task(_resolve_android_vr_stream_info(video_id))
     piped_task = asyncio.create_task(_resolve_piped_stream_info(video_id))
-    tasks = {comp_task, vr_task, piped_task}
     url, clen, dur_s = "", 0, 0.0
 
     try:
-        for fut in asyncio.as_completed(tasks, timeout=4.5):
-            try:
-                u, c, d = await fut
-                if u:
-                    url, clen, dur_s = u, c, d
-                    break
-            except Exception:
-                pass
+        u, c, d = await asyncio.wait_for(comp_task, timeout=3.2)
+        if u:
+            url, clen, dur_s = u, c, d
     except Exception:
         pass
-    finally:
-        for t in tasks:
-            if not t.done():
-                t.cancel()
+
+    if not url:
+        vr_task = asyncio.create_task(_resolve_android_vr_stream_info(video_id))
+        tasks = {piped_task, vr_task}
+        try:
+            for fut in asyncio.as_completed(tasks, timeout=4.0):
+                try:
+                    u, c, d = await fut
+                    if u:
+                        url, clen, dur_s = u, c, d
+                        break
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+    else:
+        if not piped_task.done():
+            piped_task.cancel()
 
     if not url:
         try:
@@ -2001,8 +2013,13 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
                 async def _open_cont_resp(start_pos: int, end_pos: int, target_u: str):
                     rng_hdr = f"bytes={start_pos}-{end_pos}"
+                    ua_hdr = (
+                        "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                        if "c=ANDROID_VR" in target_u
+                        else _DESKTOP_CHROME_UA
+                    )
                     retry_headers = {
-                        "User-Agent": _DESKTOP_CHROME_UA,
+                        "User-Agent": ua_hdr,
                         "Accept": "*/*",
                         "Accept-Encoding": "identity",
                         "Referer": "https://www.youtube.com/",
@@ -2013,6 +2030,7 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     if c_resp.status_code not in (200, 206):
                         await c_resp.aclose()
                         if target_u != fast_primary:
+                            retry_headers["User-Agent"] = _DESKTOP_CHROME_UA
                             r_req = client.build_request("GET", fast_primary, headers=retry_headers)
                             c_resp = await client.send(r_req, stream=True)
                             if c_resp.status_code not in (200, 206):
@@ -2145,8 +2163,13 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
         for target_url in candidates:
             try:
+                ua_hdr = (
+                    "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                    if "c=ANDROID_VR" in target_url
+                    else _DESKTOP_CHROME_UA
+                )
                 req_headers = {
-                    "User-Agent": _DESKTOP_CHROME_UA,
+                    "User-Agent": ua_hdr,
                     "Accept": "*/*",
                     "Accept-Encoding": "identity",
                     "Referer": "https://www.youtube.com/",
@@ -5555,6 +5578,52 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             visibility: visible !important;
             opacity: 1 !important;
           }}
+          ytd-watch-flexy #player-container-outer,
+          ytd-watch-flexy #player-container-inner,
+          ytd-watch-flexy #player-container,
+          ytd-watch-flexy ytd-player,
+          ytd-watch-flexy ytd-player #container,
+          #movie_player,
+          #shorts-player,
+          .html5-video-player,
+          .html5-video-container {{
+            display: block !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            width: 100% !important;
+            height: 100% !important;
+          }}
+          ytd-watch-flexy #player-container-inner,
+          ytd-watch-flexy #player-container {{
+            aspect-ratio: 16 / 9 !important;
+            min-height: 280px !important;
+          }}
+          .html5-video-container {{
+            position: relative !important;
+            overflow: hidden !important;
+            min-height: 240px !important;
+          }}
+          video.html5-main-video {{
+            display: block !important;
+            visibility: visible !important;
+            opacity: 1 !important;
+            width: 100% !important;
+            height: 100% !important;
+            left: 0px !important;
+            top: 0px !important;
+            object-fit: contain !important;
+            z-index: 1 !important;
+            background: transparent !important;
+          }}
+          #cinematics,
+          #player-cinematics,
+          ytd-player #cinematics,
+          #movie_player.playing-mode .ytp-cued-thumbnail-overlay,
+          ytd-watch-flexy yt-playability-error-supported-renderers,
+          #error-screen {{
+            display: none !important;
+            pointer-events: none !important;
+          }}
           @media (min-width: 900px) {{
             ytd-watch-flexy:not([theater]):not([fullscreen]) #columns {{
               display: flex !important;
@@ -5719,6 +5788,26 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
       let videoId = extractVideoId(currentTarget);
       const isShorts = /\\/shorts(\\/|$|\\?)/.test(currentTarget);
+
+      // If on a standard watch page and #movie_player is trapped inside a hidden #player.skeleton while ytd-watch-flexy is visible, adopt #movie_player into ytd-watch-flexy's active player container
+      if (!isShorts && videoId) {{
+        try {{
+          const watchFlexy = doc.querySelector("ytd-watch-flexy");
+          const moviePlayer = doc.getElementById("movie_player");
+          if (watchFlexy && moviePlayer) {{
+            const flexyPlayerHost = watchFlexy.querySelector("#ytd-player #container, #player-container-inner #player-container, #player-container");
+            if (flexyPlayerHost && !flexyPlayerHost.contains(moviePlayer)) {{
+              const mpRect = moviePlayer.getBoundingClientRect();
+              const inSkeleton = Boolean(moviePlayer.closest("#player.skeleton, .skeleton"));
+              if (inSkeleton || mpRect.width < 50 || mpRect.height < 50) {{
+                flexyPlayerHost.appendChild(moviePlayer);
+                try {{ frameEl.contentWindow?.dispatchEvent(new Event("resize")); }} catch (_) {{}}
+              }}
+            }}
+          }}
+        }} catch (_) {{}}
+      }}
+
       const mainVid = isShorts
         ? (doc.querySelector("#shorts-player video.html5-main-video, ytd-shorts video.html5-main-video") || doc.querySelector("video.html5-main-video"))
         : (doc.querySelector("#movie_player video.html5-main-video, ytd-watch-flexy video.html5-main-video") || doc.querySelector("video.html5-main-video"));
@@ -5780,12 +5869,38 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         if (adCloseBtn) adCloseBtn.click();
       }} catch (_) {{}}
 
-      // Clear stuck spinner when playback is active, recover from genuine media errors, and trigger one-time initial autoplay
+      // Clear stuck spinner when playback is active, ensure video element & container have non-zero visible geometry, and recover from media errors
       const autoKey = videoId || (isShorts ? "shorts" : "");
       if (mainVid && autoKey) {{
         if (mainVid.preload !== "auto") {{
           try {{ mainVid.preload = "auto"; }} catch (_) {{}}
         }}
+        // Guarantee non-zero visible video box so video is never black while audio plays
+        try {{
+          const vRect = mainVid.getBoundingClientRect();
+          if (vRect.width < 50 || vRect.height < 50 || mainVid.style.display === "none" || mainVid.style.visibility === "hidden" || mainVid.style.opacity === "0") {{
+            mainVid.style.cssText = "display:block !important;visibility:visible !important;opacity:1 !important;width:100% !important;height:100% !important;left:0px !important;top:0px !important;object-fit:contain !important;";
+            if (mainVid.parentElement && mainVid.parentElement.classList.contains("html5-video-container")) {{
+              mainVid.parentElement.style.cssText = "display:block !important;visibility:visible !important;opacity:1 !important;width:100% !important;height:100% !important;position:relative !important;";
+            }}
+          }}
+        }} catch (_) {{}}
+
+        // If audio is playing (currentTime > 0.5) but videoWidth === 0 (audio-only or broken video track), force muxed MP4 stream
+        if (!mainVid.paused && mainVid.readyState >= 2 && mainVid.videoWidth === 0 && Number(mainVid.currentTime || 0) > 0.5 && videoId && mainVid.dataset.shFixedZeroWidth !== videoId) {{
+          mainVid.dataset.shFixedZeroWidth = videoId;
+          const savedT = Number(mainVid.currentTime || 0);
+          const directStream = location.origin + "/youtube/runtime/stream/" + videoId;
+          rawSetAttr.call(mainVid, "src", directStream);
+          mainVid.load();
+          const onFixMeta = () => {{
+            mainVid.removeEventListener("loadedmetadata", onFixMeta);
+            try {{ if (savedT > 0) mainVid.currentTime = savedT; }} catch (_) {{}}
+            mainVid.play().catch(() => {{}});
+          }};
+          mainVid.addEventListener("loadedmetadata", onFixMeta);
+        }}
+
         const nowMs = Date.now();
         const curTime = Number(mainVid.currentTime || 0);
         const lastT = Number(mainVid.dataset.shLastTime || -1);
@@ -5814,14 +5929,18 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           }}
         }}
 
-        if (!mainVid.paused && mainVid.currentTime > 0 && mainVid.readyState >= 3) {{
+        if (!mainVid.paused && mainVid.currentTime > 0 && mainVid.readyState >= 2) {{
           if (mainVid.dataset.shPlayingLogged !== autoKey) {{
             mainVid.dataset.shPlayingLogged = autoKey;
-            clientLog("info", "video-playing", {{ videoId: autoKey, readyState: mainVid.readyState, currentTime: Number(mainVid.currentTime.toFixed(2)), duration: Math.round(mainVid.duration || 0), elapsed_ms: Math.round(performance.now() - startedAt) }});
+            clientLog("info", "video-playing", {{ videoId: autoKey, readyState: mainVid.readyState, videoWidth: mainVid.videoWidth || 0, videoHeight: mainVid.videoHeight || 0, currentTime: Number(mainVid.currentTime.toFixed(2)), duration: Math.round(mainVid.duration || 0), elapsed_ms: Math.round(performance.now() - startedAt) }});
           }}
           const stuckSpinner = doc.querySelector(".ytp-spinner");
           if (stuckSpinner && stuckSpinner.style.display !== "none") {{
             stuckSpinner.style.display = "none";
+          }}
+          const cuedOverlay = doc.querySelector("#movie_player .ytp-cued-thumbnail-overlay");
+          if (cuedOverlay && cuedOverlay.style.display !== "none") {{
+            cuedOverlay.style.display = "none";
           }}
         }} else if (mainVid.paused && mainVid.currentTime === 0 && mainVid.readyState >= 2 && mainVid.dataset.shAutoplayVid !== autoKey) {{
           mainVid.dataset.shAutoplayVid = autoKey;

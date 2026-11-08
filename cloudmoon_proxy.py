@@ -118,6 +118,33 @@ ramp-ad,
   width: 100vw !important;
   height: 100vh !important;
 }
+/* Style CloudMoon in-game text input Send button ("送る") clearly */
+.input-div_div_button {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 5px !important;
+  background: #1a73e8 !important;
+  color: #ffffff !important;
+  border-radius: 999px !important;
+  padding: 5px 14px !important;
+  cursor: pointer !important;
+  text-decoration: none !important;
+  font-family: 'Google Sans', 'Noto Sans JP', sans-serif !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25) !important;
+  transition: background 0.15s ease !important;
+}
+.input-div_div_button:hover {
+  background: #1557b0 !important;
+}
+.input-div_div_button::after {
+  content: "送る" !important;
+  font-size: 12px !important;
+  font-weight: 700 !important;
+  color: #ffffff !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+}
 </style>"""
 
 _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine for School Hub
@@ -935,6 +962,54 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       });
     }
   } catch (_) {}
+
+  // Prevent pressing Enter from auto-submitting text in CloudMoon; require clicking the "送る" (Send) button
+  try {
+    const isCmTextInputTarget = function(el) {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.id === 'input-div_input') return true;
+      if (el.closest && el.closest('#input-div')) return true;
+      const tag = (el.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || el.isContentEditable) return true;
+      return false;
+    };
+    const isCmInputBarOpen = function() {
+      try {
+        const bar = document.getElementById('input-div');
+        return !!(bar && bar.offsetParent !== null);
+      } catch (_) {
+        return false;
+      }
+    };
+    const interceptEnterKey = function(e) {
+      try {
+        const isEnter = (e.key === 'Enter' || e.code === 'Enter' || e.code === 'NumpadEnter' || e.keyCode === 13 || e.which === 13);
+        const target = e.target || document.activeElement;
+        if (isEnter && (isCmTextInputTarget(target) || isCmInputBarOpen())) {
+          // Allow Enter inside multi-line textarea only with Shift+Enter if not #input-div_input
+          const isSingleLineInput = !target || target.id === 'input-div_input' || (target.tagName || '').toLowerCase() === 'input';
+          if (isSingleLineInput || !e.shiftKey) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (typeof e.stopImmediatePropagation === 'function') {
+              e.stopImmediatePropagation();
+            }
+            return false;
+          }
+        }
+        // Also stop keyboard events inside #input-div_input from bubbling to window.handleGlobalKeyDown/Up
+        if (target && (target.id === 'input-div_input' || (target.closest && target.closest('#input-div')))) {
+          e.stopPropagation();
+        }
+      } catch (_) {}
+    };
+    window.addEventListener('keydown', interceptEnterKey, true);
+    window.addEventListener('keypress', interceptEnterKey, true);
+    window.addEventListener('keyup', interceptEnterKey, true);
+    document.addEventListener('keydown', interceptEnterKey, true);
+    document.addEventListener('keypress', interceptEnterKey, true);
+    document.addEventListener('keyup', interceptEnterKey, true);
+  } catch (_) {}
 })();
 """
 
@@ -1023,6 +1098,36 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         js_text = js_text.replace('src="./images/logo.png"', 'src="/run-site/images/logo.png"')
         js_text = js_text.replace("src=`/images/logo.png`", "src=`/run-site/images/logo.png`")
         js_text = js_text.replace('src="images/send.png"', 'src="/run-site/images/send.png"')
+
+        # Prevent pressing Enter from auto-sending text in CloudMoon (#input-div_input); only send when clicking the Send ("送る") button
+        js_text = js_text.replace(
+            'd(`input`,a,function(...e){v()?.apply(this,e)})',
+            'd(`input`,a,function(){})',
+        )
+        js_text = js_text.replace(
+            'd("input",a,function(...e){v()?.apply(this,e)})',
+            'd("input",a,function(){})',
+        )
+        js_text = js_text.replace(
+            'd(`keydown`,a,e=>{e.key===`Enter`&&v()(),e.key===`Escape`&&y()()})',
+            'd(`keydown`,a,e=>{if(e.key===`Enter`){e.preventDefault();e.stopPropagation();return}e.key===`Escape`&&y()()})',
+        )
+        js_text = js_text.replace(
+            'd("keydown",a,e=>{e.key==="Enter"&&v()(),e.key==="Escape"&&y()()})',
+            'd("keydown",a,e=>{if(e.key==="Enter"){e.preventDefault();e.stopPropagation();return}e.key==="Escape"&&y()()})',
+        )
+        js_text = js_text.replace(
+            'sendText(){if(this.inputTextShow){if(this.prevInputTextStr!==``&&this.inputTextStr===this.prevInputTextStr){Z.send(br(this.inputEnterType)),this.prevInputTextStr=``,this.inputTextStr=``;return}Z.send(yr(this.inputTextCnt++,this.inputTextStr)),this.prevInputTextStr=this.inputTextStr}}',
+            'sendText(){if(this.inputTextShow){let _txt=this.inputTextStr||``;if(!_txt)return;Z.send(yr(this.inputTextCnt++,_txt));let _et=this.inputEnterType;this.prevInputTextStr=``;this.inputTextStr=``;setTimeout(()=>{try{Z.send(br(_et))}catch(_){}},35)}}',
+        )
+        js_text = js_text.replace(
+            'if(this.isTypingMode){let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(0,t,0,0)));return}',
+            'if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(0,t,0,0)));return}',
+        )
+        js_text = js_text.replace(
+            'if(this.isTypingMode){let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
+            'if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
+        )
 
         # Initialize in-game quality state from localStorage ('HD' by default) instead of hardcoded 'SD'
         js_text = js_text.replace(

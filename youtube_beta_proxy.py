@@ -1658,6 +1658,13 @@ body { top: 0 !important; }
 
   async function resolveDirectYouTubeStreams(videoId) {
     const runtimeStreamUrl = "/youtube/runtime/stream/" + encodeURIComponent(videoId);
+    const baseMuxedFormat = {
+      url: runtimeStreamUrl,
+      audioUrl: "",
+      label: "360p (高速ストリーム)",
+      height: 360,
+      hasAudio: true
+    };
     let lastDetails = {};
     for (const clientKey of ["ANDROID_VR", "IOS"]) {
       try {
@@ -1671,49 +1678,18 @@ body { top: 0 !important; }
         }
         const sd = p && p.streamingData;
         if (sd) {
-          const formats = [];
+          const formats = [baseMuxedFormat];
           for (const f of (sd.formats || [])) {
             if (f && f.url) {
               formats.push({
                 url: f.url,
                 audioUrl: "",
-                label: f.qualityLabel || (f.height ? f.height + "p" : "360p"),
+                label: (f.qualityLabel || (f.height ? f.height + "p" : "360p")) + " (直結)",
                 height: f.height || 360,
                 hasAudio: true
               });
             }
           }
-          const adaptive = (sd.adaptiveFormats || []).filter((f) => f && f.url);
-          const audioTracks = adaptive.filter((f) => String(f.mimeType || "").startsWith("audio/"));
-          const bestAudio =
-            audioTracks.find((f) => String(f.mimeType || "").includes("mp4")) ||
-            audioTracks[0] ||
-            null;
-          const seenLabels = new Set(formats.map((f) => f.label));
-          for (const f of adaptive) {
-            const mime = String(f.mimeType || "");
-            if (mime.startsWith("video/") && (mime.includes("mp4") || mime.includes("webm"))) {
-              const label = f.qualityLabel || (f.height ? f.height + "p" : "");
-              if (label && !seenLabels.has(label)) {
-                seenLabels.add(label);
-                formats.push({
-                  url: f.url,
-                  audioUrl: bestAudio ? bestAudio.url : "",
-                  label: label + (bestAudio ? " HD" : ""),
-                  height: f.height || 0,
-                  hasAudio: false
-                });
-              }
-            }
-          }
-          formats.sort((a, b) => (b.height || 0) - (a.height || 0));
-          formats.push({
-            url: runtimeStreamUrl,
-            audioUrl: "",
-            label: "360p (高速ストリーム)",
-            height: 360,
-            hasAudio: true
-          });
           if (formats.length > 0 || sd.hlsManifestUrl) {
             return {
               clientKey,
@@ -1728,15 +1704,7 @@ body { top: 0 !important; }
     return {
       clientKey: "FAST_STREAM",
       videoDetails: lastDetails,
-      formats: [
-        {
-          url: runtimeStreamUrl,
-          audioUrl: "",
-          label: "360p (高速ストリーム)",
-          height: 360,
-          hasAudio: true
-        }
-      ],
+      formats: [baseMuxedFormat],
       hlsManifestUrl: ""
     };
   }
@@ -1777,7 +1745,7 @@ body { top: 0 !important; }
       <div class="yt-watch">
         <div>
           <div class="yt-player-box" id="movie_player">
-            <video id="yt-direct-video" controls autoplay playsinline preload="auto" referrerpolicy="no-referrer"></video>
+            <video id="yt-direct-video" controls autoplay playsinline webkit-playsinline preload="auto" referrerpolicy="no-referrer" style="display:block;width:100%;height:100%;object-fit:contain;background:#000"></video>
             <audio id="yt-direct-audio" referrerpolicy="no-referrer" style="display:none"></audio>
             <iframe id="yt-embed-fallback" style="display:none;width:100%;height:100%;border:0" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin"></iframe>
           </div>
@@ -1829,6 +1797,7 @@ body { top: 0 !important; }
       }
 
       if (streamInfo && (streamInfo.formats.length > 0 || streamInfo.hlsManifestUrl)) {
+        const fallbackStreamUrl = "/youtube/runtime/stream/" + encodeURIComponent(videoId);
         let activeAudioUrl = "";
         function selectFormat(fmt) {
           const cur = videoEl.currentTime || 0;
@@ -1850,6 +1819,27 @@ body { top: 0 !important; }
             videoEl.play().catch(() => {});
           });
         }
+
+        videoEl.addEventListener("error", () => {
+          if (videoEl.src && !videoEl.src.includes("/youtube/runtime/stream/")) {
+            audioEl.pause();
+            audioEl.removeAttribute("src");
+            activeAudioUrl = "";
+            videoEl.src = fallbackStreamUrl;
+            videoEl.load();
+            videoEl.play().catch(() => {});
+          }
+        });
+        videoEl.addEventListener("loadedmetadata", () => {
+          if (videoEl.videoWidth === 0 && videoEl.src && !videoEl.src.includes("/youtube/runtime/stream/")) {
+            audioEl.pause();
+            audioEl.removeAttribute("src");
+            activeAudioUrl = "";
+            videoEl.src = fallbackStreamUrl;
+            videoEl.load();
+            videoEl.play().catch(() => {});
+          }
+        });
 
         videoEl.addEventListener("play", () => {
           if (activeAudioUrl && audioEl.src) {
@@ -1875,20 +1865,20 @@ body { top: 0 !important; }
           }
         });
 
-        const defaultFmt = streamInfo.formats.find((f) => f.hasAudio) || streamInfo.formats[0];
+        const defaultFmt = streamInfo.formats[0];
         if (defaultFmt) {
           selectFormat(defaultFmt);
-          telemetryText.textContent = "Render 0% | googlevideo.com 直結 (" + streamInfo.clientKey + ")";
+          telemetryText.textContent = "高速ストリーム再生中 (" + streamInfo.clientKey + ")";
         } else if (streamInfo.hlsManifestUrl) {
           videoEl.src = streamInfo.hlsManifestUrl;
           videoEl.play().catch(() => {});
-          telemetryText.textContent = "Render 0% | googlevideo.com HLS直結";
+          telemetryText.textContent = "HLS直結再生中";
         }
 
         streamInfo.formats.forEach((fmt) => {
           const b = document.createElement("button");
           b.className = "yt-pill-btn" + (fmt === defaultFmt ? " active" : "");
-          b.textContent = "🎬 " + fmt.label + " (googlevideo直結)";
+          b.textContent = "🎬 " + fmt.label;
           b.onclick = () => {
             selectFormat(fmt);
             qualEl.querySelectorAll(".yt-pill-btn").forEach((el) => el.classList.remove("active"));
