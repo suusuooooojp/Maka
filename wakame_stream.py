@@ -308,6 +308,14 @@ class StreamManager:
         return {}
 
     async def handle_request(self, request: Request, video_id: str):
+        try:
+            import youtube_scramjet_proxy as _ysp
+            resp_fast = await _ysp.youtube_runtime_stream(video_id, request)
+            if getattr(resp_fast, "status_code", 500) in (200, 206, 204):
+                return resp_fast
+        except Exception:
+            pass
+
         stream_data = await self.get_stream(video_id, force_refresh=False)
         if not stream_data:
             return Response("Stream switching to embed", status_code=204, headers={"Cache-Control": "no-store"})
@@ -360,7 +368,7 @@ class StreamManager:
 
         async def chunk_generator():
             try:
-                async for chunk in resp.aiter_raw(256 * 1024):
+                async for chunk in resp.aiter_bytes():
                     if chunk:
                         yield chunk
             except (asyncio.CancelledError, Exception):
@@ -471,6 +479,16 @@ def _parse_duration_text(value: str) -> int:
 
 
 async def get_video_metadata(video_id: str) -> dict:
+    try:
+        import youtube_scramjet_proxy as _ysp
+        _ysp._PREWARM_REQUESTED_VIDS.add(video_id)
+        _ysp._ensure_stream_head_prewarm(
+            video_id,
+            f"https://invid-api.poketube.fun/companion/latest_version?id={video_id}&itag=18&local=true",
+        )
+        asyncio.create_task(_ysp._resolve_stream_info(video_id))
+    except Exception:
+        pass
     c_key = f"v_meta_{video_id}"
     cached = cache_get(c_key)
     if cached is not None:
