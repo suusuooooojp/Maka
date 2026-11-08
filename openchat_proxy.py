@@ -1726,8 +1726,8 @@ async def openchat_page(request: Request = None):
     <span class="oc-logo-sub">OpenChat</span>
   </a>
   <div class="oc-actions">
-    <button type="button" class="md-btn md-btn-tonal" id="ocThemeBtn">🌙 テーマ</button>
-    <a class="md-btn md-btn-filled" href="/">🏠 ホームに戻る</a>
+    <button type="button" class="md-btn md-btn-tonal" id="ocThemeBtn"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><span>テーマ切替</span></button>
+    <a class="md-btn md-btn-filled" href="/"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg><span>ホームに戻る</span></a>
   </div>
 </header>
 
@@ -1736,8 +1736,8 @@ async def openchat_page(request: Request = None):
     <div class="hub-chat-header">
       <div class="hub-chat-title-wrap">
         <span class="hub-chat-badge">オープンチャット</span>
-        <h1 class="hub-chat-title">💬 School Hub 総合オープンチャット</h1>
-        <span class="hub-chat-sub">👀 見るだけならログイン不要 / 🔑 投稿するにはログインが必要 / 🎬 動画・画像投稿対応</span>
+        <h1 class="hub-chat-title" style="display:inline-flex;align-items:center;gap:8px;"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg><span>School Hub 総合オープンチャット</span></h1>
+        <span class="hub-chat-sub">見るだけならログイン不要 / 投稿するにはログインが必要 / 動画・画像投稿対応</span>
       </div>
       <div class="hub-chat-meta-right">
         <span class="hub-status-pill"><span class="hub-status-dot"></span>オンライン</span>
@@ -1747,7 +1747,7 @@ async def openchat_page(request: Request = None):
     </div>
     <div class="hub-chat-body-wrapper">
       <div class="hub-chat-body" id="hub-chat-body"></div>
-      <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">↓ 最新メッセージへ</button>
+      <button type="button" class="hub-chat-scroll-btn" id="hub-chat-scroll-bottom">最新メッセージへ移動</button>
     </div>
     <div class="hub-chat-footer">
       <div class="hub-reply-banner" id="hub-reply-banner" style="display:none;">
@@ -1756,16 +1756,16 @@ async def openchat_page(request: Request = None):
           <span class="hub-reply-target" id="hub-reply-target"></span>
           <span class="hub-reply-text" id="hub-reply-text"></span>
         </div>
-        <button type="button" class="hub-reply-cancel" id="hub-reply-cancel">✕</button>
+        <button type="button" class="hub-reply-cancel" id="hub-reply-cancel" aria-label="返信を取り消す">×</button>
       </div>
       <form class="hub-chat-form" id="hub-chat-form">
         <div class="hub-chat-input-row">
           <textarea class="hub-chat-input" id="hub-chat-input" placeholder="メッセージを入力... (投稿するにはログインが必要です / 動画・画像対応)" maxlength="200" rows="1" autocomplete="off"></textarea>
-          <button type="button" class="hub-input-clear" id="hub-input-clear" style="display:none;">✕</button>
-          <button type="submit" class="hub-chat-send-btn">送る</button>
+          <button type="button" class="hub-input-clear" id="hub-input-clear" style="display:none;" aria-label="クリア">×</button>
+          <button type="submit" class="hub-chat-send-btn">送信</button>
         </div>
         <div class="hub-chat-meta">
-          <span>👀 閲覧はログイン不要 / 🔑 投稿・画像🖼️・動画🎬の送信はログインが必要 / 送るボタンで投稿</span>
+          <span>閲覧はログイン不要 / 投稿・画像・動画の送信はログインが必要 / 送信ボタンで投稿</span>
           <span class="hub-char-count" id="hub-char-count">0/200</span>
         </div>
       </form>
@@ -4408,16 +4408,16 @@ _CLIENT_JS = r"""
         <div class="sh-chat-title-group">
           <div class="sh-online-dot" id="sh-online-dot" title="オンライン"></div>
           <span class="sh-online-count" id="sh-online-count" style="font-size:10px;color:#4ade80;font-weight:700;margin-right:2px;">同接 1人</span>
-          <span class="sh-chat-title">📋 実況スレッド</span>
+          <span class="sh-chat-title">チャット</span>
           <span class="sh-chat-res-counter" id="sh-chat-res-counter" title="1000レス到達でスレッド自動リセット">0/1000</span>
           <span class="sh-chat-my-id" id="sh-chat-my-id-badge" title="ID・トリップ設定 (クリックで変更)">ID:${currentSenderId}</span>
         </div>
         <div class="sh-chat-header-actions">
-          <button class="sh-chat-icon-btn" id="sh-chat-opacity-btn" title="透明度切り替え (100% / 70% / 40%)">🌓</button>
-          <button class="sh-chat-icon-btn" id="sh-chat-mini-btn" title="ミニ表示モード切り替え (ティッカー)">◽</button>
-          <button class="sh-chat-icon-btn" id="sh-chat-max-btn" title="最大化 / 復元">🗖</button>
-          <button class="sh-chat-icon-btn" id="sh-chat-sound-btn" title="通知音切り替え (現在: ON)">🔔</button>
-          <button class="sh-chat-icon-btn" id="sh-chat-close-btn" title="閉じる (Esc)">✕</button>
+          <button class="sh-chat-icon-btn" id="sh-chat-opacity-btn" title="透明度切り替え (100% / 70% / 40%)">100%</button>
+          <button class="sh-chat-icon-btn" id="sh-chat-mini-btn" title="ミニ表示モード切り替え (ティッカー)">-</button>
+          <button class="sh-chat-icon-btn" id="sh-chat-max-btn" title="最大化 / 復元">+</button>
+          <button class="sh-chat-icon-btn" id="sh-chat-sound-btn" title="通知音切り替え (現在: ON)">音</button>
+          <button class="sh-chat-icon-btn" id="sh-chat-close-btn" title="閉じる (Esc)">×</button>
         </div>
       </div>
 
@@ -4425,7 +4425,7 @@ _CLIENT_JS = r"""
       <div class="sh-chat-body-wrapper">
         <div class="sh-chat-body" id="sh-chat-body"></div>
         <div id="sh-chat-scroll-bottom" title="最新レスへスクロール">
-          <span>↓ 最新レスへ</span>
+          <span>最新メッセージへ</span>
           <span id="sh-scroll-unread-count" style="display:none; background:rgba(0,0,0,0.3); padding:1px 5px; border-radius:10px; font-size:10px;"></span>
         </div>
       </div>
@@ -4433,7 +4433,7 @@ _CLIENT_JS = r"""
       <!-- Footer & Input with Login Gate, Reply Banner, and Media Preview Banner -->
       <div class="sh-chat-footer">
         <div class="sh-login-gate-bar" id="sh-login-gate-bar">
-          <span id="sh-login-gate-text">👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
+          <span id="sh-login-gate-text">見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
           <button type="button" class="sh-login-action-btn" id="sh-login-open-btn">ログインして投稿</button>
         </div>
         <div class="sh-reply-banner" id="sh-reply-banner" style="display:none;">
@@ -4442,29 +4442,29 @@ _CLIENT_JS = r"""
             <span class="sh-reply-target-id" id="sh-reply-target-id"></span>
             <span class="sh-reply-target-text" id="sh-reply-target-text"></span>
           </div>
-          <button type="button" class="sh-reply-cancel-btn" id="sh-reply-cancel-btn" title="返信を取り消す">✕</button>
+          <button type="button" class="sh-reply-cancel-btn" id="sh-reply-cancel-btn" title="返信を取り消す">×</button>
         </div>
         <div class="sh-img-preview-banner" id="sh-img-preview-banner" style="display:none;">
           <div class="sh-img-preview-info">
             <img id="sh-img-preview-thumb" class="sh-img-preview-thumb" alt="preview" />
             <span class="sh-img-preview-label" id="sh-img-preview-label">メディアを添付中 (送るボタンで投稿)</span>
           </div>
-          <button type="button" class="sh-reply-cancel-btn" id="sh-img-preview-cancel" title="添付を取り消す">✕</button>
+          <button type="button" class="sh-reply-cancel-btn" id="sh-img-preview-cancel" title="添付を取り消す">×</button>
         </div>
         <form class="sh-chat-form" id="sh-chat-form">
           <div class="sh-chat-input-row">
-            <button type="button" class="sh-chat-img-btn" id="sh-chat-img-btn" title="画像を添付 (Ctrl+V貼り付け・ドロップ対応)">🖼️</button>
-            <button type="button" class="sh-chat-img-btn" id="sh-chat-vid-btn" title="動画を投稿 (MP4/WebM/MOV 最大25MB)">🎬</button>
+            <button type="button" class="sh-chat-img-btn" id="sh-chat-img-btn" title="画像を添付 (Ctrl+V貼り付け・ドロップ対応)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg></button>
+            <button type="button" class="sh-chat-img-btn" id="sh-chat-vid-btn" title="動画を投稿 (MP4/WebM/MOV 最大25MB)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg></button>
             <input type="file" id="sh-chat-file-input" accept="image/*,video/*" style="display:none;" />
             <input type="file" id="sh-chat-video-input" accept="video/mp4,video/webm,video/ogg,video/quicktime,video/*" style="display:none;" />
             <div class="sh-chat-input-wrap">
-              <textarea class="sh-chat-input" id="sh-chat-input" placeholder="メッセージを入力... (送るボタンで投稿)" maxlength="200" rows="1" autocomplete="off"></textarea>
-              <button type="button" class="sh-input-clear-btn" id="sh-input-clear-btn" title="入力をクリア">✕</button>
+              <textarea class="sh-chat-input" id="sh-chat-input" placeholder="メッセージを入力... (送信ボタンで投稿)" maxlength="200" rows="1" autocomplete="off"></textarea>
+              <button type="button" class="sh-input-clear-btn" id="sh-input-clear-btn" title="入力をクリア">×</button>
             </div>
-            <button type="submit" class="sh-chat-send-btn" id="sh-chat-send-btn">送る</button>
+            <button type="submit" class="sh-chat-send-btn" id="sh-chat-send-btn">送信</button>
           </div>
           <div class="sh-chat-input-meta">
-            <span id="sh-input-hint-label">🎬 画像・動画投稿対応 / 送るボタンで送信</span>
+            <span id="sh-input-hint-label">画像・動画投稿対応 / 送信ボタンで投稿</span>
             <span class="sh-char-count" id="sh-char-count">0/200</span>
           </div>
         </form>
@@ -4473,7 +4473,7 @@ _CLIENT_JS = r"""
       <!-- ID & Passkey (Tripcode) Modal -->
       <div id="sh-id-modal">
         <div class="sh-modal-box">
-          <div class="sh-modal-title">🔑 トリップ設定</div>
+          <div class="sh-modal-title">トリップ設定</div>
           <div class="sh-modal-field">
             <label class="sh-modal-label">固定個別ID (名前)</label>
             <div id="sh-modal-fixed-id-display" style="font-family: monospace; font-size: 13px; font-weight: 700; padding: 7px 10px; background: rgba(0,0,0,0.3); border-radius: 6px; border: 1px solid rgba(255,255,255,0.12); color: #38bdf8;"></div>
@@ -4537,7 +4537,7 @@ _CLIENT_JS = r"""
     </div>
 
     <div id="sh-img-lightbox" title="クリックで閉じる">
-      <button type="button" id="sh-img-lightbox-close" title="閉じる">✕</button>
+      <button type="button" id="sh-img-lightbox-close" title="閉じる">×</button>
       <img id="sh-img-lightbox-target" alt="拡大画像" />
     </div>
   `;
@@ -4637,7 +4637,7 @@ _CLIENT_JS = r"""
       hubLoginGateBar.id = 'hub-login-gate-bar';
       hubLoginGateBar.className = 'sh-login-gate-bar';
       hubLoginGateBar.innerHTML = `
-        <span id="hub-login-gate-text">👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
+        <span id="hub-login-gate-text">見るだけはログイン不要 / 投稿・動画送信は要ログイン</span>
         <button type="button" class="sh-login-action-btn" id="hub-login-open-btn">ログインして投稿</button>
       `;
       hubFooter.insertBefore(hubLoginGateBar, hubChatForm);
@@ -4654,7 +4654,7 @@ _CLIENT_JS = r"""
           <img id="hub-img-preview-thumb" class="sh-img-preview-thumb" alt="preview" />
           <span class="sh-img-preview-label" id="hub-img-preview-label">メディアを添付中 (送るで投稿)</span>
         </div>
-        <button type="button" class="sh-reply-cancel-btn" id="hub-img-preview-cancel" title="添付を取り消す">✕</button>
+        <button type="button" class="sh-reply-cancel-btn" id="hub-img-preview-cancel" title="添付を取り消す">×</button>
       `;
       hubFooter.insertBefore(hubImgPreviewBanner, hubChatForm);
       hubImgPreviewThumb = document.getElementById('hub-img-preview-thumb');
@@ -4668,7 +4668,7 @@ _CLIENT_JS = r"""
       hubImgBtn.id = 'hub-chat-img-btn';
       hubImgBtn.className = 'sh-chat-img-btn';
       hubImgBtn.title = '画像を添付 (貼り付け・ドロップも対応)';
-      hubImgBtn.textContent = '🖼️';
+      hubImgBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>';
       hubFileInput = document.createElement('input');
       hubFileInput.type = 'file';
       hubFileInput.id = 'hub-chat-file-input';
@@ -4683,7 +4683,7 @@ _CLIENT_JS = r"""
       hubVidBtn.id = 'hub-chat-vid-btn';
       hubVidBtn.className = 'sh-chat-img-btn';
       hubVidBtn.title = '動画を投稿 (MP4/WebM/MOV)';
-      hubVidBtn.textContent = '🎬';
+      hubVidBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="m16 13 5.223 3.482a.5.5 0 0 0 .777-.416V7.87a.5.5 0 0 0-.752-.432L16 10.5"/><rect x="2" y="6" width="14" height="12" rx="2"/></svg>';
       hubVideoInput = document.createElement('input');
       hubVideoInput.type = 'file';
       hubVideoInput.id = 'hub-chat-video-input';
@@ -4758,12 +4758,12 @@ _CLIENT_JS = r"""
     if (loginGateBar && loginGateText && loginOpenBtn) {
       if (logged) {
         loginGateBar.classList.add('is-logged-in');
-        loginGateText.textContent = '✅ ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        loginGateText.textContent = 'ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
         loginOpenBtn.textContent = 'ログアウト';
         loginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         loginGateBar.classList.remove('is-logged-in');
-        loginGateText.textContent = '👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        loginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         loginOpenBtn.textContent = 'ログインして投稿';
         loginOpenBtn.className = 'sh-login-action-btn';
       }
@@ -4771,12 +4771,12 @@ _CLIENT_JS = r"""
     if (hubLoginGateBar && hubLoginGateText && hubLoginOpenBtn) {
       if (logged) {
         hubLoginGateBar.classList.add('is-logged-in');
-        hubLoginGateText.textContent = '✅ ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        hubLoginGateText.textContent = 'ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
         hubLoginOpenBtn.textContent = 'ログアウト';
         hubLoginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         hubLoginGateBar.classList.remove('is-logged-in');
-        hubLoginGateText.textContent = '👀 見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        hubLoginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         hubLoginOpenBtn.textContent = 'ログインして投稿';
         hubLoginOpenBtn.className = 'sh-login-action-btn';
       }
@@ -4887,7 +4887,7 @@ _CLIENT_JS = r"""
           applyServerMyId(data.myId, data.token, data.trip);
         }
         closeLoginModal();
-        appendSystemNotice('✅ ' + (data.username || uname) + ' としてログインしました！チャット・動画投稿が可能です。');
+        appendSystemNotice((data.username || uname) + ' としてログインしました。チャット・動画投稿が可能です。');
         if (pendingSendAfterLogin) {
           const fn = pendingSendAfterLogin;
           pendingSendAfterLogin = null;
@@ -4908,11 +4908,11 @@ _CLIENT_JS = r"""
   function updateSoundBtn() {
     const isMuted = localStorage.getItem('sh_chat_sound') === '0';
     if (isMuted) {
-      soundBtn.textContent = '🔕';
+      soundBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>';
       soundBtn.title = '通知音切り替え (現在: OFF)';
       soundBtn.classList.add('is-muted');
     } else {
-      soundBtn.textContent = '🔔';
+      soundBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg>';
       soundBtn.title = '通知音切り替え (現在: ON)';
       soundBtn.classList.remove('is-muted');
     }
@@ -4939,18 +4939,18 @@ _CLIENT_JS = r"""
     if (val === '70') {
       panel.classList.add('sh-opacity-70');
       if (opacityBtn) {
-        opacityBtn.textContent = '🌔';
+        opacityBtn.textContent = '70%';
         opacityBtn.title = '透明度: 70% (クリックで40%へ)';
       }
     } else if (val === '40') {
       panel.classList.add('sh-opacity-40');
       if (opacityBtn) {
-        opacityBtn.textContent = '🌒';
+        opacityBtn.textContent = '40%';
         opacityBtn.title = '透明度: 40% (クリックで100%へ)';
       }
     } else {
       if (opacityBtn) {
-        opacityBtn.textContent = '🌓';
+        opacityBtn.textContent = '100%';
         opacityBtn.title = '透明度: 100% (クリックで70%へ)';
       }
     }
@@ -4981,7 +4981,7 @@ _CLIENT_JS = r"""
       };
       panel.classList.add('is-maximized');
       if (maxBtn) {
-        maxBtn.textContent = '🗗';
+        maxBtn.textContent = '-';
         maxBtn.title = '元のサイズに戻す';
       }
     } else {
@@ -4993,7 +4993,7 @@ _CLIENT_JS = r"""
         panel.style.height = preMaxBounds.height;
       }
       if (maxBtn) {
-        maxBtn.textContent = '🗖';
+        maxBtn.textContent = '+';
         maxBtn.title = '最大化';
       }
     }
@@ -5015,13 +5015,13 @@ _CLIENT_JS = r"""
       if (isMaximized) setMaximized(false);
       panel.classList.add('is-mini');
       if (miniBtn) {
-        miniBtn.textContent = '🔼';
+        miniBtn.textContent = '+';
         miniBtn.title = '通常表示に戻す';
       }
     } else {
       panel.classList.remove('is-mini');
       if (miniBtn) {
-        miniBtn.textContent = '◽';
+        miniBtn.textContent = '-';
         miniBtn.title = 'ミニ表示モード (ティッカー)';
       }
       scrollToBottom(true);
@@ -5500,7 +5500,7 @@ _CLIENT_JS = r"""
         if (data && data.myId) {
           applyServerMyId(data.myId, data.token, data.trip || rawTrip);
           if (rawTrip) {
-            appendSystemNotice('🔑 トリップ: ◆' + (data.trip || rawTrip) + ' を適用しました');
+            appendSystemNotice('トリップ: ◆' + (data.trip || rawTrip) + ' を適用しました');
           } else {
             appendSystemNotice('トリップを解除しました');
           }
@@ -5826,7 +5826,7 @@ _CLIENT_JS = r"""
     }
     stagedVideoUrl = '';
     const kb = Math.max(1, Math.round((stagedImageData.length * 0.75) / 1024));
-    const desc = labelText || `🖼️ 画像を添付中 (${kb}KB) - 送るで投稿`;
+    const desc = labelText || `画像を添付中 (${kb}KB) - 送るで投稿`;
     if (imgPreviewBanner && imgPreviewThumb && imgPreviewLabel) {
       imgPreviewThumb.style.display = 'block';
       imgPreviewThumb.src = stagedImageData;
@@ -5848,7 +5848,7 @@ _CLIENT_JS = r"""
       return;
     }
     stagedImageData = '';
-    const desc = labelText || '🎬 動画を添付完了 - 送るボタンで投稿';
+    const desc = labelText || '動画を添付完了 - 送るボタンで投稿';
     if (imgPreviewBanner && imgPreviewThumb && imgPreviewLabel) {
       imgPreviewThumb.style.display = 'none';
       imgPreviewLabel.textContent = desc;
@@ -5924,10 +5924,10 @@ _CLIENT_JS = r"""
       return;
     }
     if (file.size > 25 * 1024 * 1024) {
-      appendSystemNotice('⚠️ 動画サイズは最大25MBまで対応しています。');
+      appendSystemNotice('動画サイズは最大25MBまで対応しています。');
       return;
     }
-    setStagedVideo('uploading', '⏳ 動画をアップロード中... (' + Math.max(1, Math.round(file.size / 1024)) + 'KB)');
+    setStagedVideo('uploading', '動画をアップロード中... (' + Math.max(1, Math.round(file.size / 1024)) + 'KB)');
     try {
       const res = await fetch(getApiUrl('/openchat/upload'), {
         method: 'POST',
@@ -5948,15 +5948,15 @@ _CLIENT_JS = r"""
       }
       if (res.ok && data && data.ok && data.url) {
         const mb = (file.size / (1024 * 1024)).toFixed(1);
-        setStagedVideo(data.url, `🎬 動画添付済 (${mb}MB) - 送るボタンで投稿`);
+        setStagedVideo(data.url, `動画添付済 (${mb}MB) - 送るボタンで投稿`);
         if (focusTarget) focusTarget.focus();
       } else {
         clearStagedMedia();
-        appendSystemNotice('⚠️ 動画のアップロードに失敗しました: ' + ((data && data.error) || 'エラー'));
+        appendSystemNotice('動画のアップロードに失敗しました: ' + ((data && data.error) || 'エラー'));
       }
     } catch (_) {
       clearStagedMedia();
-      appendSystemNotice('⚠️ 動画のアップロード中に通信エラーが発生しました。');
+      appendSystemNotice('動画のアップロード中に通信エラーが発生しました。');
     }
   }
 
@@ -6157,7 +6157,7 @@ _CLIENT_JS = r"""
     if (!container) return;
     const banner = document.createElement('div');
     banner.className = 'sh-2ch-reset-banner';
-    banner.textContent = '🔄 1000レスに到達したためスレッドがリセットされました（新スレッド 1レス目から開始）';
+    banner.textContent = '1000レスに到達したためスレッドがリセットされました（新スレッド 1レス目から開始）';
     container.appendChild(banner);
   }
 
@@ -6446,11 +6446,11 @@ _CLIENT_JS = r"""
       </div>
       <div class="sh-msg-actions">
         <button type="button" class="sh-msg-action-btn sh-btn-reply" title="このレスに返信">&gt;&gt;返信</button>
-        <button type="button" class="sh-msg-action-btn sh-btn-copy" title="本文をコピー">📋</button>
+        <button type="button" class="sh-msg-action-btn sh-btn-copy" title="本文をコピー">${iconSvg('copy', 12)}</button>
       </div>
     `;
 
-    const mediaLabel = hasText ? msg.text : (vidSrc ? '🎬 [動画]' : '🖼️ [画像]');
+    const mediaLabel = hasText ? msg.text : (vidSrc ? '[動画]' : '[画像]');
     const concatNoEl = entry.querySelector('.sh-chat-concat-no');
     if (concatNoEl) {
       concatNoEl.addEventListener('click', (e) => {
@@ -6563,7 +6563,7 @@ _CLIENT_JS = r"""
       noEl.addEventListener('click', (e) => {
         e.stopPropagation();
         const hasText = Boolean(msg.text && String(msg.text).trim());
-        const mediaLabel = hasText ? msg.text : (msg.video ? '🎬 [動画]' : '🖼️ [画像]');
+        const mediaLabel = hasText ? msg.text : (msg.video ? '[動画]' : '[画像]');
         setReplyTarget(msg.id, cleanSender, mediaLabel, resNo);
       });
     }
@@ -7029,7 +7029,7 @@ _CLIENT_JS = r"""
         }).then(r => r.json()).then(d => {
           if (d && d.myId) applyServerMyId(d.myId, d.token, d.trip || tripVal);
           if (d && (typeof d.onlineCount === 'number' || typeof d.count === 'number')) updateOnlineCount(d.onlineCount || d.count);
-          appendSystemNotice('🔑 トリップを設定しました: ◆' + (d && d.trip ? d.trip : tripVal));
+          appendSystemNotice('トリップを設定しました: ◆' + (d && d.trip ? d.trip : tripVal));
         }).catch(() => {
           appendSystemNotice('トリップを設定しました: ◆' + tripVal);
         });

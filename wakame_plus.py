@@ -31,8 +31,10 @@ from wakame_stream import (
     search_videos,
 )
 
+from design_system.icons import svg_icon
+
 SERVICE_NAME = "わかめ　ぷらす"
-SERVICE_ICON = "📺"
+SERVICE_ICON = svg_icon("video", 18)
 SERVICE_PATH = "/wakame/"
 
 router = APIRouter()
@@ -736,68 +738,70 @@ main {{
 <div class="wkm-app-shell">
   <nav class="wkm-nav-rail" aria-label="わかめ ぷらす ナビゲーション">
     <a class="wkm-rail-item" href="/" title="School Hub ホーム">
-      <span class="wkm-rail-pill">🏠</span>
+      <span class="wkm-rail-pill">{svg_icon("home", 18)}</span>
       <span>Hub</span>
     </a>
     <a class="wkm-rail-item{nav_home_cls}" href="/wakame/">
-      <span class="wkm-rail-pill">📺</span>
+      <span class="wkm-rail-pill">{svg_icon("video", 18)}</span>
       <span>ホーム</span>
     </a>
     <a class="wkm-rail-item{nav_hist_cls}" href="/wakame/history">
-      <span class="wkm-rail-pill">🕒</span>
+      <span class="wkm-rail-pill">{svg_icon("clock", 18)}</span>
       <span>履歴</span>
     </a>
     <a class="wkm-rail-item{nav_fav_cls}" href="/wakame/favorites">
-      <span class="wkm-rail-pill">⭐</span>
+      <span class="wkm-rail-pill">{svg_icon("star", 18)}</span>
       <span>マイリスト</span>
     </a>
     <a class="wkm-rail-item{nav_about_cls}" href="/wakame/about">
-      <span class="wkm-rail-pill">ℹ️</span>
+      <span class="wkm-rail-pill">{svg_icon("info", 18)}</span>
       <span>概要</span>
     </a>
     <button type="button" class="wkm-rail-item" style="border:none;background:transparent;cursor:pointer;" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" aria-label="M3設定を開く">
-      <span class="wkm-rail-pill">🎨</span>
+      <span class="wkm-rail-pill">{svg_icon("settings", 18)}</span>
       <span>設定</span>
     </button>
   </nav>
 
   <div class="wkm-main-col">
     <header>
-      <a class="brand" href="/wakame/">📺 わかめ ぷらす</a>
+      <a class="brand" href="/wakame/">{svg_icon("video", 20)} わかめ ぷらす</a>
       <form class="search" action="/wakame/search" method="get" autocomplete="off">
         <input name="q" placeholder="動画を検索" value="{_safe(title[4:] if title.startswith('検索: ') else '')}" aria-label="動画を検索">
-        <button type="submit" aria-label="検索">🔍</button>
+        <button type="submit" aria-label="検索">{svg_icon("search", 16)}</button>
       </form>
       <nav class="nav">
-        <a href="/">🏠 Hub</a>
+        <a href="/">{svg_icon("home", 16)} Hub</a>
         <a href="/wakame/history">履歴</a>
         <a href="/wakame/favorites">マイリスト</a>
-        <button type="button" class="theme-toggle-btn" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" title="M3 表示・テーマ設定" aria-label="表示設定">🎨</button>
-        <button type="button" class="theme-toggle-btn" id="wkmThemeToggle" aria-label="テーマ切替">🌙</button>
+        <button type="button" class="theme-toggle-btn" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()" title="M3 表示・テーマ設定" aria-label="表示設定">{svg_icon("settings", 18)}</button>
+        <button type="button" class="theme-toggle-btn" id="wkmThemeToggle" aria-label="テーマ切替">{svg_icon("moon", 18)}</button>
       </nav>
     </header>
     <div class="active-bar">
       <span><a href="/">School Hub</a> / <strong>わかめ ぷらす</strong></span>
-      <span class="active-status-pill">● Active</span>
+      <span class="active-status-pill">Active</span>
     </div>
     <main>{body}</main>
   </div>
 </div>
 
 <nav class="wkm-bottom-nav" aria-label="モバイルナビゲーション">
-  <a href="/"><span>🏠</span><span>Hub</span></a>
-  <a href="/wakame/" class="{nav_home_cls.strip()}"><span>📺</span><span>ホーム</span></a>
-  <a href="/wakame/history" class="{nav_hist_cls.strip()}"><span>🕒</span><span>履歴</span></a>
-  <a href="/wakame/favorites" class="{nav_fav_cls.strip()}"><span>⭐</span><span>マイリスト</span></a>
+  <a href="/"><span>{svg_icon("home", 18)}</span><span>Hub</span></a>
+  <a href="/wakame/" class="{nav_home_cls.strip()}"><span>{svg_icon("video", 18)}</span><span>ホーム</span></a>
+  <a href="/wakame/history" class="{nav_hist_cls.strip()}"><span>{svg_icon("clock", 18)}</span><span>履歴</span></a>
+  <a href="/wakame/favorites" class="{nav_fav_cls.strip()}"><span>{svg_icon("star", 18)}</span><span>マイリスト</span></a>
 </nav>
 
 <script>
 (() => {{
   const btn = document.getElementById("wkmThemeToggle");
+  const sunSvg = '{svg_icon("sun", 18)}';
+  const moonSvg = '{svg_icon("moon", 18)}';
   function syncBtn() {{
     if (!btn) return;
     const t = document.documentElement.getAttribute("data-theme") || "light";
-    btn.textContent = t === "dark" ? "☀️" : "🌙";
+    btn.innerHTML = t === "dark" ? sunSvg : moonSvg;
   }}
   syncBtn();
   btn?.addEventListener("click", () => {{
@@ -1074,10 +1078,10 @@ async def watch_page(video_id: str):
     stream_url = f'/wakame/stream/{vid}'
     education = f'https://www.youtube-nocookie.com/embed/{vid}?autoplay=1&enablejsapi=1&playsinline=1'
     embed = f'https://www.youtube.com/embed/{vid}?autoplay=1&enablejsapi=1&playsinline=1'
-    body = f'''<div class="watch-layout"><section><div class="player"><iframe id="embedFrame" src="about:blank" style="display:none" allow="autoplay;fullscreen;picture-in-picture;encrypted-media" referrerpolicy="strict-origin-when-cross-origin"></iframe><video id="mainVideo" src="{stream_url}" controls autoplay playsinline webkit-playsinline preload="auto" style="display:block;width:100%;height:100%;object-fit:contain;background:#000"></video></div><div class="modebar"><button id="stream" class="active">⚡ ストリーム</button><button id="edu">🎓 Education</button><button id="embed">🔒 埋め込み</button></div><div class="details"><h1>{title}</h1><div class="sub"><a href="{channel_href}">{author}</a><span>{_safe(data.get("viewCountText", ""))}</span><span>投稿日: {published}</span><span>{_safe(data.get("lengthText", ""))}</span></div><div id="desc" class="desc">{_safe(data.get("description", ""))}</div></div><div class="comments"><h2>コメント <span id="commentCount">読み込み中…</span></h2><div id="commentList">{''.join(comment_html) if comment_html else '<div class="empty">コメントを読み込んでいます…</div>'}</div></div></section><aside class="related"><h2>関連動画</h2>{''.join(related_html) if related_html else '<div class="empty">関連動画がありません。</div>'}</aside></div>'''
+    body = f'''<div class="watch-layout"><section><div class="player"><iframe id="embedFrame" src="about:blank" style="display:none" allow="autoplay;fullscreen;picture-in-picture;encrypted-media" referrerpolicy="strict-origin-when-cross-origin"></iframe><video id="mainVideo" src="{stream_url}" controls autoplay playsinline webkit-playsinline preload="auto" style="display:block;width:100%;height:100%;object-fit:contain;background:#000"></video></div><div class="modebar"><button id="stream" class="active">ストリーム</button><button id="edu">Education</button><button id="embed">埋め込み</button></div><div class="details"><h1>{title}</h1><div class="sub"><a href="{channel_href}">{author}</a><span>{_safe(data.get("viewCountText", ""))}</span><span>投稿日: {published}</span><span>{_safe(data.get("lengthText", ""))}</span></div><div id="desc" class="desc">{_safe(data.get("description", ""))}</div></div><div class="comments"><h2>コメント <span id="commentCount">読み込み中…</span></h2><div id="commentList">{''.join(comment_html) if comment_html else '<div class="empty">コメントを読み込んでいます…</div>'}</div></div></section><aside class="related"><h2>関連動画</h2>{''.join(related_html) if related_html else '<div class="empty">関連動画がありません。</div>'}</aside></div>'''
     hist_entry = json.dumps({"videoId": video_id, "title": data.get("title", ""), "author": data.get("author", ""), "thumbnail": f"/youtube-image-relay?url=https%3A%2F%2Fi.ytimg.com%2Fvi%2F{quote(video_id, safe='')}%2Fmqdefault.jpg"}, ensure_ascii=False)
     script = f'''(() => {{\ntry{{const hk="wkt_history",hv={hist_entry},ha=JSON.parse(localStorage.getItem(hk)||"[]").filter(x=>x&&x.videoId!==hv.videoId);ha.unshift(hv);localStorage.setItem(hk,JSON.stringify(ha.slice(0,50)));}}catch(_){{}}\nconst video=document.getElementById('mainVideo'), frame=document.getElementById('embedFrame');\nconst edu=document.getElementById('edu'),stream=document.getElementById('stream'),embed=document.getElementById('embed');\nconst VID={json.dumps(video_id)}; const EDUCATION={json.dumps(education)}; const EMBED={json.dumps(embed)}; const STREAM={json.dumps(stream_url)};\nvideo.play().catch(()=>{{video.muted=true;video.play().catch(()=>{{}})}});\nfunction mode(m){{if(m==='stream'){{edu.classList.remove('active');stream.classList.add('active');embed.classList.remove('active');frame.style.display='none';frame.src='about:blank';video.style.display='block';video.src=STREAM;video.play().catch(()=>switchMode('edu'));}}else if(m==='embed'){{edu.classList.remove('active');stream.classList.remove('active');embed.classList.add('active');video.pause();video.removeAttribute('src');video.load();video.style.display='none';frame.style.display='block';frame.src=EMBED;}}else{{edu.classList.add('active');stream.classList.remove('active');embed.classList.remove('active');video.pause();video.removeAttribute('src');video.load();video.style.display='none';frame.style.display='block';frame.src=EDUCATION;}}}}\nfunction switchMode(m){{mode(m)}}\nedu.onclick=()=>mode('edu');stream.onclick=()=>mode('stream');embed.onclick=()=>mode('embed');\nvideo.addEventListener('error',()=>{{if(stream.classList.contains('active'))mode('edu')}});\ndocument.getElementById('desc')?.addEventListener('click',e=>e.currentTarget.classList.toggle('open'));\nfor(const b of document.querySelectorAll('.reply-btn')){{b.addEventListener('click',async()=>{{const box=b.nextElementSibling; if(!box)return; box.hidden=false; box.textContent='読み込み中…'; try{{const r=await fetch('/wakame/api/comment-replies?video_id='+encodeURIComponent(b.dataset.video)+'&token='+encodeURIComponent(b.dataset.token));const d=await r.json();box.innerHTML=(Array.isArray(d)?d:[]).map(x=>'<div class="comment"><div class="comment-main"><div class="comment-meta"><span class="comment-author">'+escapeHtml(x.author||'')+'</span><span>'+escapeHtml(x.publishedText||'')+'</span></div><div class="comment-body">'+escapeHtml(x.content||'')+'</div></div></div>').join('')||'<div class="meta">返信がありません。</div>';}}catch(e){{box.textContent='返信を取得できませんでした。'}}}})}}\nfunction escapeHtml(s){{return String(s).replace(/[&<>"']/g,c=>({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[c]))}}
-async function refreshComments(sort='popular'){{try{{const r=await fetch('/wakame/api/comments/'+encodeURIComponent(VID)+'?sort='+encodeURIComponent(sort)+'&limit=50',{{cache:'no-store'}});if(!r.ok)throw new Error('comments '+r.status);const a=await r.json();const box=document.getElementById('commentList');const count=document.getElementById('commentCount');if(count)count.textContent=a.length+'件';if(!box)return;box.innerHTML=a.map(c=>{{const avatar=c.authorThumb?'<img class="avatar" src="'+escapeHtml(c.authorThumb)+'" alt="">':'<div class="avatar"></div>';const replies=Number(c.replyCount||0);const rb=replies&&c.replyToken?'<button class="reply-btn" data-video="'+escapeHtml(VID)+'" data-token="'+escapeHtml(c.replyToken)+'">返信 '+replies+'件</button><div class="replies" hidden></div>':'';return '<div class="comment"><div>'+avatar+'</div><div class="comment-main"><div class="comment-meta"><span class="comment-author">'+escapeHtml(c.author||'')+'</span><span>'+escapeHtml(c.publishedText||'')+'</span><span>👍 '+escapeHtml(c.likeCount||'0')+'</span></div><div class="comment-body">'+escapeHtml(c.content||'')+'</div>'+rb+'</div></div>'}}).join('')||'<div class="empty">コメントがありません。</div>';for(const b of box.querySelectorAll('.reply-btn')){{b.onclick=async()=>{{const target=b.nextElementSibling;if(!target)return;target.hidden=false;target.textContent='返信を読み込み中…';try{{const rr=await fetch('/wakame/api/comment-replies?video_id='+encodeURIComponent(b.dataset.video)+'&token='+encodeURIComponent(b.dataset.token),{{cache:'no-store'}});const d=await rr.json();target.innerHTML=(Array.isArray(d)?d:[]).map(x=>'<div class="comment"><div class="comment-main"><div class="comment-meta"><span class="comment-author">'+escapeHtml(x.author||'')+'</span><span>'+escapeHtml(x.publishedText||'')+'</span></div><div class="comment-body">'+escapeHtml(x.content||'')+'</div></div></div>').join('')||'<div class="meta">返信がありません。</div>'}}catch(e){{target.textContent='返信を取得できませんでした。'}}}}}}}}catch(e){{const count=document.getElementById('commentCount');if(count)count.textContent='取得失敗';const box=document.getElementById('commentList');if(box)box.innerHTML='<div class="empty">コメントを取得できませんでした。</div>';}}}};setTimeout(()=>refreshComments('popular'),250);\n}}}})();'''
+async function refreshComments(sort='popular'){{try{{const r=await fetch('/wakame/api/comments/'+encodeURIComponent(VID)+'?sort='+encodeURIComponent(sort)+'&limit=50',{{cache:'no-store'}});if(!r.ok)throw new Error('comments '+r.status);const a=await r.json();const box=document.getElementById('commentList');const count=document.getElementById('commentCount');if(count)count.textContent=a.length+'件';if(!box)return;box.innerHTML=a.map(c=>{{const avatar=c.authorThumb?'<img class="avatar" src="'+escapeHtml(c.authorThumb)+'" alt="">':'<div class="avatar"></div>';const replies=Number(c.replyCount||0);const rb=replies&&c.replyToken?'<button class="reply-btn" data-video="'+escapeHtml(VID)+'" data-token="'+escapeHtml(c.replyToken)+'">返信 '+replies+'件</button><div class="replies" hidden></div>':'';return '<div class="comment"><div>'+avatar+'</div><div class="comment-main"><div class="comment-meta"><span class="comment-author">'+escapeHtml(c.author||'')+'</span><span>'+escapeHtml(c.publishedText||'')+'</span><span>高評価 '+escapeHtml(c.likeCount||'0')+'</span></div><div class="comment-body">'+escapeHtml(c.content||'')+'</div>'+rb+'</div></div>'}}).join('')||'<div class="empty">コメントがありません。</div>';for(const b of box.querySelectorAll('.reply-btn')){{b.onclick=async()=>{{const target=b.nextElementSibling;if(!target)return;target.hidden=false;target.textContent='返信を読み込み中…';try{{const rr=await fetch('/wakame/api/comment-replies?video_id='+encodeURIComponent(b.dataset.video)+'&token='+encodeURIComponent(b.dataset.token),{{cache:'no-store'}});const d=await rr.json();target.innerHTML=(Array.isArray(d)?d:[]).map(x=>'<div class="comment"><div class="comment-main"><div class="comment-meta"><span class="comment-author">'+escapeHtml(x.author||'')+'</span><span>'+escapeHtml(x.publishedText||'')+'</span></div><div class="comment-body">'+escapeHtml(x.content||'')+'</div></div></div>').join('')||'<div class="meta">返信がありません。</div>'}}catch(e){{target.textContent='返信を取得できませんでした。'}}}}}}}}catch(e){{const count=document.getElementById('commentCount');if(count)count.textContent='取得失敗';const box=document.getElementById('commentList');if(box)box.innerHTML='<div class="empty">コメントを取得できませんでした。</div>';}}}};setTimeout(()=>refreshComments('popular'),250);\n}}}})();'''
     return HTMLResponse(_render_base(data.get("title", "動画"), body, script))
 
 

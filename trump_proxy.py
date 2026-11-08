@@ -44,10 +44,10 @@ DAIFUGO_RANKS = [
 ]
 
 BOT_PROFILES = [
-    {"name": "レン (AI)", "style": "Master", "avatar": "🦊"},
-    {"name": "カイ (AI)", "style": "Power", "avatar": "🐯"},
-    {"name": "レイ (AI)", "style": "Tactics", "avatar": "🐺"},
-    {"name": "ミナ (AI)", "style": "Brain", "avatar": "🐱"},
+    {"name": "レン (AI)", "style": "Master", "avatar": "R"},
+    {"name": "カイ (AI)", "style": "Power", "avatar": "K"},
+    {"name": "レイ (AI)", "style": "Tactics", "avatar": "L"},
+    {"name": "ミナ (AI)", "style": "Brain", "avatar": "M"},
 ]
 
 RANK_TITLES_DAIFUGO = ["大富豪", "富豪", "貧民", "大貧民"]
@@ -302,7 +302,7 @@ class TrumpRoom:
             pass
         for s in range(4):
             self.sort_hand(s)
-        self._emit_event("cutin", "🔄 階級カード交換完了", sfx="card")
+        self._emit_event("cutin", "階級カード交換完了", sfx="card")
 
     def _swap_cards(self, high_s: int, low_s: int, count: int) -> None:
         self.sort_hand(high_s)
@@ -630,15 +630,15 @@ class TrumpRoom:
         triggered_8 = bool(self.rules.get("eightGiri", True) and combo.get("hasEight"))
 
         if triggered_rev:
-            self._emit_event("cutin", "⚡ 革命発動！(強さ逆転)" if self.is_revolution else "⚡ 革命返し！", seat=seat, sfx="special")
+            self._emit_event("cutin", "革命発動！(強さ逆転)" if self.is_revolution else "革命返し！", seat=seat, sfx="special")
         elif triggered_spade3:
             self._emit_event("cutin", "♠3 スペ3返し！", seat=seat, sfx="special")
         elif triggered_8:
-            self._emit_event("cutin", "✂ 8切り！場流し", seat=seat, sfx="special")
+            self._emit_event("cutin", "8切り！場流し", seat=seat, sfx="special")
         elif triggered_11:
-            self._emit_event("cutin", "🔄 11バック！", seat=seat, sfx="special")
+            self._emit_event("cutin", "11バック！", seat=seat, sfx="special")
         elif triggered_shibari:
-            self._emit_event("cutin", "⛓ しばり発動！", seat=seat, sfx="special")
+            self._emit_event("cutin", "しばり発動！", seat=seat, sfx="special")
         else:
             self._emit_event("sfx", "", seat=seat, sfx="card")
 
@@ -646,12 +646,12 @@ class TrumpRoom:
             self._emit_event("bubble", "ラスト1枚！", seat=seat)
         elif len(self.hands[seat]) == 0 and seat not in self.finish_order:
             self.finish_order.append(seat)
-            self._emit_event("bubble", "上がり！🎉", seat=seat, sfx="special")
+            self._emit_event("bubble", "上がり！", seat=seat, sfx="special")
             if self.rules.get("miyakoOchi", True) and len(self.finish_order) == 1:
                 if "大富豪" in self.seat_ranks:
                     prev_df = self.seat_ranks.index("大富豪")
                     if prev_df != seat and prev_df not in self.finish_order:
-                        self._emit_event("cutin", f"😱 {self.seat_display_name(prev_df)}が都落ち！", seat=prev_df, sfx="joker")
+                        self._emit_event("cutin", f"{self.seat_display_name(prev_df)}が都落ち！", seat=prev_df, sfx="joker")
                         self.hands[prev_df] = []
                         self.miyako_seat = prev_df
 
@@ -750,7 +750,7 @@ class TrumpRoom:
         kept.extend(by_num.values())
         self.hands[seat] = kept
         if emit and discarded > 0:
-            self._emit_event("bubble", "ペア成立！✨", seat=seat, sfx="special")
+            self._emit_event("bubble", "ペア成立！", seat=seat, sfx="special")
         return discarded
 
     def get_babanuki_target(self, drawer_seat: int) -> Optional[int]:
@@ -769,7 +769,7 @@ class TrumpRoom:
         self.hands[drawer_seat].append(drawn)
 
         if drawn.get("isJoker"):
-            self._emit_event("cutin", f"🃏 JOKER移動！ ({self.seat_display_name(target_seat)} ➔ {self.seat_display_name(drawer_seat)})", seat=drawer_seat, sfx="joker")
+            self._emit_event("cutin", f"JOKER移動！ ({self.seat_display_name(target_seat)} -> {self.seat_display_name(drawer_seat)})", seat=drawer_seat, sfx="joker")
         else:
             self._emit_event("sfx", "", seat=drawer_seat, sfx="card")
 
@@ -779,7 +779,7 @@ class TrumpRoom:
         for s in range(4):
             if len(self.hands[s]) == 0 and s not in self.finish_order:
                 self.finish_order.append(s)
-                self._emit_event("bubble", "抜け！🎉", seat=s, sfx="special")
+                self._emit_event("bubble", "抜け！", seat=s, sfx="special")
 
         active = [s for s in range(4) if len(self.hands[s]) > 0]
         if len(active) <= 1:
@@ -799,7 +799,7 @@ class TrumpRoom:
         self.phase = "round_end"
         self.phase_since = time.time()
         winner_name = self.seat_display_name(self.finish_order[0]) if self.finish_order else ""
-        self._emit_event("cutin", f"🏆 勝負あり！ 1位: {winner_name}", sfx="special")
+        self._emit_event("cutin", f"勝負あり！ 1位: {winner_name}", sfx="special")
 
     # ------------------------------------------------------------------------
     # Personalized View Snapshot Builder
@@ -898,12 +898,12 @@ class TrumpRoom:
 ROOMS: Dict[str, TrumpRoom] = {
     "daifugo": TrumpRoom(
         "daifugo",
-        "👑 大富豪ルーム",
+        "大富豪ルーム",
         "革命・8切り・11バック・しばり・スペ3返し対応（4人対戦＋観戦）",
     ),
     "babanuki": TrumpRoom(
         "babanuki",
-        "🃏 ババ抜きルーム",
+        "ババ抜きルーム",
         "隣の人の手札から1枚引いてペアを揃えるシンプル心理戦（4人対戦＋観戦）",
     ),
 }
@@ -1745,16 +1745,16 @@ html, body {
 <header class="topbar">
   <div class="topbar-left">
     <a class="btn-top" href="/">← School Hub</a>
-    <button type="button" class="btn-top" id="btnBackLobby" onclick="returnToLobby()" style="display:none">🚪 ルーム選択へ</button>
-    <span class="room-badge" id="headerRoomTitle">🃏 トランプ ルーム選択</span>
+    <button type="button" class="btn-top" id="btnBackLobby" onclick="returnToLobby()" style="display:none">ルーム選択へ</button>
+    <span class="room-badge" id="headerRoomTitle">トランプ ルーム選択</span>
   </div>
   <div class="topbar-right">
     <span class="meta-tag" id="headerSeatMeta" style="display:none">着席 1/4</span>
     <span class="meta-tag" id="headerSpecMeta" style="display:none">観戦 0</span>
-    <button type="button" class="btn-top" id="btnRules" onclick="toggleRulesModal(true)" style="display:none">⚙ ルール</button>
-    <button type="button" class="btn-top" id="btnSound" onclick="toggleSound()">🔊 音 ON</button>
-    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()">🎨 M3設定</button>
-    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()">🌓</button>
+    <button type="button" class="btn-top" id="btnRules" onclick="toggleRulesModal(true)" style="display:none">ルール</button>
+    <button type="button" class="btn-top" id="btnSound" onclick="toggleSound()">音 ON</button>
+    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()">M3設定</button>
+    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()">テーマ</button>
   </div>
 </header>
 
@@ -1762,7 +1762,7 @@ html, body {
 <section class="lobby-screen" id="lobbyScreen">
   <div class="lobby-container">
     <div class="lobby-header">
-      <h1>🃏 トランプ オンラインロビー</h1>
+      <h1>トランプ オンラインロビー</h1>
       <p>遊びたいゲームルールを選んで入室してください（各ルール全1部屋・満席時は自動で観戦モードになります）</p>
     </div>
 
@@ -1775,23 +1775,23 @@ html, body {
       <!-- Populated dynamically from /trump/api/lobby -->
       <div class="room-card">
         <div>
-          <div class="room-card-title"><span>👑 大富豪ルーム</span></div>
+          <div class="room-card-title"><span>大富豪ルーム</span></div>
           <p class="room-card-desc">革命・8切り・11バック・しばり・スペ3返し対応（4人対戦＋観戦）</p>
         </div>
         <div class="room-actions">
           <button type="button" class="btn-join-room" onclick="enterRoom('daifugo', false)">入室して遊ぶ</button>
-          <button type="button" class="btn-spec-room" onclick="enterRoom('daifugo', true)">🎥 観戦</button>
+          <button type="button" class="btn-spec-room" onclick="enterRoom('daifugo', true)">観戦</button>
         </div>
       </div>
 
       <div class="room-card">
         <div>
-          <div class="room-card-title"><span>🃏 ババ抜きルーム</span></div>
+          <div class="room-card-title"><span>ババ抜きルーム</span></div>
           <p class="room-card-desc">隣の人の手札から1枚引いてペアを揃えるシンプル心理戦（4人対戦＋観戦）</p>
         </div>
         <div class="room-actions">
           <button type="button" class="btn-join-room" onclick="enterRoom('babanuki', false)">入室して遊ぶ</button>
-          <button type="button" class="btn-spec-room" onclick="enterRoom('babanuki', true)">🎥 観戦</button>
+          <button type="button" class="btn-spec-room" onclick="enterRoom('babanuki', true)">観戦</button>
         </div>
       </div>
     </div>
@@ -1806,7 +1806,7 @@ html, body {
     <!-- North (Across) -->
     <div class="opp-seat opp-north" id="seat-rel-2">
       <div class="opp-bubble" id="bubble-rel-2"></div>
-      <div class="opp-avatar" id="av-rel-2">🐺</div>
+      <div class="opp-avatar" id="av-rel-2">L</div>
       <div class="opp-info">
         <div class="opp-name-line">
           <span id="name-rel-2">レイ</span>
@@ -1819,7 +1819,7 @@ html, body {
     <!-- West (Left) -->
     <div class="opp-seat opp-west" id="seat-rel-1">
       <div class="opp-bubble" id="bubble-rel-1"></div>
-      <div class="opp-avatar" id="av-rel-1">🐯</div>
+      <div class="opp-avatar" id="av-rel-1">K</div>
       <div class="opp-info">
         <div class="opp-name-line">
           <span id="name-rel-1">カイ</span>
@@ -1832,7 +1832,7 @@ html, body {
     <!-- East (Right) -->
     <div class="opp-seat opp-east" id="seat-rel-3">
       <div class="opp-bubble" id="bubble-rel-3"></div>
-      <div class="opp-avatar" id="av-rel-3">🐱</div>
+      <div class="opp-avatar" id="av-rel-3">M</div>
       <div class="opp-info">
         <div class="opp-name-line">
           <span id="name-rel-3">ミナ</span>
@@ -1860,12 +1860,12 @@ html, body {
     <div class="action-bar">
       <div class="my-info-pill" id="myStatusText">あなた (平民)</div>
       <div class="action-buttons">
-        <button type="button" class="btn-act hint" id="btnHint" onclick="selectSuggestedMove()">💡 おすすめ</button>
+        <button type="button" class="btn-act hint" id="btnHint" onclick="selectSuggestedMove()">おすすめ</button>
         <button type="button" class="btn-act play" id="btnPlay" onclick="commitPlayerMove()" disabled>カードを出す</button>
         <button type="button" class="btn-act pass" id="btnPass" onclick="playerPassTurn()" disabled>パス</button>
-        <button type="button" class="btn-act hint" id="btnShuffle" onclick="shufflePlayerHand()" style="display:none">🔀 シャッフル</button>
-        <button type="button" class="btn-act play" id="btnTakeSeat" onclick="switchSpectate(false)" style="display:none">🪑 空き席に座る</button>
-        <button type="button" class="btn-act pass" id="btnGoSpectate" onclick="switchSpectate(true)">🎥 観戦に回る</button>
+        <button type="button" class="btn-act hint" id="btnShuffle" onclick="shufflePlayerHand()" style="display:none">シャッフル</button>
+        <button type="button" class="btn-act play" id="btnTakeSeat" onclick="switchSpectate(false)" style="display:none">空き席に座る</button>
+        <button type="button" class="btn-act pass" id="btnGoSpectate" onclick="switchSpectate(true)">観戦に回る</button>
       </div>
     </div>
     <div class="hand-cards-row" id="myHandRow"></div>
@@ -1878,7 +1878,7 @@ html, body {
 <!-- Round Result Modal -->
 <div class="modal-overlay" id="resultModal">
   <div class="modal-box">
-    <h2 style="margin:0 0 8px;color:#fde047">🏆 ラウンド結果</h2>
+    <h2 style="margin:0 0 8px;color:#fde047">ラウンド結果</h2>
     <div id="resultList" style="margin-bottom:14px"></div>
     <button type="button" class="btn-act play" onclick="sendRoomAction({action:'next_round'})">次のラウンドへ進む</button>
   </div>
@@ -1887,7 +1887,7 @@ html, body {
 <!-- Rules Modal -->
 <div class="modal-overlay" id="rulesModal">
   <div class="modal-box">
-    <h3 style="margin:0 0 12px;color:#fde047">⚙ 大富豪ルール設定</h3>
+    <h3 style="margin:0 0 12px;color:#fde047">大富豪ルール設定</h3>
     <div class="rule-row"><span>革命 (4枚以上同時出し)</span><input type="checkbox" id="ruleRev" checked></div>
     <div class="rule-row"><span>8切り (8で場流し)</span><input type="checkbox" id="rule8Giri" checked></div>
     <div class="rule-row"><span>11バック (Jで一時強さ逆転)</span><input type="checkbox" id="rule11Back" checked></div>
@@ -1979,7 +1979,7 @@ html, body {
 
   window.toggleSound = function() {
     soundEnabled = !soundEnabled;
-    document.getElementById("btnSound").textContent = soundEnabled ? "🔊 音 ON" : "🔇 音 OFF";
+    document.getElementById("btnSound").textContent = soundEnabled ? "音 ON" : "音 OFF";
   };
 
   /* =========================================================================
@@ -2000,7 +2000,7 @@ html, body {
         const statusTxt = rm.isFull
           ? `満席 4/4人 (自動で観戦になります)`
           : `着席 ${rm.humanCount}/4人 (空き席はAIが補完)`;
-        const btnMainTxt = rm.isFull ? "🎥 満席のため観戦で入室" : "🪑 入室して遊ぶ";
+        const btnMainTxt = rm.isFull ? "満席のため観戦で入室" : "入室して遊ぶ";
         card.innerHTML = `
           <div>
             <div class="room-card-title">
@@ -2011,12 +2011,12 @@ html, body {
           </div>
           <div class="room-stats-row">
             <span class="${statusCls}">${statusTxt}</span>
-            <span class="stat-pill spec">👁 観戦 ${rm.spectatorCount}人</span>
+            <span class="stat-pill spec">観戦 ${rm.spectatorCount}人</span>
           </div>
           <div class="room-members">現在の卓: ${rm.seatedNames.join(" / ")}</div>
           <div class="room-actions">
             <button type="button" class="btn-join-room" data-mode="${rm.mode}" data-spec="${rm.isFull ? '1' : '0'}">${btnMainTxt}</button>
-            <button type="button" class="btn-spec-room" data-mode="${rm.mode}" data-spec="1">🎥 観戦</button>
+            <button type="button" class="btn-spec-room" data-mode="${rm.mode}" data-spec="1">観戦</button>
           </div>
         `;
         card.querySelectorAll("button").forEach(btn => {
@@ -2125,7 +2125,7 @@ html, body {
     const div = document.createElement("div");
     div.className = `card-item ${card.isJoker ? "joker" : card.color} ${extraCls}`.trim();
     if (card.isJoker) {
-      div.innerHTML = `<div class="c-top">JOKER</div><div class="c-center">🃏</div><div class="c-bot">★</div>`;
+      div.innerHTML = `<div class="c-top">JOKER</div><div class="c-center">★</div><div class="c-bot">★</div>`;
     } else {
       div.innerHTML = `<div class="c-top">${card.label}</div><div class="c-center">${card.suitSymbol}</div><div class="c-bot">${card.label}</div>`;
     }
@@ -2168,7 +2168,7 @@ html, body {
 
     document.getElementById("headerRoomTitle").textContent = `${state.roomTitle} (第${state.roundNumber}戦)`;
     document.getElementById("headerSeatMeta").textContent = `着席 ${state.humanCount}/4人`;
-    document.getElementById("headerSpecMeta").textContent = `👁 観戦 ${state.spectatorCount}人`;
+    document.getElementById("headerSpecMeta").textContent = `観戦 ${state.spectatorCount}人`;
 
     // Rules / Turn Bar
     const rBar = document.getElementById("tableRulesBar");
@@ -2177,33 +2177,33 @@ html, body {
     const turnPill = document.createElement("span");
     turnPill.className = "status-pill";
     turnPill.textContent = (!state.isSpectator && state.currentTurn === state.mySeat)
-      ? `🎯 あなたの番です (${state.turnRemainingSec}秒)`
-      : `⏳ ${turnSeatObj ? turnSeatObj.name : ""}の番 (${state.turnRemainingSec}秒)`;
+      ? `あなたの番です (${state.turnRemainingSec}秒)`
+      : `${turnSeatObj ? turnSeatObj.name : ""}の番 (${state.turnRemainingSec}秒)`;
     rBar.appendChild(turnPill);
 
     if (state.isSpectator) {
       const sp = document.createElement("span");
       sp.className = "status-pill alert";
-      sp.textContent = "🎥 観戦モード中";
+      sp.textContent = "観戦モード中";
       rBar.appendChild(sp);
     }
     if (state.mode === "daifugo") {
       if (state.isRevolution) {
         const p = document.createElement("span");
         p.className = "status-pill alert";
-        p.textContent = "⚡ 革命中 (3が最強)";
+        p.textContent = "革命中 (3が最強)";
         rBar.appendChild(p);
       }
       if (state.isElevenBack) {
         const p = document.createElement("span");
         p.className = "status-pill alert";
-        p.textContent = "🔄 11バック中";
+        p.textContent = "11バック中";
         rBar.appendChild(p);
       }
       if (state.lockedSuits && state.lockedSuits.length) {
         const p = document.createElement("span");
         p.className = "status-pill alert";
-        p.textContent = `⛓ しばり (${state.lockedSuits.join(",")})`;
+        p.textContent = `しばり (${state.lockedSuits.join(",")})`;
         rBar.appendChild(p);
       }
     }
@@ -2214,12 +2214,12 @@ html, body {
       const box = document.getElementById(`seat-rel-${s.relPos}`);
       if (!box) continue;
       box.classList.toggle("active-turn", Boolean(s.isTurn));
-      document.getElementById(`av-rel-${s.relPos}`).textContent = s.isHuman ? "🧑" : s.avatar;
+      document.getElementById(`av-rel-${s.relPos}`).textContent = s.isHuman ? "P" : s.avatar;
       document.getElementById(`name-rel-${s.relPos}`).textContent = s.name;
       document.getElementById(`rank-rel-${s.relPos}`).textContent = s.rankTitle;
       const cntEl = document.getElementById(`cnt-rel-${s.relPos}`);
       if (s.finishRank > 0) {
-        cntEl.textContent = `🏁 ${s.finishRank}位上がり`;
+        cntEl.textContent = `${s.finishRank}位上がり`;
         cntEl.classList.remove("danger");
       } else {
         cntEl.textContent = `残り ${s.cardCount}枚`;
@@ -2248,7 +2248,7 @@ html, body {
     if (state.mode === "babanuki" && isMyTurn && state.babaTarget) {
       const t = state.babaTarget;
       document.getElementById("babaDrawPrompt").textContent =
-        `🃏 ${t.targetName}の手札 (${t.cardCount}枚) から1枚クリックして引いてください`;
+        `${t.targetName}の手札 (${t.cardCount}枚) から1枚クリックして引いてください`;
       const list = document.getElementById("babaCardsList");
       list.innerHTML = "";
       for (let i = 0; i < t.cardCount; i++) {
@@ -2298,20 +2298,20 @@ html, body {
     const handRow = document.getElementById("myHandRow");
 
     if (state.isSpectator) {
-      statusTxt.textContent = `🎥 観戦中 (${playerName})`;
+      statusTxt.textContent = `観戦中 (${playerName})`;
       btnHint.style.display = "none";
       btnPlay.style.display = "none";
       btnPass.style.display = "none";
       btnShuffle.style.display = "none";
       btnGoSpec.style.display = "none";
       btnTakeSeat.style.display = state.hasOpenBotSeat ? "inline-block" : "none";
-      handRow.innerHTML = `<div style="color:#94a3b8;font-size:13px">現在観戦モードです。${state.hasOpenBotSeat ? "「🪑 空き席に座る」でいつでも参加できます。" : "4席満席のため観戦中です。"}</div>`;
+      handRow.innerHTML = `<div style="color:#94a3b8;font-size:13px">現在観戦モードです。${state.hasOpenBotSeat ? "「空き席に座る」でいつでも参加できます。" : "4席満席のため観戦中です。"}</div>`;
       return;
     }
 
     btnTakeSeat.style.display = "none";
     btnGoSpec.style.display = "inline-block";
-    statusTxt.textContent = `🧑 ${playerName} (${myInfo ? myInfo.rankTitle : "平民"}) ・ 手札 ${state.myHand.length}枚`;
+    statusTxt.textContent = `${playerName} (${myInfo ? myInfo.rankTitle : "平民"}) ・ 手札 ${state.myHand.length}枚`;
 
     if (state.mode === "babanuki") {
       btnHint.style.display = "none";

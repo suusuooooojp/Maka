@@ -20,7 +20,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 SERVICE_NAME = "youtube(beta)"
-SERVICE_ICON = "🎬"
+SERVICE_ICON = ""
 SERVICE_PATH = "/youtube-beta/"
 PROXY_TITLE = "youtube(beta)"
 PROXY_SLUG = "youtube-beta"
@@ -659,10 +659,10 @@ body { top: 0 !important; }
         <button class="sh-icon-btn" id="sh-btn-back" title="戻る" disabled>◀</button>
         <button class="sh-icon-btn" id="sh-btn-fwd" title="進む" disabled>▶</button>
         <button class="sh-icon-btn" id="sh-btn-reload" title="再読み込み">↻</button>
-        <button class="sh-icon-btn" id="sh-btn-home" title="YouTube ホーム">🏠</button>
+        <button class="sh-icon-btn" id="sh-btn-home" title="YouTube ホーム"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4.5v-6h3v6H18a1 1 0 0 0 1-1V9.5"/></svg></button>
       </div>
       <form class="sh-omnibar-form" id="sh-omnibar-form">
-        <span class="sh-lock-badge" id="sh-engine-indicator">🔒 URL秘匿・直結</span>
+        <span class="sh-lock-badge" id="sh-engine-indicator">URL秘匿・直結</span>
         <input
           type="text"
           class="sh-omnibar-input"
@@ -676,15 +676,15 @@ body { top: 0 !important; }
       </form>
       <div class="sh-engine-group">
         <button type="button" class="sh-mode-btn active" id="sh-mode-rewriter" title="FQDNルートドット変換 (https://<host>./) ＋ 公式別ドメイン直結 (Render 0% / 外部鯖 0%)">
-          ⚡ ページ内・完全直結モード
+          ページ内・完全直結モード
         </button>
         <button type="button" class="sh-mode-btn translate-origin-btn" id="sh-mode-translate-origin" title="FQDNルートドット (https://<host>./) でX-Frame-Optionsを回避し対象サーバーへ直接ウィンドウ接続 (Render 0% / 外部鯖 0%)">
-          🚀 FQDNルートドット直結ウィンドウ
+          FQDNルートドット直結ウィンドウ
         </button>
         <button type="button" class="sh-mode-btn" id="sh-mode-blank-cloak" title="アドレスバーを about:blank にしてURL文字列フィルター・拡張機能監視を100%無効化">
-          🕵️ about:blank 秘匿タブ
+          about:blank 秘匿タブ
         </button>
-        <button type="button" class="sh-icon-btn" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()" title="テーマ切替 (ライト/ダーク)" aria-label="テーマ切替">🌓</button>
+        <button type="button" class="sh-icon-btn" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()" title="テーマ切替 (ライト/ダーク)" aria-label="テーマ切替"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg></button>
         <div class="sh-zero-pill" title="Renderサーバー通信: 0% / 外部プロキシサーバー: 0%">
           <span class="sh-zero-dot"></span>
           <span id="sh-telemetry-text">Render 0% | 外部鯖 0% | 完全直結</span>
@@ -693,12 +693,12 @@ body { top: 0 !important; }
     </div>
     <div class="sh-bookmarks" id="sh-bookmarks">
       <span class="sh-bm-label">クイック直接アクセス (外部鯖0%・Render0%):</span>
-      <button type="button" class="sh-bm-item active" data-hex="68747470733a2f2f7777772e796f75747562652e636f6d2f">▶ YouTube (公式直結)</button>
-      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6769746875622e636f6d2f7472656e64696e67">💻 GitHub (Trending直結)</button>
-      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6769746875622e636f6d2f66616365626f6f6b2f7265616374">📦 GitHub (facebook/react)</button>
-      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6a612e77696b6970656469612e6f72672f77696b692f596f7554756265">📚 Wikipedia (日本語直結)</button>
-      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f656e2e77696b6970656469612e6f72672f77696b692f4d696e656372616674">🌍 Wikipedia (English)</button>
-      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6578616d706c652e636f6d2f">🌐 Example.com (FQDN直結)</button>
+      <button type="button" class="sh-bm-item active" data-hex="68747470733a2f2f7777772e796f75747562652e636f6d2f">YouTube (公式直結)</button>
+      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6769746875622e636f6d2f7472656e64696e67">GitHub (Trending直結)</button>
+      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6769746875622e636f6d2f66616365626f6f6b2f7265616374">GitHub (facebook/react)</button>
+      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6a612e77696b6970656469612e6f72672f77696b692f596f7554756265">Wikipedia (日本語直結)</button>
+      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f656e2e77696b6970656469612e6f72672f77696b692f4d696e656372616674">Wikipedia (English)</button>
+      <button type="button" class="sh-bm-item" data-hex="68747470733a2f2f6578616d706c652e636f6d2f">Example.com (FQDN直結)</button>
     </div>
   </header>
 
@@ -719,7 +719,7 @@ body { top: 0 !important; }
         <div class="yt-search-wrap">
           <form class="yt-search-form" id="yt-search-form">
             <input type="text" class="yt-search-input" id="yt-search-input" placeholder="YouTube 検索 または 任意のサイトURLを入力..." autocomplete="off">
-            <button type="submit" class="yt-search-btn" title="検索">🔍</button>
+            <button type="submit" class="yt-search-btn" title="検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7.5"/><path d="m20 20-3.6-3.6"/></svg></button>
           </form>
         </div>
         <div style="font-size:12px;color:var(--md-sys-color-tertiary);font-weight:600;white-space:nowrap">
@@ -728,13 +728,13 @@ body { top: 0 !important; }
       </div>
       <div class="yt-body">
         <aside class="yt-guide" id="yt-guide">
-          <div class="yt-guide-item active" data-q="おすすめ 人気 動画">🏠 ホーム</div>
-          <div class="yt-guide-item" data-q="急上昇 トレンド 日本">🔥 急上昇</div>
-          <div class="yt-guide-item" data-q="#shorts ショート 人気">📱 ショート</div>
-          <div class="yt-guide-item" data-q="音楽 MV 人気 J-POP">🎵 音楽</div>
-          <div class="yt-guide-item" data-q="ゲーム 実況 マイクラ">🎮 ゲーム</div>
-          <div class="yt-guide-item" data-q="ライブ配信 生放送">📡 ライブ</div>
-          <div class="yt-guide-item" data-q="ニュース 最新 日本">📰 ニュース</div>
+          <div class="yt-guide-item active" data-q="おすすめ 人気 動画">ホーム</div>
+          <div class="yt-guide-item" data-q="急上昇 トレンド 日本">急上昇</div>
+          <div class="yt-guide-item" data-q="#shorts ショート 人気">ショート</div>
+          <div class="yt-guide-item" data-q="音楽 MV 人気 J-POP">音楽</div>
+          <div class="yt-guide-item" data-q="ゲーム 実況 マイクラ">ゲーム</div>
+          <div class="yt-guide-item" data-q="ライブ配信 生放送">ライブ</div>
+          <div class="yt-guide-item" data-q="ニュース 最新 日本">ニュース</div>
           <div class="yt-guide-sep"></div>
           <div style="padding:6px 12px;font-size:11px;color:var(--text-secondary);line-height:1.5">
             <b>Pure Direct Engine</b><br>
@@ -1177,7 +1177,7 @@ body { top: 0 !important; }
 
       const fileRowsHtml = (currentEntries || []).slice(0, 120).map((item) => {
         const isDir = item.type === "directory";
-        const icon = isDir ? "📁" : "📄";
+        const icon = isDir ? "[DIR]" : "[FILE]";
         const nextKind = isDir ? "tree" : "blob";
         const nextSub = (subPath && mode === "tree" ? subPath + "/" : "") + item.name;
         const nextUrl = "https://" + GH_DOMAIN + "/" + owner + "/" + repo + "/" + nextKind + "/" + activeBranch + "/" + nextSub;
@@ -1213,23 +1213,23 @@ body { top: 0 !important; }
           .gh-code { padding:20px; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:13.5px; line-height:1.6; white-space:pre-wrap; word-break:break-word; color:#e6edf3; background:#0d1117; overflow-x:auto; }
         </style></he` + `ad><body>
           <div class="gh-header">
-            <div class="gh-brand" data-sh-hex="${homeHex}">🐙 GitHub Direct (raw.githubusercontent.com. 直結)</div>
+            <div class="gh-brand" data-sh-hex="${homeHex}">GitHub Direct (raw.githubusercontent.com. 直結)</div>
             <div style="display:flex;gap:8px;align-items:center">
               <span class="gh-badge">外部サーバー 0% | Render 0%</span>
-              <button class="gh-btn" id="fqdn-win-btn">🚀 FQDNルートドット直結ウィンドウで開く</button>
+              <button class="gh-btn" id="fqdn-win-btn">FQDNルートドット直結ウィンドウで開く</button>
             </div>
           </div>
           <div class="gh-wrap">
             <div class="gh-repo-bar">
               <div>
                 <span class="gh-repo-title" data-sh-hex="${repoRootHex}">${esc(owner)} / ${esc(repo)}</span>
-                <span class="gh-badge" style="margin-left:8px">🌿 ${esc(activeBranch)}</span>
+                <span class="gh-badge" style="margin-left:8px">${esc(activeBranch)}</span>
               </div>
               <button class="gh-btn" style="background:#1f6feb" data-sh-hex="${homeHex}">← Trending リポジトリ一覧へ</button>
             </div>
-            ${fileRowsHtml ? `<div class="gh-card"><div class="gh-card-head"><span>📂 ファイルツリー (${esc(subPath || "/")})</span><span>data.jsdelivr.com. 直結</span></div>${fileRowsHtml}</div>` : ""}
+            ${fileRowsHtml ? `<div class="gh-card"><div class="gh-card-head"><span>ファイルツリー (${esc(subPath || "/")})</span><span>data.jsdelivr.com. 直結</span></div>${fileRowsHtml}</div>` : ""}
             <div class="gh-card">
-              <div class="gh-card-head"><span>📖 ${esc(displayedFileName)}</span><span>raw.githubusercontent.com. 直結</span></div>
+              <div class="gh-card-head"><span>${esc(displayedFileName)}</span><span>raw.githubusercontent.com. 直結</span></div>
               <div class="gh-code">${esc(fileContent || "ファイルを選択するか、右上の「FQDNルートドット直結ウィンドウで開く」をクリックしてください。")}</div>
             </div>
           </div>
@@ -1284,11 +1284,11 @@ body { top: 0 !important; }
     const cardsHtml = repoList.map((item) => {
       const repoUrl = "https://" + GH_DOMAIN + "/" + item.repo;
       return `<div class="gh-repo-card" data-sh-hex="${toHex(repoUrl)}">
-        <div class="gh-repo-name">📦 ${esc(item.repo)}</div>
+        <div class="gh-repo-name">${esc(item.repo)}</div>
         <div class="gh-repo-desc">${esc(item.desc)}</div>
         <div class="gh-repo-meta">
-          <span>💻 ${esc(item.lang)}</span>
-          <span>⭐ ${esc(item.stars)}</span>
+          <span>${esc(item.lang)}</span>
+          <span>Stars: ${esc(item.stars)}</span>
           <span style="color:#3fb950">raw.githubusercontent.com. 直結対応</span>
         </div>
       </div>`;
@@ -1312,15 +1312,15 @@ body { top: 0 !important; }
         .gh-repo-meta { display:flex; gap:14px; font-size:12px; color:#8b949e; }
       </style></he` + `ad><body>
         <div class="gh-header">
-          <div class="gh-brand">🐙 GitHub Direct Explorer</div>
+          <div class="gh-brand">GitHub Direct Explorer</div>
           <form class="gh-search-form" id="gh-s-form">
             <input class="gh-input" id="gh-s-input" value="${esc(searchQ)}" placeholder="オーナー/リポジトリ名 (例: torvalds/linux) または検索キーワード...">
             <button type="submit" class="gh-btn">開く / 検索</button>
           </form>
-          <button type="button" class="gh-btn" style="background:#1f6feb" id="fqdn-win-btn">🚀 FQDN直結ウィンドウで開く</button>
+          <button type="button" class="gh-btn" style="background:#1f6feb" id="fqdn-win-btn">FQDN直結ウィンドウで開く</button>
         </div>
         <div class="gh-wrap">
-          <h2 style="margin:0 0 6px;font-size:20px">${searchQ ? "🔍 検索結果: " + esc(searchQ) : "🔥 Trending & Popular Repositories (直接アクセス)"}</h2>
+          <h2 style="margin:0 0 6px;font-size:20px">${searchQ ? "検索結果: " + esc(searchQ) : "Trending & Popular Repositories (直接アクセス)"}</h2>
           <p style="margin:0;color:#8b949e;font-size:13px">通信URLにブロック文字列を含めず、GitHub公式 <code>raw.githubusercontent.com.</code> からファイルツリー・コード・READMEをブラウザへ直接取得します（外部鯖0%・Render 0%）。</p>
           <div class="gh-grid">${cardsHtml}</div>
         </div>
@@ -1415,8 +1415,8 @@ body { top: 0 !important; }
         img { max-width:100%; height:auto; }
       </style></he` + `ad><body>
         <div class="wiki-bar">
-          <b>📚 ${esc(fqdnHost)} 直結リーダー (外部サーバー 0% / Render 0%)</b>
-          <button id="fqdn-win-btn" style="background:#3366cc;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600">🚀 FQDN直結ウィンドウで開く</button>
+          <b>${esc(fqdnHost)} 直結リーダー (外部サーバー 0% / Render 0%)</b>
+          <button id="fqdn-win-btn" style="background:#3366cc;color:#fff;border:none;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:600">FQDN直結ウィンドウで開く</button>
         </div>
         <div class="wiki-wrap">
           <h1 class="wiki-title">${displayTitle}</h1>
@@ -1923,7 +1923,7 @@ body { top: 0 !important; }
         streamInfo.formats.forEach((fmt) => {
           const b = document.createElement("button");
           b.className = "yt-pill-btn" + (fmt === defaultFmt ? " active" : "");
-          b.textContent = "🎬 " + fmt.label;
+          b.textContent = fmt.label;
           b.onclick = () => {
             selectFormat(fmt);
             qualEl.querySelectorAll(".yt-pill-btn").forEach((el) => el.classList.remove("active"));
@@ -1938,7 +1938,7 @@ body { top: 0 !important; }
       // Open current YouTube watch page inside raw HTML Rewriter if user wants
       const rawBtn = document.createElement("button");
       rawBtn.className = "yt-pill-btn";
-      rawBtn.textContent = "🖥 元HTML直接展開で表示";
+      rawBtn.textContent = "元HTML直接展開で表示";
       rawBtn.onclick = () => openUniversalSite(DEFAULT_YT_HOME + "watch?v=" + encodeURIComponent(videoId), { forceRewriter: true });
       qualEl.appendChild(rawBtn);
 
