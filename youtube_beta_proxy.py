@@ -1657,13 +1657,18 @@ body { top: 0 !important; }
   }
 
   async function resolveDirectYouTubeStreams(videoId) {
-    for (const clientKey of ["ANDROID_VR", "ANDROID", "IOS", "WEB"]) {
+    const runtimeStreamUrl = "/youtube/runtime/stream/" + encodeURIComponent(videoId);
+    let lastDetails = {};
+    for (const clientKey of ["ANDROID_VR", "IOS"]) {
       try {
         const p = await ytInnerTube("player", {
           videoId,
           contentCheckOk: true,
           racyCheckOk: true
         }, clientKey);
+        if (p && p.videoDetails && p.videoDetails.title) {
+          lastDetails = p.videoDetails;
+        }
         const sd = p && p.streamingData;
         if (sd) {
           const formats = [];
@@ -1702,10 +1707,17 @@ body { top: 0 !important; }
             }
           }
           formats.sort((a, b) => (b.height || 0) - (a.height || 0));
+          formats.push({
+            url: runtimeStreamUrl,
+            audioUrl: "",
+            label: "360p (高速ストリーム)",
+            height: 360,
+            hasAudio: true
+          });
           if (formats.length > 0 || sd.hlsManifestUrl) {
             return {
               clientKey,
-              videoDetails: p.videoDetails || {},
+              videoDetails: lastDetails,
               formats,
               hlsManifestUrl: sd.hlsManifestUrl || ""
             };
@@ -1713,7 +1725,20 @@ body { top: 0 !important; }
         }
       } catch (_) {}
     }
-    return null;
+    return {
+      clientKey: "FAST_STREAM",
+      videoDetails: lastDetails,
+      formats: [
+        {
+          url: runtimeStreamUrl,
+          audioUrl: "",
+          label: "360p (高速ストリーム)",
+          height: 360,
+          hasAudio: true
+        }
+      ],
+      hlsManifestUrl: ""
+    };
   }
 
   function extractWatchNextMeta(nextData) {
@@ -1752,7 +1777,7 @@ body { top: 0 !important; }
       <div class="yt-watch">
         <div>
           <div class="yt-player-box" id="movie_player">
-            <video id="yt-direct-video" controls autoplay playsinline referrerpolicy="no-referrer"></video>
+            <video id="yt-direct-video" controls autoplay playsinline preload="auto" referrerpolicy="no-referrer"></video>
             <audio id="yt-direct-audio" referrerpolicy="no-referrer" style="display:none"></audio>
             <iframe id="yt-embed-fallback" style="display:none;width:100%;height:100%;border:0" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin"></iframe>
           </div>

@@ -45,25 +45,19 @@ PROBE_CLIENT = httpx.AsyncClient(
 )
 
 PIPED_APIS = [
-    # Keep several current public instances. The official docs explicitly
-    # recommend using the public-instance list rather than assuming one host
-    # remains healthy forever.
+    "https://api.piped.private.coffee",
+    "https://pipedapi.ducks.party",
     "https://pipedapi.kavin.rocks",
     "https://pipedapi.leptons.xyz",
-    "https://pipedapi.syncpundit.io",
-    "https://api-piped.mha.fi",
-    "https://piped-api.garudalinux.org",
-    "https://piped-api.privacy.com.de",
-    "https://pipedapi.adminforge.de",
     "https://api.piped.yt",
 ]
 
 INVIDIOUS_APIS = [
+    "https://invid-api.poketube.fun/companion",
     "https://inv.tux.pizza",
     "https://invidious.nerdvpn.de",
     "https://yewtu.be",
     "https://iv.ggtyler.dev",
-    "https://vid.puffyan.us",
 ]
 
 _MEM_CACHE: dict[str, tuple[any, float]] = {}
@@ -134,6 +128,19 @@ def format_views(val: int | float | str) -> str:
 
 async def verify_stream_url(url: str) -> bool:
     try:
+        r_hop = await PROBE_CLIENT.get(
+            url,
+            headers={"User-Agent": USER_AGENT, "Referer": "https://www.youtube.com/"},
+            follow_redirects=False,
+            timeout=3.5,
+        )
+        if r_hop.status_code in {301, 302, 303, 307, 308}:
+            loc = r_hop.headers.get("location") or ""
+            if "videoplayback" in loc or "googlevideo" in loc:
+                return True
+    except Exception:
+        pass
+    try:
         headers = {"Range": "bytes=0-1023", "User-Agent": USER_AGENT, "Referer": "https://www.youtube.com/"}
         req = PROBE_CLIENT.build_request("GET", url, headers=headers)
         resp = await PROBE_CLIENT.send(req)
@@ -150,6 +157,7 @@ async def verify_stream_url(url: str) -> bool:
 class StreamManager:
     def __init__(self):
         self._lock = asyncio.Lock()
+        self._inflight: dict[str, asyncio.Future] = {}
 
     async def _resolve_piped(self, video_id: str) -> tuple[str, str] | None:
         async def check(base: str):
@@ -169,14 +177,30 @@ class StreamManager:
         for fut in asyncio.as_completed(tasks):
             res = await fut
             if res:
-                for t in tasks: t.cancel()
+                for t in tasks:
+                    t.cancel()
                 return res
         return None
 
     async def _resolve_invidious(self, video_id: str) -> tuple[str, str] | None:
         async def check(base: str):
-            for itag, q in ((22, "720p"), (18, "360p")):
+            itags = ((18, "360p"),) if "poketube.fun" in base else ((22, "720p"), (18, "360p"))
+            for itag, q in itags:
                 url = f"{base}/latest_version?id={video_id}&itag={itag}&local=true"
+                try:
+                    r_hop = await PROBE_CLIENT.get(
+                        url,
+                        headers={"User-Agent": USER_AGENT, "Referer": "https://www.youtube.com/"},
+                        follow_redirects=False,
+                        timeout=5.5,
+                    )
+                    if r_hop.status_code in {301, 302, 303, 307, 308}:
+                        loc = r_hop.headers.get("location") or ""
+                        if "videoplayback" in loc or "googlevideo" in loc:
+                            from urllib.parse import urljoin
+                            return urljoin(str(r_hop.url), loc), q
+                except Exception:
+                    pass
                 if await verify_stream_url(url):
                     return url, q
             return None
@@ -185,7 +209,8 @@ class StreamManager:
         for fut in asyncio.as_completed(tasks):
             res = await fut
             if res:
-                for t in tasks: t.cancel()
+                for t in tasks:
+                    t.cancel()
                 return res
         return None
 
@@ -224,33 +249,50 @@ class StreamManager:
             cached = cache_get(cache_key)
             if cached:
                 return cached
+            if video_id in self._inflight:
+                try:
+                    return await asyncio.shield(self._inflight[video_id])
+                except Exception:
+                    pass
 
-        async with self._lock:
-            if not force_refresh:
-                cached = cache_get(cache_key)
-                if cached:
-                    return cached
-
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        self._inflight[video_id] = fut
+        try:
             tasks = [
-                asyncio.create_task(self._resolve_piped(video_id)),
                 asyncio.create_task(self._resolve_invidious(video_id)),
+                asyncio.create_task(self._resolve_piped(video_id)),
             ]
-            for fut in asyncio.as_completed(tasks):
-                res = await fut
+            for done_fut in asyncio.as_completed(tasks):
+                res = await done_fut
                 if res:
                     for t in tasks:
                         if not t.done():
                             t.cancel()
                     url, q = res
-                    cache_set(cache_key, (url, "API", q), ttl=1800.0)
-                    return url, "API", q
+                    val = (url, "API", q)
+                    cache_set(cache_key, val, ttl=1800.0)
+                    if not fut.done():
+                        fut.set_result(val)
+                    return val
 
             res = await self._resolve_ytdlp(video_id)
             if res:
                 url, q = res
-                cache_set(cache_key, (url, "yt-dlp", q), ttl=1800.0)
-                return url, "yt-dlp", q
-        return None
+                val = (url, "yt-dlp", q)
+                cache_set(cache_key, val, ttl=1800.0)
+                if not fut.done():
+                    fut.set_result(val)
+                return val
+            if not fut.done():
+                fut.set_result(None)
+            return None
+        except Exception:
+            if not fut.done():
+                fut.set_result(None)
+            return None
+        finally:
+            self._inflight.pop(video_id, None)
 
     async def resolve(self, video_id: str) -> dict:
         stream_data = await self.get_stream(video_id, force_refresh=False)
@@ -275,6 +317,8 @@ class StreamManager:
         req_headers = {"User-Agent": USER_AGENT, "Referer": "https://www.youtube.com/", "Accept": "*/*"}
         if client_range:
             req_headers["Range"] = client_range
+        elif request.method == "GET":
+            req_headers["Range"] = "bytes=0-"
 
         resp = None
         try:
@@ -307,9 +351,6 @@ class StreamManager:
         }
         if "content-range" in resp.headers:
             res_headers["Content-Range"] = resp.headers["content-range"]
-        # GETのContent-Lengthは上流Range/圧縮/再試行時に実体と不一致になることがある。
-        # ここで固定すると h11 の "Too much data for declared Content-Length" を起こすため、
-        # GETではchunked transferに任せる。HEADだけは上流値を返す。
 
         if request.method == "HEAD":
             if "content-length" in resp.headers:
@@ -319,7 +360,7 @@ class StreamManager:
 
         async def chunk_generator():
             try:
-                async for chunk in resp.aiter_raw(64 * 1024):
+                async for chunk in resp.aiter_raw(256 * 1024):
                     if chunk:
                         yield chunk
             except (asyncio.CancelledError, Exception):
