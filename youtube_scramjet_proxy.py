@@ -146,7 +146,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261108-v33"
+RUNTIME_REV = "20261109-v34"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -580,6 +580,26 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     if old_msg_null in text:
         text = text.replace(old_msg_null, new_msg_null, 1)
 
+    old_evt_listener = (
+        'e.Proxy("EventTarget.prototype.addEventListener",{apply(t){if("function"!=typeof t.args[1])return;let r=t.args[1],i=a(r);t.args[1]=i;let n=e.eventcallbacks.get(t.this);(n||=[]).push({event:t.args[0],originalCallback:r,proxiedCallback:i}),e.eventcallbacks.set(t.this,n)}}),'
+        'e.Proxy("EventTarget.prototype.removeEventListener",{apply(t){if("function"!=typeof t.args[1])return;let r=e.eventcallbacks.get(t.this);if(!r)return;let i=r.findIndex(e=>e.event===t.args[0]&&e.originalCallback===t.args[1]);if(-1===i)return;let n=r.splice(i,1);e.eventcallbacks.set(t.this,r),t.args[1]=n[0].proxiedCallback}})'
+    )
+    new_evt_listener = (
+        'e.Proxy("EventTarget.prototype.addEventListener",{apply(t){let r=t.args[1];if("function"!=typeof r&&!("object"==typeof r&&null!==r&&"function"==typeof r.handleEvent))return;let i="function"==typeof r?a(r):a(function(...o){return r.handleEvent.apply(r,o)});t.args[1]=i;let n=e.eventcallbacks.get(t.this);(n||=[]).push({event:t.args[0],originalCallback:r,proxiedCallback:i}),e.eventcallbacks.set(t.this,n)}}),'
+        'e.Proxy("EventTarget.prototype.removeEventListener",{apply(t){let o=t.args[1];if("function"!=typeof o&&!("object"==typeof o&&null!==o&&"function"==typeof o.handleEvent))return;let r=e.eventcallbacks.get(t.this);if(!r)return;let i=r.findIndex(e=>e.event===t.args[0]&&e.originalCallback===o);if(-1===i)return;let n=r.splice(i,1);e.eventcallbacks.set(t.this,r),t.args[1]=n[0].proxiedCallback}})'
+    )
+    if old_evt_listener in text:
+        text = text.replace(old_evt_listener, new_evt_listener, 1)
+
+    old_win_pm = (
+        'i.iswindow&&e.Proxy("window.postMessage",{apply(e){let{constructor:{constructor:t}}="object"==typeof e.args[0]&&null!==e.args[0]?e.args[0]:"object"==typeof e.args[2]&&null!==e.args[2]?e.args[2]:e.this&&o.POLLUTANT in e.this&&"object"==typeof e.this[o.POLLUTANT]&&null!==e.this[o.POLLUTANT]?e.this[o.POLLUTANT]:{},r=t("return globalThis")()[n.p],i=t("...args","this(...args)"),s="about:srcdoc"===r.url.href||"about:blank"===r.url.href;e.args[0]={$scramjet$messagetype:"window",$scramjet$origin:s?r.global.parent[n.p].url.origin:r.url.origin,$scramjet$data:e.args[0]},"string"==typeof e.args[1]&&(e.args[1]="*"),"object"==typeof e.args[1]&&(e.args[1].targetOrigin="*"),e.return(i.call(e.fn,...e.args))}})'
+    )
+    new_win_pm = (
+        'i.iswindow&&e.Proxy("window.postMessage",{apply(c){let r=null;try{let{constructor:{constructor:f}}="object"==typeof c.args[0]&&null!==c.args[0]?c.args[0]:"object"==typeof c.args[2]&&null!==c.args[2]?c.args[2]:c.this&&o.POLLUTANT in c.this&&"object"==typeof c.this[o.POLLUTANT]&&null!==c.this[o.POLLUTANT]?c.this[o.POLLUTANT]:{};r=f("return globalThis")()?.[n.p]}catch(_){}r||(r=c.this?.[n.p]||t?.[n.p]||e);let u=r?.url?.href||"",s="about:srcdoc"===u||"about:blank"===u,g=(s?r?.global?.parent?.[n.p]?.url?.origin:r?.url?.origin)||e?.url?.origin||"";c.args[0]={$scramjet$messagetype:"window",$scramjet$origin:g,$scramjet$data:c.args[0]},"string"==typeof c.args[1]&&(c.args[1]="*"),"object"==typeof c.args[1]&&null!==c.args[1]&&(c.args[1].targetOrigin="*"),c.return(c.fn.apply(c.this||t,c.args))}})'
+    )
+    if old_win_pm in text:
+        text = text.replace(old_win_pm, new_win_pm, 1)
+
     old_smap = "let e=globalThis[r.config.globals.pushsourcemapfn];"
     new_smap = "let e=(n?.base?.defaultView||globalThis)[r.config.globals.pushsourcemapfn]||globalThis[r.config.globals.pushsourcemapfn];"
     if old_smap in text:
@@ -737,7 +757,7 @@ async def youtube_controller_inject():
 async def _youtube_sw_override(request: Request) -> Response:
     code = f"""
 importScripts('/youtube/runtime/controller.sw.js?v={RUNTIME_REV}');
-const YT_MEDIA_CACHE = 'sh-yt-media-v1';
+const YT_MEDIA_CACHE = 'sh-yt-media-{RUNTIME_REV}';
 const YT_IMAGE_SUFFIXES = [
   'i.ytimg.com','s.ytimg.com','img.youtube.com','ytimg.com',
   'yt3.ggpht.com','yt4.ggpht.com','ggpht.com',
@@ -3891,7 +3911,6 @@ async def youtube_http_relay(request: Request):
         is_yt_host
         and not cacheable
         and not has_user_auth_cookie
-        and "VISITOR_INFO1_LIVE=" not in existing_cookie_str
         and "__Secure-YNID=" not in existing_cookie_str
     ):
         anon_hdr = await _get_anon_visitor_cookie_header()
@@ -3916,6 +3935,9 @@ async def youtube_http_relay(request: Request):
 
     # Start stream resolution, moov head pre-warming, watch_next fetch, or home feed fetch in parallel with upstream request
     req_vid = _extract_request_video_id(parsed, req_body) if is_yt_host else ""
+    if is_yt_host and method == "GET" and parsed.path in ("", "/") and "sh_watch=" in (parsed.query or "") and req_vid:
+        url = f"https://www.youtube.com/watch?v={req_vid}"
+        parsed = urlparse(url)
     if req_vid:
         _PREWARM_REQUESTED_VIDS.add(req_vid)
         _ensure_stream_head_prewarm(
@@ -4065,6 +4087,29 @@ async def youtube_http_relay(request: Request):
             status_text = str(upstream.reason_phrase or "OK")
             resp_body = bytes(upstream.content or b"")
             raw_multi = list(upstream.headers.multi_items())
+            if (
+                is_yt_host
+                and not has_user_auth_cookie
+                and status in (302, 303)
+                and any(
+                    k.lower() == "location" and "/sorry/" in v
+                    for k, v in raw_multi
+                )
+            ):
+                anon_hdr = await _get_anon_visitor_cookie_header(force_refresh=True)
+                if anon_hdr:
+                    header_dict["Cookie"] = f"{anon_hdr}; PREF=f6=400&hl=ja&gl=JP"
+                    upstream = await client.request(
+                        method=method,
+                        url=url,
+                        headers=header_dict,
+                        content=req_body if req_body else None,
+                        follow_redirects=False,
+                    )
+                    status = int(upstream.status_code)
+                    status_text = str(upstream.reason_phrase or "OK")
+                    resp_body = bytes(upstream.content or b"")
+                    raw_multi = list(upstream.headers.multi_items())
     except Exception as exc:
         for t in (stream_task, home_task, next_task):
             if t and not t.done():
@@ -4604,8 +4649,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   const WISP_PATH = "/wisp-youtube/";
   const RELAY_ENDPOINT = "/youtube/runtime/http-relay";
   const IMAGE_RELAY_ENDPOINT = "/youtube/runtime/image-relay";
-  const STATIC_CACHE_NAME = "sh-yt-static-v1";
-  const MEDIA_CACHE_NAME = "sh-yt-media-v1";
+  const STATIC_CACHE_NAME = "sh-yt-static-{RUNTIME_REV}";
+  const MEDIA_CACHE_NAME = "sh-yt-media-{RUNTIME_REV}";
   const YOUTUBE_HOSTS = new Set(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","youtu.be"]);
   const AUTH_HOSTS = new Set(["accounts.google.com","accounts.youtube.com"]);
   const YT_IMAGE_SUFFIXES = [
@@ -5538,39 +5583,47 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         doc.addEventListener("pointerdown", onPrewarmTrigger, {{ passive: true, capture: true }});
         doc.addEventListener("touchstart", onPrewarmTrigger, {{ passive: true, capture: true }});
 
-        const onWatchClick = (ev) => {{
+    const onWatchClick = (ev) => {{
           try {{
             if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
             const t = ev.target;
             if (!t || typeof t.closest !== "function") return;
-            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[scramjet-attr-href*='watch?v=']");
+            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[scramjet-attr-href*='watch?v='], a[href*='/shorts/'], a[scramjet-attr-href*='/shorts/']");
             if (!a) return;
             const h = rawGetAttr.call(a, "scramjet-attr-href") || rawGetAttr.call(a, "href") || a.href || "";
-            const m = h.match(/(?:[?&]|%3F|%26)v(?:=|%3D)([A-Za-z0-9_-]{{11}})/);
-            if (!m) return;
-            const vid = m[1];
-            const ytdApp = doc.querySelector("ytd-app");
-            if (ytdApp) {{
-              ev.preventDefault();
-              ev.stopPropagation();
-              lastShWatchTriggered = vid;
-              lastShWatchTime = Date.now();
-              const targetWatchUrl = "https://www.youtube.com/watch?v=" + vid;
-              observeUrl(targetWatchUrl);
-              ytdApp.dispatchEvent(new CustomEvent("yt-navigate", {{
-                bubbles: true,
-                composed: true,
-                detail: {{
-                  endpoint: {{
-                    commandMetadata: {{ webCommandMetadata: {{ url: "/watch?v=" + vid, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 }} }},
-                    watchEndpoint: {{ videoId: vid }}
-                  }}
-                }}
-              }}));
+            const mWatch = h.match(/(?:[?&]|%3F|%26)v(?:=|%3D)([A-Za-z0-9_-]{{11}})/);
+            const mShorts = !mWatch ? h.match(/\\/shorts\\/([A-Za-z0-9_-]{{11}})/) : null;
+            if (!mWatch && !mShorts) return;
+            const vid = (mWatch || mShorts)[1];
+            const targetWatchUrl = mShorts
+              ? ("https://www.youtube.com/shorts/" + vid)
+              : ("https://www.youtube.com/watch?v=" + vid);
+            if (!prewarmedVids.has(vid)) {{
+              prewarmedVids.add(vid);
+              fetch(location.origin + "/youtube/runtime/stream/" + vid + "?prewarm=1", {{
+                method: "HEAD",
+                credentials: "omit",
+                priority: "low"
+              }}).catch(() => {{}});
             }}
+            lastShWatchTriggered = vid;
+            lastShWatchTime = Date.now();
+            setTimeout(() => {{
+              try {{
+                const cur = readFrameTarget() || "";
+                const curVid = extractVideoId(cur);
+                const flexy = frameEl.contentDocument?.querySelector("ytd-watch-flexy");
+                const flexyVid = flexy ? (rawGetAttr.call(flexy, "video-id") || "") : "";
+                if (curVid !== vid && flexyVid !== vid) {{
+                  navigate(targetWatchUrl, "watch-click");
+                }} else {{
+                  observeUrl(targetWatchUrl);
+                }}
+              }} catch (_) {{}}
+            }}, 350);
           }} catch (_) {{}}
         }};
-        doc.addEventListener("click", onWatchClick, true);
+        doc.addEventListener("click", onWatchClick, {{ passive: true, capture: true }});
       }}
 
       // Populate missing sidebar related video thumbnails (yt-lockup-view-model / ytd-compact-video-renderer)
@@ -5634,23 +5687,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         const shWatch = uCur.searchParams.get("sh_watch") || "";
         if (/^[A-Za-z0-9_-]{{11}}$/.test(shWatch)) {{
           shWatchParam = shWatch;
-          const ytdApp = doc.querySelector("ytd-app");
           const flexy = doc.querySelector("ytd-watch-flexy");
           const flexyVid = flexy ? (rawGetAttr.call(flexy, "video-id") || "") : "";
           const nowSh = Date.now();
-          if (ytdApp && flexyVid !== shWatch && (lastShWatchTriggered !== shWatch || (nowSh - lastShWatchTime) > 1500)) {{
+          if (flexyVid !== shWatch && (lastShWatchTriggered !== shWatch || (nowSh - lastShWatchTime) > 2500)) {{
             lastShWatchTriggered = shWatch;
             lastShWatchTime = nowSh;
-            ytdApp.dispatchEvent(new CustomEvent("yt-navigate", {{
-              bubbles: true,
-              composed: true,
-              detail: {{
-                endpoint: {{
-                  commandMetadata: {{ webCommandMetadata: {{ url: "/watch?v=" + shWatch, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 }} }},
-                  watchEndpoint: {{ videoId: shWatch }}
-                }}
-              }}
-            }}));
+            navigate("https://www.youtube.com/watch?v=" + shWatch, "sh-watch");
+            return;
           }}
         }}
       }} catch (_) {{}}

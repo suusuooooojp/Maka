@@ -1,3 +1,5 @@
+import mimetypes
+import os
 import re
 import urllib.parse
 from typing import Optional
@@ -188,12 +190,28 @@ html,body{margin:0;height:100%;background:#0f172a;color:#e2e8f0;font-family:syst
 
 
 _INTERSTELLAR_HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+_GAME_ASSET_CACHE: dict[str, tuple[bytes, str]] = {}
+_GAME_ASSET_MIRRORS = (
+    "https://raw.githubusercontent.com/OutRed/outred-assets-cdn.outred.org/main/",
+    "https://raw.githubusercontent.com/selenite-cc/selenite-old/main/",
+    "https://raw.githubusercontent.com/3v1/V5-Assets/main/",
+)
 
 
 def _get_is_http_client() -> httpx.AsyncClient:
     global _INTERSTELLAR_HTTP_CLIENT
     if _INTERSTELLAR_HTTP_CLIENT is None or _INTERSTELLAR_HTTP_CLIENT.is_closed:
+        has_proxy = bool(
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("ALL_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("http_proxy")
+            or os.environ.get("all_proxy")
+        )
+        transport = None if has_proxy else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=2)
         _INTERSTELLAR_HTTP_CLIENT = httpx.AsyncClient(
+            transport=transport,
             follow_redirects=True,
             verify=False,
             timeout=httpx.Timeout(20.0, connect=8.0),
@@ -219,23 +237,101 @@ def encode_xor(url: str) -> str:
         return urllib.parse.quote(url, safe="")
 
 
+def _normalize_target_scheme(candidate: str) -> str:
+    s = (candidate or "").strip()
+    if s.startswith("https:/") and not s.startswith("https://"):
+        s = "https://" + s[len("https:/"):].lstrip("/")
+    elif s.startswith("http:/") and not s.startswith("http://"):
+        s = "http://" + s[len("http:/"):].lstrip("/")
+    return s
+
+
+def _unquote_multi(val: str, rounds: int = 3) -> str:
+    cur = val or ""
+    for _ in range(rounds):
+        nxt = urllib.parse.unquote(cur)
+        if nxt == cur:
+            break
+        cur = nxt
+    return _normalize_target_scheme(cur)
+
+
 def _decode_interstellar_target(raw_path: str) -> str:
     path_clean = raw_path.lstrip("/")
     if path_clean.startswith("interstellar/"):
         path_clean = path_clean[len("interstellar/"):]
     if path_clean.startswith("a/sj/"):
-        return urllib.parse.unquote(path_clean[len("a/sj/"):])
+        tail = path_clean[len("a/sj/"):]
+        unq = _unquote_multi(tail)
+        if unq.startswith(("http://", "https://")):
+            return unq
+        dec = _normalize_target_scheme(decode_xor(tail))
+        if dec.startswith(("http://", "https://")):
+            return dec
+        return unq
     if path_clean.startswith("a/q/"):
-        raw_tail = urllib.parse.unquote(path_clean[len("a/q/"):])
-        if raw_tail.startswith(("http://", "https://")):
-            return raw_tail
-        return decode_xor(path_clean[len("a/q/"):])
+        tail = path_clean[len("a/q/"):]
+        unq = _unquote_multi(tail)
+        if unq.startswith(("http://", "https://")):
+            return unq
+        return _normalize_target_scheme(decode_xor(tail))
     if path_clean.startswith("a/"):
-        raw_tail = urllib.parse.unquote(path_clean[len("a/"):])
-        if raw_tail.startswith(("http://", "https://")):
-            return raw_tail
-        return decode_xor(path_clean[len("a/"):])
+        tail = path_clean[len("a/"):]
+        unq = _unquote_multi(tail)
+        if unq.startswith(("http://", "https://")):
+            return unq
+        return _normalize_target_scheme(decode_xor(tail))
     return ""
+
+
+async def _serve_interstellar_game_asset(request: Request, clean_path: str) -> Optional[Response]:
+    m = re.match(r"^e/(?:\d+/)?(.+)$", clean_path.strip("/"))
+    if not m:
+        return None
+    subpath = m.group(1).lstrip("/")
+    if not subpath or ".." in subpath:
+        return None
+    if subpath.endswith("/"):
+        subpath = subpath + "index.html"
+
+    guessed_ct, _ = mimetypes.guess_type(subpath)
+    default_ct = guessed_ct or ("text/html; charset=utf-8" if subpath.endswith(".html") else "application/octet-stream")
+
+    cached = _GAME_ASSET_CACHE.get(subpath)
+    if cached is not None:
+        body_bytes, media_type = cached
+        return Response(
+            content=b"" if request.method == "HEAD" else body_bytes,
+            status_code=200,
+            media_type=media_type,
+            headers={"Cache-Control": "public, max-age=3600", "Access-Control-Allow-Origin": "*"},
+        )
+
+    client = _get_is_http_client()
+    candidate_urls = [mirror + subpath for mirror in _GAME_ASSET_MIRRORS]
+    if subpath.startswith("2048/"):
+        candidate_urls.append("https://raw.githubusercontent.com/gabrielecirulli/2048/master/" + subpath[len("2048/"):])
+
+    for url in candidate_urls:
+        try:
+            resp = await client.get(url, timeout=8.0)
+            if resp.status_code == 200 and resp.content:
+                upstream_ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if not upstream_ct or upstream_ct == "text/plain":
+                    media_type = default_ct
+                else:
+                    media_type = upstream_ct
+                if len(_GAME_ASSET_CACHE) < 256 and len(resp.content) <= 4 * 1024 * 1024:
+                    _GAME_ASSET_CACHE[subpath] = (resp.content, media_type)
+                return Response(
+                    content=b"" if request.method == "HEAD" else resp.content,
+                    status_code=200,
+                    media_type=media_type,
+                    headers={"Cache-Control": "public, max-age=3600", "Access-Control-Allow-Origin": "*"},
+                )
+        except Exception:
+            continue
+    return None
 
 
 _IS_ATTR_RE = re.compile(
@@ -454,6 +550,17 @@ async def handle_interstellar_fallback_proxy(request: Request, target_url: str) 
     )
 
 
+def _coerce_input_to_url(raw_input: str) -> str:
+    val = (raw_input or "").strip()
+    if not val:
+        return ""
+    if val.startswith(("http://", "https://")):
+        return val
+    if "." in val and " " not in val:
+        return "https://" + val.lstrip("/")
+    return f"https://search.yahoo.co.jp/search?p={urllib.parse.quote(val)}"
+
+
 async def _interstellar_proxy_http(request: Request, path: str):
     if path == "__loading":
         return await _interstellar.loading_status()
@@ -463,13 +570,37 @@ async def _interstellar_proxy_http(request: Request, path: str):
         return await _interstellar.logs()
     if path == "__retry" and request.method == "POST":
         return await _interstellar.retry()
-    clean = path.strip("/").lower()
+    clean_raw = path.strip("/")
+    if clean_raw.lower().startswith("interstellar/"):
+        clean_raw = clean_raw[len("interstellar/"):].strip("/")
+    clean = clean_raw.lower()
     if clean in _COMPAT_MAP and request.method in {"GET", "HEAD"}:
         return await _COMPAT_MAP[clean](request)
-    if clean in {"rx", "interstellar/rx"} and request.method == "GET":
+    if clean in {"rx", "interstellar/rx"}:
         return RedirectResponse(url="/interstellar/d", status_code=307)
+    if clean in {"", "a", "b", "c", "d", "play.html"}:
+        path = clean
+        if request.method == "POST":
+            try:
+                raw_body = (await request.body()).decode("utf-8", "ignore")
+                parsed_form = urllib.parse.parse_qs(raw_body)
+                for key in ("q", "url", "input", "search", "query"):
+                    if key in parsed_form and parsed_form[key][0].strip():
+                        target = _coerce_input_to_url(parsed_form[key][0])
+                        if target:
+                            return RedirectResponse(
+                                url=f"/interstellar/a/sj/{urllib.parse.quote(target, safe='')}",
+                                status_code=303,
+                            )
+            except Exception:
+                pass
+            request.scope["method"] = "GET"
+    if clean.startswith("e/") and request.method in {"GET", "HEAD"}:
+        game_resp = await _serve_interstellar_game_asset(request, clean_raw)
+        if game_resp is not None:
+            return game_resp
     if clean.startswith("a/") and clean not in {"a", "a/"}:
-        target_url = _decode_interstellar_target(path)
+        target_url = _decode_interstellar_target(clean_raw)
         if target_url and target_url.startswith(("http://", "https://")):
             return await handle_interstellar_fallback_proxy(request, target_url)
         if request.method == "GET":
@@ -484,6 +615,10 @@ async def _interstellar_proxy_http(request: Request, path: str):
                 },
             )
     response = await _native_proxy_http(request, path)
+    if response.status_code == 404 and request.method in {"GET", "HEAD"}:
+        accept = (request.headers.get("accept") or "").lower()
+        if "text/html" in accept and not clean.startswith(("assets/", "ca/", "ep/", "bm/")):
+            return RedirectResponse(url="/interstellar/", status_code=307)
     if clean == "ca" or clean.startswith("ca/"):
         response.headers["Cache-Control"] = "no-transform, no-store"
         return response

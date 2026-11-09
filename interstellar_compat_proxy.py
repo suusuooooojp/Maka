@@ -172,11 +172,45 @@ self.addEventListener("activate", event => {
 });
 
 self.addEventListener("fetch", event => {
+  let u;
+  try {
+    u = new URL(event.request.url);
+  } catch (e) {
+    return;
+  }
+  if (u.origin === location.origin) {
+    const p = u.pathname || "";
+    if (
+      p === "/interstellar" ||
+      p === "/interstellar/" ||
+      p === "/interstellar/a" ||
+      p === "/interstellar/a/" ||
+      p === "/interstellar/b" ||
+      p === "/interstellar/b/" ||
+      p === "/interstellar/c" ||
+      p === "/interstellar/c/" ||
+      p === "/interstellar/d" ||
+      p === "/interstellar/d/" ||
+      p === "/a" ||
+      p === "/a/" ||
+      p.startsWith("/interstellar/e/") ||
+      p.startsWith("/e/") ||
+      p.startsWith("/interstellar/assets/") ||
+      p.startsWith("/assets/") ||
+      p.startsWith("/interstellar/bm/") ||
+      p.startsWith("/interstellar/ep/") ||
+      p.startsWith("/interstellar/ca/")
+    ) {
+      return;
+    }
+  }
+
   event.respondWith(
     (async () => {
       try {
-        if (!sj.config) {
+        if (!sj.config || typeof sj.config.codec?.encode !== "function") {
           await _idbReadyPromise;
+          sj.config = null;
           await sj.loadConfig();
         }
         if (sj.config && sj.config.prefix === "/a/sj/") {
@@ -186,19 +220,51 @@ self.addEventListener("fetch", event => {
         console.warn("Scramjet loadConfig warning:", err);
       }
 
-      if (sj.config && (await sj.route(event))) {
-        return await sj.fetch(event);
+      if (sj.config && typeof sj.config.codec?.encode === "function") {
+        try {
+          if (await sj.route(event)) {
+            const resp = await Promise.race([
+              sj.fetch(event),
+              new Promise((_, rej) => setTimeout(() => rej(new Error("sj timeout")), 4500)),
+            ]);
+            if (resp && resp.status < 400) {
+              return resp;
+            }
+          }
+        } catch (err) {}
       }
 
-      if (await dynamic.route(event)) {
-        return await dynamic.fetch(event);
-      }
+      try {
+        if (await dynamic.route(event)) {
+          const resp = await Promise.race([
+            dynamic.fetch(event),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("dy timeout")), 4500)),
+          ]);
+          if (resp && resp.status < 400) {
+            return resp;
+          }
+        }
+      } catch (err) {}
 
+      const p = u.pathname || "";
       if (
-        event.request.url.startsWith(`${location.origin}/interstellar/a/`) ||
-        event.request.url.startsWith(`${location.origin}/a/`)
+        (p.startsWith("/interstellar/a/") || p.startsWith("/a/")) &&
+        !p.startsWith("/interstellar/a/sj/") &&
+        !p.startsWith("/a/sj/") &&
+        !p.startsWith("/interstellar/a/q/") &&
+        !p.startsWith("/a/q/") &&
+        !p.startsWith("/interstellar/a/http") &&
+        !p.startsWith("/a/http")
       ) {
-        return await uv.fetch(event);
+        try {
+          const resp = await Promise.race([
+            uv.fetch(event),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("uv timeout")), 4500)),
+          ]);
+          if (resp && resp.status < 400) {
+            return resp;
+          }
+        } catch (err) {}
       }
 
       return await fetch(event.request);
@@ -1157,22 +1223,22 @@ async def _c1(request: Request):
     text = source.read_text(encoding="utf-8", errors="replace")
     text = text.replace(
         'const g = window.location.pathname === "/a";',
-        'const g = window.location.pathname === "/a" || window.location.pathname.endsWith("/interstellar/a");',
+        'const _p = window.location.pathname.replace(/\\/+$/, ""); const g = _p === "/a" || _p.endsWith("/interstellar/a") || _p.endsWith("/play.html");',
     )
     text = text.replace(
         'const a = window.location.pathname === "/b";',
-        'const a = window.location.pathname === "/b" || window.location.pathname.endsWith("/interstellar/b");',
+        'const a = _p === "/b" || _p.endsWith("/interstellar/b");',
     )
     text = text.replace(
         'const c = window.location.pathname === "/gt";',
-        'const c = window.location.pathname === "/gt" || window.location.pathname.endsWith("/interstellar/gt");',
+        'const c = _p === "/gt" || _p.endsWith("/interstellar/gt");',
     )
     text = re.sub(
         r"let\s+t\s*;\s*try\s*\{.*?\}\s*catch\s*\{\s*(?:try\s*\{.*?\}\s*catch\s*\{.*?\}\s*|[^}]*)\}",
         (
             "let t = false;\n"
-            "try { if (window.parent && window.parent !== window && (window.parent.location.pathname === '/d' || window.parent.location.pathname === '/interstellar/d')) t = true; } catch {}\n"
-            "try { if (!t && window.top && window.top !== window && (window.top.location.pathname === '/d' || window.top.location.pathname === '/interstellar/d')) t = true; } catch {}"
+            "try { if (window.parent && window.parent !== window && (window.parent.location.pathname.replace(/\\/+$/, '') === '/d' || window.parent.location.pathname.replace(/\\/+$/, '') === '/interstellar/d')) t = true; } catch {}\n"
+            "try { if (!t && window.top && window.top !== window && (window.top.location.pathname.replace(/\\/+$/, '') === '/d' || window.top.location.pathname.replace(/\\/+$/, '') === '/interstellar/d')) t = true; } catch {}"
         ),
         text,
         count=1,
@@ -1181,6 +1247,10 @@ async def _c1(request: Request):
     text = text.replace(
         'saveToLocal(Selected);\n    window.location.href = "rx";\n    if (t) {\n      window.location.href = Selected;\n    }',
         'const localPath = (Selected && Selected.startsWith("/") && !Selected.startsWith("/interstellar/")) ? ("/interstellar" + Selected) : Selected;\n    saveToLocal(localPath);\n    if (t) {\n      window.location.href = localPath;\n    } else {\n      window.location.href = "/interstellar/d";\n    }',
+    )
+    text = text.replace(
+        'saveToLocal(Selected);\n    window.location.href = Selected;',
+        'const localPath2 = (Selected && Selected.startsWith("/") && !Selected.startsWith("/interstellar/")) ? ("/interstellar" + Selected) : Selected;\n    saveToLocal(localPath2);\n    window.location.href = localPath2;',
     )
     text = text.replace(
         'go(Selected);\n    if (t) {\n      blank(Selected);\n    }',
