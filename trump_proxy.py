@@ -1144,16 +1144,20 @@ _HTML_PAGE = r"""<!doctype html>
 html, body {
   margin: 0; padding: 0;
   width: 100%; height: 100%;
+  height: 100dvh;
   overflow: hidden;
   background: var(--bg);
   color: var(--text);
   font-family: var(--md-sys-typescale-font-plain);
+  display: flex;
+  flex-direction: column;
 }
 
 /* =========================================================================
  * 1. Top Header Bar (M3 Top App Bar)
  * ========================================================================= */
 .topbar {
+  flex: 0 0 auto;
   min-height: 56px;
   display: flex;
   align-items: center;
@@ -1213,11 +1217,12 @@ html, body {
  * 2. Room Selection Lobby Screen (M3 Surface Hierarchy)
  * ========================================================================= */
 .lobby-screen {
-  position: fixed;
-  top: 56px; left: 0; right: 0; bottom: 0;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   background: var(--md-sys-color-surface);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   padding: 20px;
   z-index: 45;
@@ -1226,6 +1231,7 @@ html, body {
 .lobby-screen.hidden { display: none; }
 .lobby-container {
   width: min(94vw, 720px);
+  margin: auto;
   display: flex;
   flex-direction: column;
   gap: 20px;
@@ -1260,6 +1266,8 @@ html, body {
   font-size: 13px;
   font-weight: 700;
   color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .name-input {
   background: var(--md-sys-color-surface-container-lowest);
@@ -1269,7 +1277,9 @@ html, body {
   border-radius: var(--md-sys-shape-corner-small);
   font-size: 14px;
   font-weight: 700;
-  width: 210px;
+  flex: 1 1 140px;
+  max-width: 220px;
+  min-width: 110px;
   outline: none;
 }
 .name-input:focus {
@@ -1279,7 +1289,7 @@ html, body {
 
 .room-cards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
   gap: 16px;
 }
 .room-card {
@@ -1326,6 +1336,7 @@ html, body {
   border-radius: var(--md-sys-shape-corner-full);
   background: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);
+  white-space: nowrap;
 }
 .stat-pill.full {
   background: var(--md-sys-color-warning-container);
@@ -1356,6 +1367,7 @@ html, body {
   cursor: pointer;
   background: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
+  white-space: nowrap;
   transition: filter 0.15s;
 }
 .btn-join-room:hover { filter: brightness(1.06); }
@@ -1367,6 +1379,7 @@ html, body {
   color: var(--md-sys-color-on-surface);
   font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
   cursor: pointer;
 }
 .btn-spec-room:hover { filter: brightness(0.96); }
@@ -1375,20 +1388,23 @@ html, body {
  * 3. Simple, Easy-to-Play 4-Player Game Screen
  * ========================================================================= */
 .game-screen {
-  position: fixed;
-  top: 56px; left: 0; right: 0; bottom: 0;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   background: var(--bg);
   padding: 10px 14px 12px;
+  overflow: hidden;
 }
 .game-screen.hidden { display: none; }
 
 /* Table Board Area (Holds North, West, East, and Center Play Area) */
 .table-board {
   position: relative;
-  flex: 1;
+  flex: 1 1 220px;
+  min-height: 190px;
   width: min(100%, 980px);
   margin: 0 auto;
   background: radial-gradient(ellipse at center, #166534 0%, #14532d 70%, #064e3b 100%);
@@ -1404,23 +1420,27 @@ html, body {
 /* Status Pills at Top of Table */
 .table-rules-bar {
   position: absolute;
-  top: 10px;
+  top: 8px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  max-width: 94%;
   justify-content: center;
   z-index: 15;
 }
 .status-pill {
-  padding: 4px 12px;
+  padding: 3px 10px;
   border-radius: 999px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 800;
   background: rgba(15, 23, 42, 0.88);
   border: 1px solid rgba(255,255,255,0.22);
   color: #fde047;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .status-pill.alert {
   background: var(--md-sys-color-error);
@@ -1465,6 +1485,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 .opp-name-line {
   display: flex;
@@ -1472,6 +1493,7 @@ html, body {
   gap: 5px;
   font-size: 13px;
   font-weight: 800;
+  white-space: nowrap;
 }
 .opp-rank {
   font-size: 10px;
@@ -1479,11 +1501,14 @@ html, body {
   border-radius: 999px;
   background: rgba(245, 158, 11, 0.25);
   color: #fde047;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .opp-cards-left {
   font-size: 12px;
   font-weight: 800;
   color: #cbd5e1;
+  white-space: nowrap;
 }
 .opp-cards-left.danger {
   color: #fca5a5;
@@ -1529,6 +1554,7 @@ html, body {
   background: rgba(15, 23, 42, 0.85);
   padding: 4px 14px;
   border-radius: 999px;
+  white-space: nowrap;
 }
 
 /* Babanuki Pick Cards in Center */
@@ -1574,6 +1600,7 @@ html, body {
  * 4. Bottom Player Controls & Easy-to-Click Card Hand (M3 Surface Container)
  * ========================================================================= */
 .player-bottom-panel {
+  flex: 0 0 auto;
   width: min(100%, 980px);
   margin: 10px auto 0;
   background: var(--md-sys-color-surface-container-low);
@@ -1596,11 +1623,13 @@ html, body {
   font-size: 14px;
   font-weight: 800;
   color: var(--md-sys-color-on-surface);
+  white-space: nowrap;
 }
 .action-buttons {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .btn-act {
   padding: 9px 18px;
@@ -1608,6 +1637,8 @@ html, body {
   border: 0;
   font-size: 14px;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: opacity 0.15s, transform 0.1s;
 }
@@ -1741,8 +1772,8 @@ html, body {
 
 @media (max-width: 640px) {
   .topbar {
-    min-height: 48px;
-    padding: 6px 8px;
+    min-height: 44px;
+    padding: 4px 8px;
     gap: 4px;
     flex-wrap: wrap;
   }
@@ -1752,52 +1783,89 @@ html, body {
   }
   .btn-top {
     padding: 4px 8px;
-    font-size: 11.5px;
+    font-size: 11px;
   }
   .room-badge {
-    font-size: 12.5px;
+    font-size: 12px;
     margin-left: 2px;
   }
   .meta-tag {
-    font-size: 11px;
-    padding: 3px 8px;
+    font-size: 10.5px;
+    padding: 2px 6px;
   }
   .lobby-screen {
-    top: 52px;
-    align-items: flex-start;
-    padding: 14px 12px 28px;
+    padding: 12px 10px 24px;
+  }
+  .lobby-container {
+    margin: 0 auto;
+    gap: 14px;
   }
   .lobby-header h1 {
-    font-size: 21px;
+    font-size: 20px;
   }
   .name-box {
     padding: 10px 12px;
     gap: 8px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+  }
+  .room-card {
+    padding: 16px;
   }
   .game-screen {
-    top: 52px;
-    padding: 6px 8px 8px;
+    padding: 4px 6px 6px;
+  }
+  .table-board {
+    border-width: 4px;
+    border-radius: 18px;
+    min-height: 175px;
+  }
+  .table-rules-bar {
+    top: 4px;
+    gap: 4px;
+  }
+  .status-pill {
+    font-size: 10px;
+    padding: 2px 7px;
   }
   .opp-seat {
-    min-width: 96px;
-    padding: 4px 7px;
-    gap: 6px;
-    border-radius: 10px;
+    min-width: 82px;
+    max-width: 31%;
+    padding: 3px 6px;
+    gap: 4px;
+    border-radius: 8px;
+    border-width: 1.5px;
   }
-  .opp-north { top: 34px; left: 50%; transform: translateX(-50%); }
-  .opp-west  { top: 86px; left: 6px; transform: none; }
-  .opp-east  { top: 86px; right: 6px; transform: none; }
-  .opp-avatar { width: 26px; height: 26px; font-size: 14px; }
-  .opp-name-line { font-size: 11.5px; }
-  .opp-cards-left { font-size: 11px; }
-  .center-field { margin-top: 44px; padding: 6px; }
-  .player-bottom-panel { padding: 8px 10px; gap: 6px; margin-top: 6px; }
-  .btn-act { padding: 7px 12px; font-size: 12px; }
-  .hand-cards-row { min-height: 78px; gap: 4px; }
-  .card-item { width: 48px; height: 72px; padding: 4px 5px; }
-  .c-top { font-size: 13px; }
-  .c-center { font-size: 18px; }
+  .opp-north { top: 28px; left: 50%; transform: translateX(-50%); }
+  .opp-west  { top: 28px; left: 4px; transform: none; }
+  .opp-east  { top: 28px; right: 4px; transform: none; }
+  .opp-avatar { width: 20px; height: 20px; font-size: 11px; }
+  .opp-name-line { font-size: 10.5px; gap: 3px; }
+  .opp-rank { font-size: 9px; padding: 1px 4px; }
+  .opp-cards-left { font-size: 10px; }
+  .center-field { margin-top: 64px; padding: 4px; gap: 4px; }
+  .played-cards-row { min-height: 68px; gap: 4px; }
+  .played-cards-row .card-item { width: 42px; height: 62px; padding: 3px 4px; }
+  .played-cards-row .c-top { font-size: 11px; }
+  .played-cards-row .c-center { font-size: 15px; }
+  .played-cards-row .c-bot { font-size: 9px; }
+  .play-caption { font-size: 11px; padding: 2px 10px; }
+  .player-bottom-panel {
+    padding: 6px 8px;
+    gap: 4px;
+    margin-top: 4px;
+    max-height: 44vh;
+    overflow-y: auto;
+  }
+  .action-bar { gap: 4px; }
+  .my-info-pill { font-size: 12px; }
+  .action-buttons { gap: 4px; }
+  .btn-act { padding: 5px 10px; font-size: 11px; }
+  .hand-cards-row { min-height: 64px; gap: 3px; padding-top: 4px; }
+  .card-item { width: 42px; height: 62px; padding: 3px 4px; border-radius: 6px; }
+  .card-item.selected { transform: translateY(-8px); }
+  .c-top { font-size: 11px; }
+  .c-center { font-size: 16px; }
+  .c-bot { font-size: 9px; }
 }
 </style>
 </head>

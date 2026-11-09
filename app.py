@@ -34,24 +34,47 @@ print(
     flush=True,
 )
 
+_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"))
+_CORE_LIMITS = httpx.Limits(
+    max_connections=120, max_keepalive_connections=40, keepalive_expiry=25.0
+)
 CORE_CLIENT = httpx.AsyncClient(
     follow_redirects=True,
     verify=True,
     timeout=Timeout(connect=8.0, read=45.0, write=30.0, pool=8.0),
-    limits=httpx.Limits(
-        max_connections=120, max_keepalive_connections=40, keepalive_expiry=25.0
-    ),
+    limits=_CORE_LIMITS,
     headers={"Accept-Encoding": "identity"},
+    transport=(
+        None
+        if _HAS_PROXY_ENV
+        else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
+            verify=True,
+            retries=2,
+            limits=_CORE_LIMITS,
+        )
+    ),
 )
 
+_ASSET_LIMITS = httpx.Limits(
+    max_connections=12, max_keepalive_connections=6, keepalive_expiry=30.0
+)
 ASSET_CLIENT = httpx.AsyncClient(
     follow_redirects=True,
     verify=True,
     timeout=Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0),
-    limits=httpx.Limits(
-        max_connections=12, max_keepalive_connections=6, keepalive_expiry=30.0
-    ),
+    limits=_ASSET_LIMITS,
     headers={"User-Agent": "Mozilla/5.0"},
+    transport=(
+        None
+        if _HAS_PROXY_ENV
+        else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
+            verify=True,
+            retries=2,
+            limits=_ASSET_LIMITS,
+        )
+    ),
 )
 
 YOUTUBE_IMAGE_HOSTS = {
@@ -71,13 +94,14 @@ YOUTUBE_IMAGE_HOSTS = {
     "ytimg.l.google.com",
 }
 
+_YT_IMG_LIMITS = httpx.Limits(
+    max_connections=24, max_keepalive_connections=12, keepalive_expiry=30.0
+)
 YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
     follow_redirects=True,
     verify=True,
     timeout=Timeout(connect=10.0, read=30.0, write=20.0, pool=8.0),
-    limits=httpx.Limits(
-        max_connections=24, max_keepalive_connections=12, keepalive_expiry=30.0
-    ),
+    limits=_YT_IMG_LIMITS,
     headers={
         "User-Agent": (
             "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X)"
@@ -89,6 +113,16 @@ YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
         ),
         "Accept-Encoding": "identity",
     },
+    transport=(
+        None
+        if _HAS_PROXY_ENV
+        else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
+            verify=True,
+            retries=2,
+            limits=_YT_IMG_LIMITS,
+        )
+    ),
 )
 
 

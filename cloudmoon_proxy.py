@@ -93,13 +93,27 @@ aside[aria-label="Advertisement"],
 #lyt3-top-img-div,
 #lyt3-bottom-img-div,
 ramp-ad,
-[id^="div-gpt-ad"] {
+[id^="div-gpt-ad"],
+.mobile-download-btn,
+.mobile-download-btn-text,
+[class*="mobile-download"] {
   display: none !important;
   width: 0 !important;
   height: 0 !important;
   opacity: 0 !important;
   pointer-events: none !important;
   visibility: hidden !important;
+}
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 /* Ensure game container and loading screen always use full viewport without ad margins */
 .container.has-a-div,

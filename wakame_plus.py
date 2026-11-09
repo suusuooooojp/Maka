@@ -414,10 +414,12 @@ main {{
   overflow-wrap: anywhere;
   word-break: break-word;
   margin-top: var(--md-space-2);
+  margin-bottom: 4px;
   padding: 0 var(--md-space-1);
   font-size: 14px;
   font-weight: 600;
   line-height: 1.4;
+  max-height: 2.8em;
   color: var(--md-sys-color-on-surface);
   text-decoration: none;
 }}
@@ -764,6 +766,12 @@ main {{
   .channel-avatar {{
     width: 64px;
     height: 64px;
+  }}
+}}
+@media (max-width: 420px) {{
+  .grid {{
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--md-space-3);
   }}
 }}
 </style>

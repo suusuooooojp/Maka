@@ -54,6 +54,10 @@
 	line-height: 1.4;
 	text-align: center;
 	display: block;
+	margin-bottom: 0.45em;
+}
+#title-disclaimer span:last-child {
+	margin-bottom: 0;
 }
 #title-disclaimer span:before {
 	left: 0;

@@ -39,7 +39,7 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-def _scrub_curl_cookies(curl) -> None:
+def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
@@ -49,6 +49,15 @@ def _scrub_curl_cookies(curl) -> None:
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
+        if connect_timeout_ms is not None:
+            curl.setopt(connect_timeout_ms, 5000)
+        tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
+        if tcp_keepalive is not None:
+            curl.setopt(tcp_keepalive, 1)
+        fresh_connect = getattr(CurlOpt, "FRESH_CONNECT", None)
+        if fresh_connect is not None:
+            curl.setopt(fresh_connect, 1 if fresh else 0)
     except Exception:
         pass
 
@@ -65,13 +74,16 @@ if CurlAsyncSession is not None:
         leak across users.
         """
 
+        _force_fresh: bool = False
+
         async def pop_curl(self):
             curl = await super().pop_curl()
-            _scrub_curl_cookies(curl)
+            _scrub_curl_cookies(curl, fresh=getattr(self, "_force_fresh", False))
+            self._force_fresh = False
             return curl
 
         def push_curl(self, curl) -> None:
-            _scrub_curl_cookies(curl)
+            _scrub_curl_cookies(curl, fresh=False)
             super().push_curl(curl)
 
         async def request(self, method: str, url: str, *args, **kwargs):
@@ -81,7 +93,11 @@ if CurlAsyncSession is not None:
             except Exception:
                 pass
             try:
-                return await super().request(method, url, *args, **kwargs)
+                try:
+                    return await super().request(method, url, *args, **kwargs)
+                except Exception:
+                    self._force_fresh = True
+                    return await super().request(method, url, *args, **kwargs)
             finally:
                 try:
                     self._cookies.clear()
@@ -2179,8 +2195,8 @@ async def x_http_relay(request: Request):
                 b'i:"/home\x00/home"',
             )
             .replace(
-                b"l:$R[6]={explorePageQuery:null,trends:$R[7]=[],news:$R[8]=[],posts:$R[9]=[]}",
-                b"l:$R[6]={pinnedTimelinesQuery:null}",
+                b'i:"#explore#explore"',
+                b'i:"/home#/home"',
             )
             .replace(
                 b"redirect_after_login=%2Fexplore",
@@ -2190,6 +2206,11 @@ async def x_http_relay(request: Request):
                 b"https://x.com/explore",
                 b"https://x.com/home",
             )
+        )
+        resp_body = re.sub(
+            rb"l:\$R\[(\d+)\]=\{explorePageQuery:null,trends:\$R\[\d+\]=\[\],news:\$R\[\d+\]=\[\],posts:\$R\[\d+\]=\[\]\}",
+            rb"l:$R[\1]={pinnedTimelinesQuery:null}",
+            resp_body,
         )
 
     if (
@@ -2212,7 +2233,7 @@ async def x_http_relay(request: Request):
     if (
         status == 200
         and host == "abs.twimg.com"
-        and req_path.startswith("/x-web/x-web/assets/")
+        and req_path.startswith("/x-web/x-web/")
         and req_path.endswith(".js")
         and resp_body
     ):
@@ -2220,6 +2241,18 @@ async def x_http_relay(request: Request):
             resp_body = resp_body.replace(
                 b"function ZC(e,t){if(!e.isAuthenticated)throw XC(e),",
                 b'function ZC(e,t){if(!e.isAuthenticated&&t!=="/home"&&t?.pathname!=="/home")throw XC(e),',
+            )
+        if b"else if(!e.isAuthenticated)throw " in resp_body:
+            resp_body = re.sub(
+                rb"else if\(!e\.isAuthenticated\)throw ([A-Za-z0-9_$]+\(e\),[A-Za-z0-9_$]+\(\{to:`/`\}\))",
+                rb"else if(!1)throw \1",
+                resp_body,
+            )
+        if b",n=t.pathname+t.searchStr){if(!e.isAuthenticated)throw " in resp_body:
+            resp_body = re.sub(
+                rb"function ([A-Za-z0-9_$]+)\(\{context:e,location:t\},n=t\.pathname\+t\.searchStr\)\{if\(!e\.isAuthenticated\)throw ",
+                rb'function \1({context:e,location:t},n=t.pathname+t.searchStr){if(!e.isAuthenticated&&t?.pathname!=="/home"&&n!=="/home")throw ',
+                resp_body,
             )
         if b"function SK(e){throw e.isAuthenticated?U({to:`/home`,replace:!0}):U({to:`/i/jf/onboarding/web`" in resp_body:
             resp_body = resp_body.replace(

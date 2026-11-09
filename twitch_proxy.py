@@ -16,13 +16,27 @@ SERVICE_NAME = "Twitch(安定)"
 SERVICE_ICON = "📺"
 SERVICE_PATH = "/twitch"
 
+import os
+
 router = APIRouter()
+_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"))
+_TWITCH_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30.0)
 client = httpx.AsyncClient(
     follow_redirects=True,
     verify=False,
     timeout=httpx.Timeout(30.0, connect=8.0),
-    limits=httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30.0),
+    limits=_TWITCH_LIMITS,
     headers={"Accept-Encoding": "identity"},
+    transport=(
+        None
+        if _HAS_PROXY_ENV
+        else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
+            verify=False,
+            retries=2,
+            limits=_TWITCH_LIMITS,
+        )
+    ),
 )
 
 NETWORK_HIJACK_SCRIPT_TWITCH = r"""
@@ -645,7 +659,7 @@ async def proxy_twitch_subdomain(request: Request, subdomain: str, path: str):
     if request.method == "OPTIONS": return Response(status_code=200, headers=clean_headers({}, request, "twitch.tv"))
     target_url = f"https://{subdomain}.twitch.tv/{path}"
     resp = await fetch_from_target(request, request.method, target_url, f"{subdomain}.twitch.tv", "twitch.tv")
-    if not resp: return Response(status_code=500)
+    if not resp: return Response(content="Twitch upstream unavailable", status_code=502, headers=clean_headers({}, request, "twitch.tv"))
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
@@ -654,7 +668,7 @@ async def proxy_ttvnw_subdomain(request: Request, subdomain: str, path: str):
     if request.method == "OPTIONS": return Response(status_code=200, headers=clean_headers({}, request, "twitch.tv"))
     target_url = f"https://{subdomain}.ttvnw.net/{path}"
     resp = await fetch_from_target(request, request.method, target_url, f"{subdomain}.ttvnw.net", "twitch.tv")
-    if not resp: return Response(status_code=500)
+    if not resp: return Response(content="Twitch upstream unavailable", status_code=502, headers=clean_headers({}, request, "twitch.tv"))
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
@@ -663,7 +677,7 @@ async def proxy_jtvnw_subdomain(request: Request, subdomain: str, path: str):
     if request.method == "OPTIONS": return Response(status_code=200, headers=clean_headers({}, request, "twitch.tv"))
     target_url = f"https://{subdomain}.jtvnw.net/{path}"
     resp = await fetch_from_target(request, request.method, target_url, f"{subdomain}.jtvnw.net", "twitch.tv")
-    if not resp: return Response(status_code=500)
+    if not resp: return Response(content="Twitch upstream unavailable", status_code=502, headers=clean_headers({}, request, "twitch.tv"))
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
@@ -672,7 +686,7 @@ async def proxy_twitchcdn_subdomain(request: Request, subdomain: str, path: str)
     if request.method == "OPTIONS": return Response(status_code=200, headers=clean_headers({}, request, "twitch.tv"))
     target_url = f"https://{subdomain}.twitchcdn.net/{path}"
     resp = await fetch_from_target(request, request.method, target_url, f"{subdomain}.twitchcdn.net", "twitch.tv")
-    if not resp: return Response(status_code=500)
+    if not resp: return Response(content="Twitch upstream unavailable", status_code=502, headers=clean_headers({}, request, "twitch.tv"))
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
@@ -691,7 +705,7 @@ async def proxy_twitch_home(request: Request):
 async def proxy_twitch_home_entry(request: Request):
     resp = await fetch_from_target(request, request.method, "https://www.twitch.tv/", "www.twitch.tv", "twitch.tv")
     if not resp:
-        return Response(content="Proxy Error", status_code=500)
+        return Response(content="Twitch upstream unavailable", status_code=502)
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
@@ -707,6 +721,6 @@ async def proxy_twitch_main(request: Request, path: str):
     else:
         target_url = f"https://www.twitch.tv/{path}"
     resp = await fetch_from_target(request, request.method, target_url, "www.twitch.tv", "twitch.tv")
-    if not resp: return Response(content="Proxy Error", status_code=500)
+    if not resp: return Response(content="Twitch upstream unavailable", status_code=502)
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)

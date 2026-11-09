@@ -234,7 +234,22 @@ _KAZWIRE_HREF_RE = re.compile(
     + r')(/|["\'\?\#])|(["\']))',
 )
 
-_KAZWIRE_CLIENT_SHIM = """<script>
+_KAZWIRE_CLIENT_SHIM = """<style id="sh-kazwire-mobile-fix">
+@media (max-width: 640px) {
+  .kz-cloak {
+    font-size: clamp(1.35rem, 6.2vw, 2.25rem) !important;
+    max-width: 100% !important;
+    overflow-wrap: anywhere !important;
+    word-break: break-word !important;
+  }
+}
+@media (max-width: 380px) {
+  span.block.truncate.text-xs {
+    display: none !important;
+  }
+}
+</style>
+<script>
 (function() {
   if (window.__kazwire_shim_installed) return;
   window.__kazwire_shim_installed = true;
@@ -862,6 +877,8 @@ async def _serve_kazwire_page_or_asset(request: Request, rel_path: str) -> Respo
 
 @router.api_route("/kazwire/api/comments", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 @router.api_route("/api/comments", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/kazwire/api/ai/gallery", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/api/ai/gallery", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
 async def kazwire_comments_stub(request: Request) -> Response:
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=_cors_headers())

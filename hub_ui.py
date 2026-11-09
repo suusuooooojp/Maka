@@ -1480,12 +1480,15 @@ button, input, textarea, select {{
   font-size: 12px;
   color: var(--md-sys-color-tertiary);
   font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
 }}
 .hub-status-dot {{
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background-color: var(--md-sys-color-tertiary);
+  flex-shrink: 0;
 }}
 .hub-my-id-btn {{
   font-size: 12px;
@@ -1497,6 +1500,8 @@ button, input, textarea, select {{
   padding: 4px 10px;
   border-radius: 9999px;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
 }}
 .hub-chat-body-wrapper {{
   position: relative;
@@ -1534,6 +1539,7 @@ button, input, textarea, select {{
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
   z-index: 5;
 }}
 .hub-chat-footer {{
@@ -1582,19 +1588,20 @@ button, input, textarea, select {{
 }}
 .hub-chat-input-row {{
   display: flex;
-  gap: 8px;
+  gap: 6px;
   position: relative;
   align-items: flex-end;
 }}
 .hub-chat-input {{
-  flex: 1;
+  flex: 1 1 140px;
+  min-width: 110px;
   min-height: 42px;
   max-height: 110px;
   resize: none;
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: 12px;
-  padding: 10px 36px 10px 14px;
+  padding: 10px 32px 10px 12px;
   font-size: 14px;
   line-height: 1.4;
   color: var(--md-sys-color-on-surface);
@@ -1606,7 +1613,7 @@ button, input, textarea, select {{
 }}
 .hub-input-clear {{
   position: absolute;
-  right: 96px;
+  right: 84px;
   top: 11px;
   background-color: var(--md-sys-color-surface-container);
   border: none;
@@ -1626,7 +1633,7 @@ button, input, textarea, select {{
   color: var(--md-sys-color-on-primary);
   border: none;
   border-radius: 9999px;
-  padding: 0 20px;
+  padding: 0 18px;
   font-size: 13.5px;
   font-weight: 600;
   cursor: pointer;
@@ -1634,11 +1641,14 @@ button, input, textarea, select {{
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }}
 .hub-chat-meta {{
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   font-size: 11.5px;
   color: var(--md-sys-color-on-surface-variant);
   padding: 0 2px;
@@ -1695,6 +1705,7 @@ button, input, textarea, select {{
   font-weight: 500;
   cursor: pointer;
   padding: 0;
+  white-space: nowrap;
 }}
 .bottom-nav-pill {{
   width: 48px;
@@ -1747,29 +1758,36 @@ button, input, textarea, select {{
 /* Smartphone (<= 600px): Bottom Navigation Bar + Single-column Cards */
 @media (max-width: 600px) {{
   .m3-top-app-bar {{
-    height: 56px;
+    height: 54px;
     padding: 0 8px;
-    gap: 4px;
+    gap: 6px;
   }}
   .topbar-left {{
-    gap: 6px;
-    flex: 1;
+    gap: 4px;
+    flex: 1 1 auto;
     min-width: 0;
+    overflow: hidden;
   }}
   .topbar-right {{
     gap: 4px;
+    flex-shrink: 0;
   }}
   #menuToggleBtn {{
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
     flex-shrink: 0;
   }}
   .brand-link {{
     font-size: 16px;
-    gap: 5px;
+    gap: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }}
   .brand-sub {{
-    font-size: 13.5px;
+    font-size: 12.5px;
+    white-space: nowrap;
   }}
   .live-status-pill,
   .topbar-meta-chip {{
@@ -1781,9 +1799,20 @@ button, input, textarea, select {{
   .topbar-action-btn {{
     width: 32px;
     height: 32px;
+    min-width: 32px;
     padding: 0;
     justify-content: center;
     flex-shrink: 0;
+  }}
+  .search-kbd-hint {{
+    display: none !important;
+  }}
+  #search {{
+    padding: 0 40px 0 42px;
+    font-size: 13.5px;
+  }}
+  .search-clear-btn {{
+    right: 10px;
   }}
   .m3-sidebar {{
     position: fixed;
@@ -1810,7 +1839,7 @@ button, input, textarea, select {{
     padding: 0 14px !important;
   }}
   .m3-main-workspace {{
-    padding: 12px 12px 88px;
+    padding: 12px 10px 88px;
   }}
   .m3-search-surface {{
     padding: 12px;
@@ -1828,11 +1857,34 @@ button, input, textarea, select {{
   .charts-grid, .bottom-grid {{
     grid-template-columns: 1fr;
   }}
+  .hub-chat-header {{
+    padding: 10px 12px;
+    gap: 8px;
+  }}
+  .hub-chat-meta-right {{
+    gap: 6px;
+    flex-wrap: wrap;
+  }}
+  .hub-chat-footer {{
+    padding: 10px;
+  }}
+  .hub-chat-input-row {{
+    gap: 4px;
+  }}
+  .hub-chat-input {{
+    padding: 8px 26px 8px 10px;
+    font-size: 13px;
+  }}
+  .hub-chat-send-btn {{
+    padding: 0 12px;
+    font-size: 12.5px;
+    height: 38px;
+  }}
   .m3-bottom-nav {{
     display: flex;
   }}
 }}
-@media (max-width: 380px) {{
+@media (max-width: 480px) {{
   .brand-sub {{
     display: none;
   }}

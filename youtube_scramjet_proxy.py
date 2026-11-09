@@ -68,7 +68,7 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-def _scrub_curl_cookies(curl) -> None:
+def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
@@ -78,6 +78,15 @@ def _scrub_curl_cookies(curl) -> None:
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
+        if connect_timeout_ms is not None:
+            curl.setopt(connect_timeout_ms, 5000)
+        tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
+        if tcp_keepalive is not None:
+            curl.setopt(tcp_keepalive, 1)
+        fresh_connect = getattr(CurlOpt, "FRESH_CONNECT", None)
+        if fresh_connect is not None:
+            curl.setopt(fresh_connect, 1 if fresh else 0)
     except Exception:
         pass
 
@@ -94,13 +103,16 @@ if CurlAsyncSession is not None:
         leak across users.
         """
 
+        _force_fresh: bool = False
+
         async def pop_curl(self):
             curl = await super().pop_curl()
-            _scrub_curl_cookies(curl)
+            _scrub_curl_cookies(curl, fresh=getattr(self, "_force_fresh", False))
+            self._force_fresh = False
             return curl
 
         def push_curl(self, curl) -> None:
-            _scrub_curl_cookies(curl)
+            _scrub_curl_cookies(curl, fresh=False)
             super().push_curl(curl)
 
         async def request(self, method: str, url: str, *args, **kwargs):
@@ -110,7 +122,11 @@ if CurlAsyncSession is not None:
             except Exception:
                 pass
             try:
-                return await super().request(method, url, *args, **kwargs)
+                try:
+                    return await super().request(method, url, *args, **kwargs)
+                except Exception:
+                    self._force_fresh = True
+                    return await super().request(method, url, *args, **kwargs)
             finally:
                 try:
                     self._cookies.clear()

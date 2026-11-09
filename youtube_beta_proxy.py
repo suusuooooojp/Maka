@@ -397,9 +397,9 @@ html, body {
   .yt-guide { display: none; }
   .sh-zero-pill { display: none; }
   .yt-masthead-status { display: none; }
-  .sh-toolbar { padding: 6px 8px; gap: 6px; min-height: 44px; }
+  .sh-toolbar { padding: 6px 8px; gap: 6px; min-height: 44px; flex-wrap: wrap; }
   .sh-lock-badge { display: none; }
-  .sh-omnibar-form { min-width: 140px; height: 34px; padding: 0 4px 0 10px; }
+  .sh-omnibar-form { min-width: 110px; flex: 1 1 140px; height: 34px; padding: 0 4px 0 10px; }
   .sh-engine-group {
     width: 100%;
     flex-wrap: nowrap;
@@ -408,13 +408,13 @@ html, body {
     padding-bottom: 2px;
   }
   .sh-engine-group::-webkit-scrollbar { display: none; }
-  .sh-mode-btn { padding: 4px 9px; font-size: 10.5px; }
-  .yt-masthead { height: 48px; padding: 0 10px; gap: 8px; }
-  .yt-brand { font-size: 16px; flex-shrink: 0; }
-  .yt-search-wrap { min-width: 0; }
+  .sh-mode-btn { padding: 4px 9px; font-size: 10.5px; white-space: nowrap; flex-shrink: 0; }
+  .yt-masthead { height: 48px; padding: 0 8px; gap: 6px; }
+  .yt-brand { font-size: 15px; flex-shrink: 0; white-space: nowrap; }
+  .yt-search-wrap { min-width: 0; flex: 1 1 auto; }
   .yt-search-form { height: 34px; }
-  .yt-search-input { min-width: 0; padding: 0 12px; font-size: 13px; }
-  .yt-search-btn { width: 44px; flex-shrink: 0; }
+  .yt-search-input { min-width: 0; padding: 0 10px; font-size: 13px; }
+  .yt-search-btn { width: 40px; flex-shrink: 0; }
   .yt-main { padding: 0 12px 28px; }
   .yt-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
 }
@@ -480,9 +480,15 @@ html, body {
 }
 .yt-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
   gap: 20px 16px;
   margin-top: 8px;
+}
+@media (max-width: 480px) {
+  .yt-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
 }
 .yt-card {
   display: flex;
@@ -545,12 +551,22 @@ html, body {
   font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
+  max-height: 2.7em;
   color: var(--text-primary);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  margin-bottom: 4px;
+  word-break: break-word;
+  margin-bottom: 6px;
+}
+@media (max-width: 480px) {
+  .yt-card-title {
+    display: block;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    max-height: 1.4em;
+  }
 }
 .yt-card-sub {
   font-size: 13px;

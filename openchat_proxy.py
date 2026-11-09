@@ -1606,12 +1606,15 @@ async def openchat_page(request: Request = None):
     font-size: 12px;
     color: var(--md-sys-color-tertiary);
     font-weight: 600;
+    white-space: nowrap;
+    flex-shrink: 0;
   }}
   .hub-status-dot {{
     width: 8px;
     height: 8px;
     border-radius: var(--md-sys-shape-corner-full);
     background-color: var(--md-sys-color-tertiary);
+    flex-shrink: 0;
   }}
   .hub-my-id-btn {{
     font-size: 12px;
@@ -1622,6 +1625,8 @@ async def openchat_page(request: Request = None):
     padding: 4px var(--md-space-3);
     border-radius: var(--md-sys-shape-corner-full);
     cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
   }}
   .hub-chat-body-wrapper {{
     position: relative;
@@ -1656,6 +1661,7 @@ async def openchat_page(request: Request = None):
     border-radius: var(--md-sys-shape-corner-full);
     cursor: pointer;
     box-shadow: var(--md-sys-elevation-2);
+    white-space: nowrap;
     z-index: 5;
   }}
   .hub-chat-footer {{
@@ -1682,19 +1688,20 @@ async def openchat_page(request: Request = None):
   }}
   .hub-chat-input-row {{
     display: flex;
-    gap: var(--md-space-2);
+    gap: 6px;
     position: relative;
     align-items: flex-end;
   }}
   .hub-chat-input {{
-    flex: 1;
+    flex: 1 1 140px;
+    min-width: 110px;
     min-height: 42px;
     max-height: 110px;
     resize: none;
     background-color: var(--md-sys-color-surface-container-lowest);
     border: 1px solid var(--md-sys-color-outline);
     border-radius: var(--md-sys-shape-corner-medium);
-    padding: 9px 36px 9px 14px;
+    padding: 9px 32px 9px 12px;
     font-size: 14px;
     color: var(--md-sys-color-on-surface);
     outline: none;
@@ -1704,18 +1711,70 @@ async def openchat_page(request: Request = None):
     color: var(--md-sys-color-on-primary);
     border: none;
     border-radius: var(--md-sys-shape-corner-full);
-    padding: 0 var(--md-space-5);
+    padding: 0 18px;
     font-size: 13.5px;
     font-weight: 700;
     cursor: pointer;
     height: 42px;
+    white-space: nowrap;
+    flex-shrink: 0;
   }}
   .hub-chat-meta {{
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 8px;
     font-size: 11.5px;
     color: var(--md-sys-color-on-surface-variant);
+  }}
+  @media (max-width: 600px) {{
+    .oc-topbar {{
+      padding: 8px 10px;
+      gap: 6px;
+    }}
+    .oc-logo {{
+      font-size: 18px;
+    }}
+    .oc-logo-sub {{
+      font-size: 13px;
+      margin-left: 4px;
+    }}
+    .oc-actions .md-btn {{
+      padding: 0 10px;
+      height: 34px;
+      font-size: 12px;
+      white-space: nowrap;
+    }}
+    .oc-main {{
+      padding: 8px;
+    }}
+    .hub-chat-header {{
+      padding: 10px 12px;
+      gap: 8px;
+    }}
+    .hub-chat-meta-right {{
+      gap: 6px;
+      flex-wrap: wrap;
+    }}
+    .hub-chat-body {{
+      padding: 10px 12px;
+    }}
+    .hub-chat-footer {{
+      padding: 8px 10px;
+    }}
+    .hub-chat-input-row {{
+      gap: 4px;
+    }}
+    .hub-chat-input {{
+      padding: 8px 26px 8px 10px;
+      font-size: 13px;
+      min-height: 38px;
+    }}
+    .hub-chat-send-btn {{
+      padding: 0 12px;
+      font-size: 12.5px;
+      height: 38px;
+    }}
   }}
 </style>
 </head>
@@ -3590,6 +3649,7 @@ _CLIENT_JS = r"""
       display: flex;
       align-items: center;
       gap: 5px;
+      white-space: nowrap;
       opacity: 0;
       pointer-events: none;
       transition: all 0.2s cubic-bezier(0.2, 0, 0, 1);
@@ -4389,6 +4449,22 @@ _CLIENT_JS = r"""
       margin-right: 4px;
       opacity: 0.9;
     }
+    @media (max-width: 600px) {
+      .sh-chat-img-btn {
+        height: 36px;
+        width: 34px;
+        padding: 0;
+      }
+      .sh-login-gate-bar {
+        padding: 6px 8px;
+        gap: 6px;
+        font-size: 11px;
+      }
+      .sh-login-action-btn, .sh-logout-action-btn {
+        padding: 4px 10px;
+        font-size: 11px;
+      }
+    }
   `;
   (document.head || document.documentElement).appendChild(styleEl);
 
@@ -5097,18 +5173,24 @@ _CLIENT_JS = r"""
 
     function setDefaultFabPosition() {
       const isMobile = window.innerWidth <= 768;
-      const defX = Math.max(8, window.innerWidth - 68);
+      const defX = Math.max(8, window.innerWidth - 62);
       const defY = Math.max(8, window.innerHeight - (isMobile ? 142 : 72));
       toggleBtn.style.left = defX + 'px';
       toggleBtn.style.top = defY + 'px';
+    }
+
+    const isStandaloneOpenChat = /^\/openchat(?:\/|$)/i.test(window.location.pathname || '');
+    if (isStandaloneOpenChat) {
+      toggleBtn.style.display = 'none';
+      panel.style.display = 'none';
     }
 
     try {
       const savedX = localStorage.getItem('sh_chat_btn_x');
       const savedY = localStorage.getItem('sh_chat_btn_y');
       if (savedX !== null && savedY !== null) {
-        const x = Math.max(8, Math.min(window.innerWidth - 58, parseInt(savedX, 10)));
-        const y = Math.max(8, Math.min(window.innerHeight - 58, parseInt(savedY, 10)));
+        const x = Math.max(8, Math.min(window.innerWidth - 60, parseInt(savedX, 10)));
+        const y = Math.max(8, Math.min(window.innerHeight - 60, parseInt(savedY, 10)));
         toggleBtn.style.left = x + 'px';
         toggleBtn.style.top = y + 'px';
       } else {
@@ -5117,6 +5199,15 @@ _CLIENT_JS = r"""
     } catch (_) {
       setDefaultFabPosition();
     }
+
+    window.addEventListener('resize', () => {
+      try {
+        const rect = toggleBtn.getBoundingClientRect();
+        if (rect.right > window.innerWidth - 6 || rect.bottom > window.innerHeight - 6) {
+          setDefaultFabPosition();
+        }
+      } catch (_) {}
+    });
 
     function onPointerDown(e) {
       if (e.button !== undefined && e.button !== 0) return;

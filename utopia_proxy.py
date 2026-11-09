@@ -775,6 +775,12 @@ def _rewrite_utopia_html(rel_path: str, html: str) -> str:
         flags=re.IGNORECASE,
     )
     html = re.sub(
+        r'<script[^>]+src=["\']https?://kit\.fontawesome\.com/[^"\']*["\'][^>]*>\s*</script>',
+        '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">',
+        html,
+        flags=re.IGNORECASE,
+    )
+    html = re.sub(
         r'<ins\s+class=["\']adsbygoogle["\'][\s\S]*?</ins>',
         "",
         html,
