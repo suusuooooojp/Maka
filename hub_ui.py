@@ -341,11 +341,15 @@ button, input, textarea, select {{
   letter-spacing: -0.01em;
   color: var(--md-sys-color-on-surface);
   white-space: nowrap;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }}
 .google-wordmark {{
   display: inline-flex;
   font-weight: 700;
   letter-spacing: -0.02em;
+  flex-shrink: 0;
 }}
 .google-wordmark .g-b {{ color: #4285f4; }}
 .google-wordmark .g-r {{ color: #ea4335; }}
@@ -355,6 +359,8 @@ button, input, textarea, select {{
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
   font-size: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }}
 .live-status-pill {{
   display: inline-flex;
@@ -995,6 +1001,7 @@ button, input, textarea, select {{
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   color: var(--md-sys-color-on-surface-variant);
   font-size: 12.5px;
@@ -1005,6 +1012,8 @@ button, input, textarea, select {{
   -webkit-box-orient: vertical;
   overflow: hidden;
   line-height: 1.4;
+  min-width: 0;
+  flex: 1 1 160px;
 }}
 .card-path {{
   font-family: var(--md-sys-typescale-font-mono);
@@ -1739,14 +1748,28 @@ button, input, textarea, select {{
 @media (max-width: 600px) {{
   .m3-top-app-bar {{
     height: 56px;
-    padding: 0 10px;
+    padding: 0 8px;
+    gap: 4px;
+  }}
+  .topbar-left {{
     gap: 6px;
+    flex: 1;
+    min-width: 0;
+  }}
+  .topbar-right {{
+    gap: 4px;
+  }}
+  #menuToggleBtn {{
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
   }}
   .brand-link {{
-    font-size: 17px;
+    font-size: 16px;
+    gap: 5px;
   }}
   .brand-sub {{
-    font-size: 14.5px;
+    font-size: 13.5px;
   }}
   .live-status-pill,
   .topbar-meta-chip {{
@@ -1756,10 +1779,11 @@ button, input, textarea, select {{
     display: none;
   }}
   .topbar-action-btn {{
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     padding: 0;
     justify-content: center;
+    flex-shrink: 0;
   }}
   .m3-sidebar {{
     position: fixed;
@@ -1806,6 +1830,11 @@ button, input, textarea, select {{
   }}
   .m3-bottom-nav {{
     display: flex;
+  }}
+}}
+@media (max-width: 380px) {{
+  .brand-sub {{
+    display: none;
   }}
 }}
 </style>

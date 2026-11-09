@@ -1154,11 +1154,12 @@ html, body {
  * 1. Top Header Bar (M3 Top App Bar)
  * ========================================================================= */
 .topbar {
-  height: 56px;
+  min-height: 56px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 16px;
+  padding: 6px 16px;
+  gap: 8px;
   background: var(--md-sys-color-surface-container);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   z-index: 50;
@@ -1167,6 +1168,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 .btn-top {
   display: inline-flex;
@@ -1180,6 +1182,8 @@ html, body {
   text-decoration: none;
   font-size: 13px;
   font-weight: 700;
+  white-space: nowrap;
+  flex-shrink: 0;
   cursor: pointer;
   transition: filter 0.15s;
 }
@@ -1189,6 +1193,9 @@ html, body {
   font-weight: 700;
   color: var(--md-sys-color-primary);
   margin-left: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .meta-tag {
   font-size: 12px;
@@ -1198,6 +1205,8 @@ html, body {
   background: var(--md-sys-color-surface-container-high);
   border: 1px solid var(--md-sys-color-outline-variant);
   color: var(--md-sys-color-on-surface-variant);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* =========================================================================
@@ -1731,11 +1740,64 @@ html, body {
 }
 
 @media (max-width: 640px) {
-  .opp-seat { min-width: 115px; padding: 6px 8px; }
-  .opp-avatar { width: 30px; height: 30px; font-size: 16px; }
-  .card-item { width: 54px; height: 80px; }
-  .c-top { font-size: 14px; }
-  .c-center { font-size: 20px; }
+  .topbar {
+    min-height: 48px;
+    padding: 6px 8px;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .topbar-left, .topbar-right {
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .btn-top {
+    padding: 4px 8px;
+    font-size: 11.5px;
+  }
+  .room-badge {
+    font-size: 12.5px;
+    margin-left: 2px;
+  }
+  .meta-tag {
+    font-size: 11px;
+    padding: 3px 8px;
+  }
+  .lobby-screen {
+    top: 52px;
+    align-items: flex-start;
+    padding: 14px 12px 28px;
+  }
+  .lobby-header h1 {
+    font-size: 21px;
+  }
+  .name-box {
+    padding: 10px 12px;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .game-screen {
+    top: 52px;
+    padding: 6px 8px 8px;
+  }
+  .opp-seat {
+    min-width: 96px;
+    padding: 4px 7px;
+    gap: 6px;
+    border-radius: 10px;
+  }
+  .opp-north { top: 34px; left: 50%; transform: translateX(-50%); }
+  .opp-west  { top: 86px; left: 6px; transform: none; }
+  .opp-east  { top: 86px; right: 6px; transform: none; }
+  .opp-avatar { width: 26px; height: 26px; font-size: 14px; }
+  .opp-name-line { font-size: 11.5px; }
+  .opp-cards-left { font-size: 11px; }
+  .center-field { margin-top: 44px; padding: 6px; }
+  .player-bottom-panel { padding: 8px 10px; gap: 6px; margin-top: 6px; }
+  .btn-act { padding: 7px 12px; font-size: 12px; }
+  .hand-cards-row { min-height: 78px; gap: 4px; }
+  .card-item { width: 48px; height: 72px; padding: 4px 5px; }
+  .c-top { font-size: 13px; }
+  .c-center { font-size: 18px; }
 }
 </style>
 </head>

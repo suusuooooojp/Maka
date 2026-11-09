@@ -42,7 +42,7 @@ class Loader {
 
     this.queryString = gameConfig._version && gameConfig._version.commit_short
       ? "?" + gameConfig._version.commit_short
-      : "?v=20261108v1";
+      : "?v=20261108v2";
 
     var songsPrefetch = this.ajax("/taiko/api/songs");
 

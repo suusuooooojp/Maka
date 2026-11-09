@@ -413,14 +413,19 @@ async def batch_search_candidates(is_user_jp: bool=True) -> list[dict]:
 # Metadata (oEmbed 100% Title Guarantee)
 # ---------------------------------------------------------------------------
 async def fetch_oembed_title(video_id: str) -> tuple[str, str, str]:
-    url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json"
-    try:
-        resp = await PROBE_CLIENT.get(url, timeout=2.5)
-        if resp.status_code == 200:
-            d = resp.json()
-            return d.get("title", ""), d.get("author_name", ""), d.get("author_url", "")
-    except Exception:
-        pass
+    for url in (
+        f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={video_id}&format=json",
+        f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}",
+    ):
+        try:
+            resp = await PROBE_CLIENT.get(url, timeout=3.5)
+            if resp.status_code == 200:
+                d = resp.json()
+                t = str(d.get("title") or "").strip()
+                if t:
+                    return t, str(d.get("author_name") or "").strip(), str(d.get("author_url") or "").strip()
+        except Exception:
+            pass
     return "", "", ""
 
 
@@ -677,10 +682,13 @@ async def get_video_metadata(video_id: str) -> dict:
             except Exception:
                 pass
 
+    is_fallback = False
     if not title or not author:
         if not video_id or len(video_id) != 11:
             return {}
-        title = title or f"YouTube Video ({video_id})"
+        if not title:
+            is_fallback = True
+            title = f"YouTube Video ({video_id})"
         author = author or "YouTube"
 
     meta = {
@@ -695,7 +703,7 @@ async def get_video_metadata(video_id: str) -> dict:
         "publishedText": upload_date,
         "recommended": recs
     }
-    cache_set(c_key, meta, ttl=900.0)
+    cache_set(c_key, meta, ttl=30.0 if is_fallback else 900.0)
     return meta
 
 

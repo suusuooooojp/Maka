@@ -91,6 +91,7 @@ def _render_base(title: str, body: str, script: str = "", active_nav: str = "hom
 html, body {{
   margin: 0;
   padding: 0;
+  overflow-x: hidden;
   background-color: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
   font-family: var(--md-sys-typescale-font-plain);
@@ -410,6 +411,8 @@ main {{
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
   margin-top: var(--md-space-2);
   padding: 0 var(--md-space-1);
   font-size: 14px;
@@ -430,6 +433,9 @@ main {{
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(300px, 1.1fr);
   gap: var(--md-space-5);
+}}
+.watch-layout > * {{
+  min-width: 0;
 }}
 .player {{
   background-color: var(--md-sys-color-surface-container-lowest);
@@ -501,6 +507,8 @@ main {{
   line-height: 1.35;
   margin: 0 0 var(--md-space-2);
   color: var(--md-sys-color-on-surface);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }}
 .sub {{
   color: var(--md-sys-color-on-surface-variant);
@@ -691,13 +699,13 @@ main {{
 
 @media (max-width: 960px) {{
   .watch-layout {{
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }}
 }}
 
 @media (max-width: 720px) {{
   .wkm-app-shell {{
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }}
   .wkm-nav-rail {{
     display: none;
@@ -706,10 +714,26 @@ main {{
     display: flex;
   }}
   header {{
+    flex-wrap: wrap;
+    gap: 8px;
     padding: var(--md-space-2) var(--md-space-3);
+  }}
+  .brand {{
+    order: 1;
+    font-size: 16px;
+  }}
+  .nav {{
+    order: 2;
+    margin-left: auto;
   }}
   .nav a {{
     display: none;
+  }}
+  .search {{
+    order: 3;
+    flex: 1 1 100%;
+    max-width: 100%;
+    width: 100%;
   }}
   main {{
     padding: var(--md-space-3) var(--md-space-3) 84px;
@@ -723,6 +747,16 @@ main {{
   }}
   .card-title {{
     font-size: 12.5px;
+  }}
+  .details {{
+    padding: var(--md-space-3) var(--md-space-4);
+  }}
+  .details h1 {{
+    font-size: 17px;
+  }}
+  .rec {{
+    grid-template-columns: 120px minmax(0, 1fr);
+    gap: var(--md-space-2);
   }}
   .channel-head {{
     align-items: flex-start;

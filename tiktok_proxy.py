@@ -1082,27 +1082,28 @@ async def tiktok_api_user_profile(request: Request, username: str = "") -> JSONR
 
 
 _TIKTOK_HTML = r"""<!DOCTYPE html>
-<html lang="ja">
+<html lang="ja" data-theme="dark">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="stylesheet" href="/design-system/m3.css">
 <script src="/design-system/m3.js"></script>
 <style>
   :root {
-    --bg: var(--md-sys-color-surface-dim, #000000);
-    --bg-elevated: var(--md-sys-color-surface-container-low, #121212);
-    --bg-card: var(--md-sys-color-surface-container, #181818);
+    --bg: #0a0a0a;
+    --bg-elevated: #121212;
+    --bg-card: #181818;
     --bg-hover: rgba(255, 255, 255, 0.08);
-    --bg-input: var(--md-sys-color-surface-container-high, rgba(255, 255, 255, 0.08));
-    --border: var(--md-sys-color-outline-variant, rgba(255, 255, 255, 0.12));
-    --text: var(--md-sys-color-on-surface, #ffffff);
-    --text-secondary: var(--md-sys-color-on-surface-variant, rgba(255, 255, 255, 0.75));
-    --text-muted: var(--md-sys-color-outline, rgba(255, 255, 255, 0.5));
-    --pink: var(--md-sys-color-primary, #fe2c55);
+    --bg-input: rgba(255, 255, 255, 0.08);
+    --border: rgba(255, 255, 255, 0.12);
+    --text: #ffffff;
+    --text-secondary: rgba(255, 255, 255, 0.78);
+    --text-muted: rgba(255, 255, 255, 0.55);
+    --pink: #fe2c55;
     --pink-hover: #ef2950;
-    --cyan: var(--md-sys-color-tertiary, #25f4ee);
+    --cyan: #25f4ee;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -2370,10 +2371,36 @@ _TIKTOK_HTML = r"""<!DOCTYPE html>
     .tt-feed-item { height: calc(100vh - 54px); padding: 0; }
     .tt-feed-card-wrap { height: calc(100vh - 54px); width: 100vw; gap: 0; }
     .tt-video-box { width: 100vw; max-width: 100vw; height: 100%; border-radius: 0; border: none; }
+    .tt-video-overlay { padding: 56px 74px 20px 14px; }
     .tt-action-rail {
       position: absolute;
       right: 10px;
       bottom: 68px;
+      z-index: 25;
+    }
+    .tt-top-right-bar {
+      top: 12px;
+      right: 12px;
+      gap: 8px;
+    }
+    .tt-top-login-btn {
+      padding: 6px 14px;
+      font-size: 13px;
+    }
+    .tt-profile-view, .tt-explore-view {
+      padding: 56px 14px 74px 14px;
+    }
+    .tt-profile-header {
+      flex-wrap: wrap;
+      gap: 14px;
+    }
+    .tt-profile-avatar-lg {
+      width: 76px;
+      height: 76px;
+      font-size: 28px;
+    }
+    .tt-login-modal {
+      padding: 24px 18px 20px;
     }
   }
 </style>

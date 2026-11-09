@@ -396,6 +396,27 @@ html, body {
 @media (max-width: 860px) {
   .yt-guide { display: none; }
   .sh-zero-pill { display: none; }
+  .yt-masthead-status { display: none; }
+  .sh-toolbar { padding: 6px 8px; gap: 6px; min-height: 44px; }
+  .sh-lock-badge { display: none; }
+  .sh-omnibar-form { min-width: 140px; height: 34px; padding: 0 4px 0 10px; }
+  .sh-engine-group {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .sh-engine-group::-webkit-scrollbar { display: none; }
+  .sh-mode-btn { padding: 4px 9px; font-size: 10.5px; }
+  .yt-masthead { height: 48px; padding: 0 10px; gap: 8px; }
+  .yt-brand { font-size: 16px; flex-shrink: 0; }
+  .yt-search-wrap { min-width: 0; }
+  .yt-search-form { height: 34px; }
+  .yt-search-input { min-width: 0; padding: 0 12px; font-size: 13px; }
+  .yt-search-btn { width: 44px; flex-shrink: 0; }
+  .yt-main { padding: 0 12px 28px; }
+  .yt-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
 }
 .yt-guide-item {
   display: flex;
@@ -722,7 +743,7 @@ body { top: 0 !important; }
             <button type="submit" class="yt-search-btn" title="検索"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7.5"/><path d="m20 20-3.6-3.6"/></svg></button>
           </form>
         </div>
-        <div style="font-size:12px;color:var(--md-sys-color-tertiary);font-weight:600;white-space:nowrap">
+        <div class="yt-masthead-status" style="font-size:12px;color:var(--md-sys-color-tertiary);font-weight:600;white-space:nowrap">
           Render 0%・外部鯖 0%・完全直結
         </div>
       </div>

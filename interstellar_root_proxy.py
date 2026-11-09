@@ -139,6 +139,7 @@ _SW_BOOTSTRAP_HTML = """<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <style>

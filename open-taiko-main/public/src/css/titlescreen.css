@@ -41,17 +41,22 @@
 #title-disclaimer {
 	text-align: center;
 	position: absolute;
-	bottom: 5%;
+	left: 4%;
+	right: 4%;
+	bottom: 5.5%;
 	color: #fff;
 	z-index: 1;
 }
 #title-disclaimer span {
+	position: relative;
 	color: #fff;
 	font-size: 2vmin;
+	line-height: 1.4;
 	text-align: center;
 	display: block;
 }
 #title-disclaimer span:before {
-	left: initial;
+	left: 0;
+	right: 0;
 	filter: blur(0.1vmin);
 }
