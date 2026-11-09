@@ -1168,7 +1168,7 @@ async def _c1(request: Request):
         'const c = window.location.pathname === "/gt" || window.location.pathname.endsWith("/interstellar/gt");',
     )
     text = re.sub(
-        r"let\s+t\s*;\s*try\s*\{.*?\}\s*catch\s*\{.*?\}",
+        r"let\s+t\s*;\s*try\s*\{.*?\}\s*catch\s*\{\s*(?:try\s*\{.*?\}\s*catch\s*\{.*?\}\s*|[^}]*)\}",
         (
             "let t = false;\n"
             "try { if (window.parent && window.parent !== window && (window.parent.location.pathname === '/d' || window.parent.location.pathname === '/interstellar/d')) t = true; } catch {}\n"
@@ -1233,7 +1233,7 @@ async def _m1(request: Request):
         flags=re.DOTALL | re.IGNORECASE,
     )
     text = re.sub(
-        r"let\s+qp\s*;\s*try\s*\{.*?\}\s*catch\s*\{.*?\}",
+        r"let\s+qp\s*;\s*try\s*\{.*?\}\s*catch\s*\{\s*(?:try\s*\{.*?\}\s*catch\s*\{.*?\}\s*|[^}]*)\}",
         (
             "let qp = false;\n"
             "try { if (window.parent && window.parent !== window && (window.parent.location.pathname === '/d' || window.parent.location.pathname === '/interstellar/d')) qp = true; } catch {}\n"

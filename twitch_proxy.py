@@ -456,14 +456,19 @@ WORKER_SAFE_HIJACK_TWITCH = r"""
 })();
 """
 
+def _get_public_origin(request: Request = None) -> str:
+    if not request:
+        return "https://school-hub-adq2.onrender.com"
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    scheme = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip().lower()
+    if host and not host.startswith(("127.0.0.1", "localhost", "[::1]")):
+        scheme = "https"
+    return f"{scheme}://{host}" if host else "https://school-hub-adq2.onrender.com"
+
+
 def rewrite_text_content_twitch(text, request: Request = None):
     # 💡【重要・M3U8完全解決】iPad標準プレイヤーのために、プロキシの絶対URL（https://school-hub...）を構築
-    origin = "https://school-hub-adq2.onrender.com"
-    if request:
-        host = request.headers.get("host")
-        if host:
-            scheme = request.url.scheme
-            origin = f"{scheme}://{host}"
+    origin = _get_public_origin(request)
 
     text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.twitch\.tv', (origin + r'/proxy_subdomain/twitch/\1'), text)
     text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.ttvnw\.net', (origin + r'/proxy_subdomain/ttvnw/\1'), text)
@@ -499,12 +504,7 @@ def clean_headers(headers_dict, request: Request, domain: str):
     # CORS解決（Error #3000 完全回避）
     origin = request.headers.get("origin")
     if not origin:
-        host = request.headers.get("host")
-        if host:
-            scheme = request.url.scheme
-            origin = f"{scheme}://{host}"
-        else:
-            origin = "*"
+        origin = _get_public_origin(request) if request else "*"
 
     cleaned["access-control-allow-origin"] = origin
     cleaned["access-control-allow-credentials"] = "true"
@@ -606,7 +606,7 @@ async def process_response(resp, request, service, proxy_headers):
             text = re.sub(r"\s+integrity='[^']+'", '', text)
             text = re.sub(r'<meta\s+http-equiv=["\']Content-Security-Policy[^>]*>', '', text, flags=re.I)
             text = rewrite_text_content_twitch(text, request)
-            text = text.replace("https://player.twitch.tv", request.url.scheme + "://" + request.url.netloc + "/twitch")
+            text = text.replace("https://player.twitch.tv", _get_public_origin(request) + "/twitch")
             tag = "<script>" + NETWORK_HIJACK_SCRIPT_TWITCH + "</script>\n<script src=\"/openchat/chat.js\" defer></script>"
             text = text.replace("</head>", tag + "</head>", 1) if "</head>" in text else tag + text
         elif is_css:

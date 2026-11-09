@@ -28,7 +28,10 @@ from fastapi.responses import StreamingResponse
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
+_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy"))
+
 RELAY_CLIENT = httpx.AsyncClient(
+    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2),
     follow_redirects=True,
     verify=True,
     timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
@@ -37,6 +40,7 @@ RELAY_CLIENT = httpx.AsyncClient(
 )
 
 PROBE_CLIENT = httpx.AsyncClient(
+    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1),
     follow_redirects=True,
     verify=True,
     timeout=httpx.Timeout(connect=3.0, read=4.0, write=4.0, pool=4.0),
@@ -439,14 +443,31 @@ async def search_videos(query: str) -> list[dict]:
                 ir=sec.get('itemSectionRenderer',{})
                 for item in ir.get('contents',[]) if isinstance(ir,dict) else []:
                     vr=item.get('videoRenderer',{}) if isinstance(item,dict) else {}
-                    if not vr:continue
-                    vid=str(vr.get('videoId','') or '');title=_text_runs(vr.get('title'));author=_text_runs(vr.get('ownerText'))
-                    if not vid or not title or not author:continue
-                    owner=vr.get('ownerText',{}).get('runs',[]) if isinstance(vr.get('ownerText',{}),dict) else [];cid=''
-                    if owner and isinstance(owner[0],dict):cid=str(owner[0].get('navigationEndpoint',{}).get('browseEndpoint',{}).get('browseId','') or '')
-                    box=vr.get('channelThumbnailSupportedRenderers',{});node=box.get('channelThumbnailWithLinkRenderer',{}) if isinstance(box,dict) else {};ths=node.get('thumbnail',{}).get('thumbnails',[]) if isinstance(node,dict) else []
-                    avatar=str(ths[-1].get('url','') or '') if ths else '';dtext=_text_runs(vr.get('lengthText'));dur=_parse_duration_text(dtext)
-                    add({'videoId':vid,'title':title,'author':author,'authorId':cid,'authorThumb':sanitize_thumb(avatar),'lengthText':dtext or '--:--','lengthSeconds':dur,'viewCountText':_text_runs(vr.get('viewCountText')),'thumbnail':f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg','isShortCandidate':False})
+                    if vr:
+                        vid=str(vr.get('videoId','') or '');title=_text_runs(vr.get('title'));author=_text_runs(vr.get('ownerText'))
+                        if not vid or not title or not author:continue
+                        owner=vr.get('ownerText',{}).get('runs',[]) if isinstance(vr.get('ownerText',{}),dict) else [];cid=''
+                        if owner and isinstance(owner[0],dict):cid=str(owner[0].get('navigationEndpoint',{}).get('browseEndpoint',{}).get('browseId','') or '')
+                        box=vr.get('channelThumbnailSupportedRenderers',{});node=box.get('channelThumbnailWithLinkRenderer',{}) if isinstance(box,dict) else {};ths=node.get('thumbnail',{}).get('thumbnails',[]) if isinstance(node,dict) else []
+                        avatar=str(ths[-1].get('url','') or '') if ths else '';dtext=_text_runs(vr.get('lengthText'));dur=_parse_duration_text(dtext)
+                        add({'videoId':vid,'title':title,'author':author,'authorId':cid,'authorThumb':sanitize_thumb(avatar),'lengthText':dtext or '--:--','lengthSeconds':dur,'viewCountText':_text_runs(vr.get('viewCountText')),'thumbnail':f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg','isShortCandidate':False})
+                    elif isinstance(item,dict) and 'lockupViewModel' in item:
+                        lvm=item.get('lockupViewModel',{})
+                        if not isinstance(lvm,dict):continue
+                        vid=str(lvm.get('contentId') or '')
+                        if not vid or len(vid)!=11:continue
+                        meta_vm=lvm.get('metadata',{}).get('lockupMetadataViewModel',{})
+                        title=str((meta_vm.get('title') or {}).get('content') or '')
+                        rows=meta_vm.get('metadata',{}).get('contentMetadataViewModel',{}).get('metadataRows',[])
+                        author='';views=''
+                        if isinstance(rows,list) and rows:
+                            parts0=rows[0].get('metadataParts',[]) if isinstance(rows[0],dict) else []
+                            if parts0 and isinstance(parts0[0],dict):author=str((parts0[0].get('text') or {}).get('content') or '')
+                            if len(rows)>1 and isinstance(rows[1],dict):
+                                parts1=rows[1].get('metadataParts',[])
+                                if parts1 and isinstance(parts1[0],dict):views=str(parts1[0].get('accessibilityLabel') or (parts1[0].get('text') or {}).get('content') or '')
+                        if vid and title:
+                            add({'videoId':vid,'title':title,'author':author or 'YouTube','authorId':'','authorThumb':'','lengthText':'--:--','lengthSeconds':0,'viewCountText':views,'thumbnail':f'https://i.ytimg.com/vi/{vid}/mqdefault.jpg','isShortCandidate':False})
                 shelf=sec.get('reelShelfRenderer',{})
                 for item in shelf.get('items',[]) if isinstance(shelf,dict) else []:
                     rr=item.get('reelItemRenderer',{}) if isinstance(item,dict) else {};vid=str(rr.get('videoId','') or '');title=_text_runs(rr.get('headline')) or _text_runs(rr.get('title'))
@@ -657,7 +678,10 @@ async def get_video_metadata(video_id: str) -> dict:
                 pass
 
     if not title or not author:
-        return {}
+        if not video_id or len(video_id) != 11:
+            return {}
+        title = title or f"YouTube Video ({video_id})"
+        author = author or "YouTube"
 
     meta = {
         "videoId": video_id,

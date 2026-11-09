@@ -860,6 +860,14 @@ async def _serve_kazwire_page_or_asset(request: Request, rel_path: str) -> Respo
         )
 
 
+@router.api_route("/kazwire/api/comments", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/api/comments", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)
+async def kazwire_comments_stub(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=_cors_headers())
+    return JSONResponse(content=[], headers=_cors_headers({"Cache-Control": "no-store"}))
+
+
 @router.api_route("/kazwire/", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
 async def kazwire_root(request: Request) -> Response:
     return await _serve_kazwire_page_or_asset(request, "")

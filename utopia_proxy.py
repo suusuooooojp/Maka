@@ -228,13 +228,18 @@ def _init_from_local_clone() -> None:
 _init_from_local_clone()
 
 
+_HAS_PROXY_ENV = any(os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"))
+
+
 def _get_asset_client() -> httpx.AsyncClient:
     global _ASSET_CLIENT
     if _ASSET_CLIENT is None or _ASSET_CLIENT.is_closed:
+        limits = httpx.Limits(max_connections=80, max_keepalive_connections=30, keepalive_expiry=30.0)
         _ASSET_CLIENT = httpx.AsyncClient(
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_connections=80, max_keepalive_connections=30, keepalive_expiry=30.0),
+            limits=limits,
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", limits=limits),
             headers={"User-Agent": DEFAULT_UA},
         )
     return _ASSET_CLIENT
@@ -243,11 +248,13 @@ def _get_asset_client() -> httpx.AsyncClient:
 def _get_bare_client() -> httpx.AsyncClient:
     global _BARE_CLIENT
     if _BARE_CLIENT is None or _BARE_CLIENT.is_closed:
+        limits = httpx.Limits(max_connections=120, max_keepalive_connections=40, keepalive_expiry=30.0)
         _BARE_CLIENT = httpx.AsyncClient(
             follow_redirects=False,
             verify=False,
             timeout=httpx.Timeout(45.0, connect=10.0),
-            limits=httpx.Limits(max_connections=120, max_keepalive_connections=40, keepalive_expiry=30.0),
+            limits=limits,
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, limits=limits),
         )
     return _BARE_CLIENT
 
@@ -255,11 +262,13 @@ def _get_bare_client() -> httpx.AsyncClient:
 def _get_service_client() -> httpx.AsyncClient:
     global _SERVICE_CLIENT
     if _SERVICE_CLIENT is None or _SERVICE_CLIENT.is_closed:
+        limits = httpx.Limits(max_connections=80, max_keepalive_connections=30, keepalive_expiry=30.0)
         _SERVICE_CLIENT = httpx.AsyncClient(
             follow_redirects=True,
             verify=False,
             timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(max_connections=80, max_keepalive_connections=30, keepalive_expiry=30.0),
+            limits=limits,
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, limits=limits),
         )
     return _SERVICE_CLIENT
 
@@ -509,7 +518,7 @@ function quickGo(url, prx){
 
 function defaultUrl(url){
   if(!url.includes('.') && !url.startsWith('https://') && !url.startsWith('http://')){
-    this.url = "https://www.google.com/search?q=" + encodeURIComponent(url);
+    this.url = "https://search.yahoo.co.jp/search?p=" + encodeURIComponent(url);
   } else if (url.startsWith('https://')) {
     this.url = url;
   } else if(url.startsWith('http://')) {
@@ -567,12 +576,14 @@ function uv(url) {
     }, 2500);
   }
   let targetUrl = url.trim();
-  if (!isUrl(targetUrl)) targetUrl = 'https://www.google.com/search?q=' + encodeURIComponent(targetUrl);
+  if (!isUrl(targetUrl)) targetUrl = 'https://search.yahoo.co.jp/search?p=' + encodeURIComponent(targetUrl);
   else if (!(targetUrl.startsWith('https://') || targetUrl.startsWith('http://'))) targetUrl = 'https://' + targetUrl;
 
   const proxiedPath = __uv$config.prefix + encodeXor(targetUrl);
   ensureUtopiaSW().finally(() => {
     if (localStorage.getItem("ab_cloak") == "true") {
+      var tab = window.open('about:blank', '_blank');
+      if (tab) {
         tab.document.documentElement.innerHTML = '<!DOCTYPE html><html><head><title>Google</title><link rel="icon" type="image/x-icon" href="' + window.location.origin + '/favicon.ico"><style>body {margin:0;overflow:hidden}</style></head><body><iframe width="100%" height="100%" src="' + window.location.origin + proxiedPath + '" frameborder="0"></iframe></body></html>';
         tab.document.close();
         window.top.location.replace("https://www.google.com");
