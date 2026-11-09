@@ -1821,13 +1821,14 @@ body { top: 0 !important; }
     setLoading(true, 60);
     siteFrame.style.display = "none";
     ytLayer.style.display = "flex";
-    telemetryText.textContent = "Render 0% | googlevideo.com 解析中";
+    telemetryText.textContent = "高速ストリーム接続中...";
 
+    const fallbackStreamUrl = "/youtube/runtime/stream/" + encodeURIComponent(videoId);
     ytContent.innerHTML = `
       <div class="yt-watch">
         <div>
           <div class="yt-player-box" id="movie_player">
-            <video id="yt-direct-video" controls autoplay playsinline webkit-playsinline preload="auto" referrerpolicy="no-referrer" style="display:block;width:100%;height:100%;object-fit:contain;background:#000"></video>
+            <video id="yt-direct-video" src="${esc(fallbackStreamUrl)}" controls autoplay playsinline webkit-playsinline preload="auto" referrerpolicy="no-referrer" style="display:block;width:100%;height:100%;object-fit:contain;background:#000"></video>
             <audio id="yt-direct-audio" referrerpolicy="no-referrer" style="display:none"></audio>
             <iframe id="yt-embed-fallback" style="display:none;width:100%;height:100%;border:0" allowfullscreen allow="autoplay; encrypted-media; picture-in-picture; fullscreen" referrerpolicy="strict-origin-when-cross-origin"></iframe>
           </div>
@@ -1842,6 +1843,14 @@ body { top: 0 !important; }
       </div>
     `;
     ytMain.scrollTop = 0;
+
+    const initVideoEl = document.getElementById("yt-direct-video");
+    if (initVideoEl) {
+      initVideoEl.play().catch(() => {
+        initVideoEl.muted = true;
+        initVideoEl.play().catch(() => {});
+      });
+    }
 
     try {
       const [streamInfo, nextData] = await Promise.all([
@@ -1859,6 +1868,7 @@ body { top: 0 !important; }
       const qualEl = document.getElementById("yt-w-qualities");
       const descEl = document.getElementById("yt-w-desc");
       const relEl = document.getElementById("yt-w-related");
+      if (!videoEl) return;
 
       const finalTitle = vd.title || nextMeta.title || videoId;
       const finalAuthor = vd.author || nextMeta.author || "YouTube";
@@ -1879,7 +1889,6 @@ body { top: 0 !important; }
       }
 
       if (streamInfo && (streamInfo.formats.length > 0 || streamInfo.hlsManifestUrl)) {
-        const fallbackStreamUrl = "/youtube/runtime/stream/" + encodeURIComponent(videoId);
         let activeAudioUrl = "";
         function selectFormat(fmt) {
           const cur = videoEl.currentTime || 0;
@@ -1887,6 +1896,16 @@ body { top: 0 !important; }
           embedEl.src = "about:blank";
           videoEl.style.display = "block";
           activeAudioUrl = fmt.audioUrl || "";
+          const curAttrSrc = videoEl.getAttribute("src") || "";
+          if (curAttrSrc === fmt.url && !activeAudioUrl && !videoEl.error) {
+            if (videoEl.paused) {
+              videoEl.play().catch(() => {
+                videoEl.muted = true;
+                videoEl.play().catch(() => {});
+              });
+            }
+            return;
+          }
           videoEl.src = fmt.url;
           if (activeAudioUrl) {
             audioEl.src = activeAudioUrl;

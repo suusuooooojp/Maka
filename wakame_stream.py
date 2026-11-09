@@ -326,15 +326,27 @@ class StreamManager:
 
         target_url, source_name, quality = stream_data
         client_range = request.headers.get("range")
-        req_headers = {"User-Agent": USER_AGENT, "Referer": "https://www.youtube.com/", "Accept": "*/*"}
+        req_start_b = 0
+        req_end_b: int | None = None
         if client_range:
-            req_headers["Range"] = client_range
-        elif request.method == "GET":
-            req_headers["Range"] = "bytes=0-"
+            m_r = re.match(r"bytes=(\d+)-(\d*)", client_range)
+            if m_r:
+                req_start_b = int(m_r.group(1))
+                if m_r.group(2):
+                    req_end_b = int(m_r.group(2))
+
+        max_chunk = 1048576
+        eff_end = min(req_end_b, req_start_b + max_chunk - 1) if req_end_b is not None else (req_start_b + max_chunk - 1)
+        req_headers = {
+            "User-Agent": USER_AGENT,
+            "Referer": "https://www.youtube.com/",
+            "Accept": "*/*",
+            "Range": f"bytes={req_start_b}-{eff_end}",
+        }
 
         resp = None
         try:
-            req = RELAY_CLIENT.build_request(request.method, target_url, headers=req_headers)
+            req = RELAY_CLIENT.build_request(request.method, target_url, headers=req_headers, timeout=12.0)
             resp = await RELAY_CLIENT.send(req, stream=True)
             ct = resp.headers.get("content-type", "").lower()
 
@@ -346,7 +358,7 @@ class StreamManager:
                 if not stream_data:
                     return Response("Stream switching to embed", status_code=204)
                 target_url, source_name, quality = stream_data
-                req = RELAY_CLIENT.build_request(request.method, target_url, headers=req_headers)
+                req = RELAY_CLIENT.build_request(request.method, target_url, headers=req_headers, timeout=12.0)
                 resp = await RELAY_CLIENT.send(req, stream=True)
         except Exception:
             if resp:
@@ -370,17 +382,22 @@ class StreamManager:
             await resp.aclose()
             return Response(status_code=resp.status_code, headers=res_headers)
 
-        async def chunk_generator():
-            try:
-                async for chunk in resp.aiter_bytes():
-                    if chunk:
-                        yield chunk
-            except (asyncio.CancelledError, Exception):
-                pass
-            finally:
-                await resp.aclose()
+        want_len = max(1, eff_end - req_start_b + 1)
+        buf = bytearray()
+        try:
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    buf.extend(chunk)
+                    if len(buf) >= want_len:
+                        break
+        except (asyncio.CancelledError, Exception):
+            pass
+        finally:
+            await resp.aclose()
 
-        return StreamingResponse(chunk_generator(), status_code=resp.status_code, headers=res_headers)
+        body_bytes = bytes(buf[:want_len])
+        res_headers["Content-Length"] = str(len(body_bytes))
+        return Response(body_bytes, status_code=206, headers=res_headers)
 
 
 STREAM_MANAGER = StreamManager()

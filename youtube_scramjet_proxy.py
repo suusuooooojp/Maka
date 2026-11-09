@@ -146,7 +146,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261108-v32"
+RUNTIME_REV = "20261108-v33"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -1453,10 +1453,37 @@ def _parse_mp4_mvhd_duration(data: bytes) -> float:
     return 0.0
 
 
+def _parse_mp4_total_len(data: bytes) -> int:
+    """Extract exact total MP4 file byte length from top-level ftyp + moov + mdat box headers."""
+    pos = 0
+    n = len(data)
+    try:
+        while pos + 8 <= n:
+            box_size = struct.unpack(">I", data[pos : pos + 4])[0]
+            box_type = data[pos + 4 : pos + 8]
+            header_len = 8
+            if box_size == 1:
+                if pos + 16 > n:
+                    break
+                box_size = struct.unpack(">Q", data[pos + 8 : pos + 16])[0]
+                header_len = 16
+            elif box_size == 0:
+                break
+            if box_size < header_len:
+                break
+            box_end = pos + box_size
+            if box_type == b"mdat":
+                return box_end
+            pos = box_end
+    except Exception:
+        pass
+    return 0
+
+
 def _calc_mp4_prewarm_target(data: bytes, total_len: int) -> int:
     """Inspect initial MP4 atoms (ftyp, moov, etc.) to determine how many bytes cover the full moov atom + initial mdat."""
-    default_target = 2 * 1024 * 1024
-    max_target = 12 * 1024 * 1024
+    default_target = 512 * 1024
+    max_target = 1024 * 1024
     pos = 0
     n = len(data)
     try:
@@ -1475,7 +1502,7 @@ def _calc_mp4_prewarm_target(data: bytes, total_len: int) -> int:
                 break
             box_end = pos + box_size
             if box_type == b"moov":
-                target = box_end + 2 * 1024 * 1024
+                target = box_end + 256 * 1024
                 if total_len > 0:
                     target = min(target, total_len)
                 return max(default_target, min(target, max_target))
@@ -1514,7 +1541,7 @@ class _StreamHeadPrewarm:
         self.dur_s = 0.0
         self.media_type = "video/mp4"
         self.buf = bytearray()
-        self.target_bytes = 2 * 1024 * 1024
+        self.target_bytes = 512 * 1024
         self.headers_ready = asyncio.Event()
         self.cond = asyncio.Condition()
         self.ok = False
@@ -1532,19 +1559,40 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
     try:
         client = await _get_media_http_client()
         for attempt in range(3):
-            req_url = entry.final_url if (attempt == 0 and entry.final_url) else init_url
+            if attempt == 0:
+                req_url = entry.final_url or init_url
+            elif attempt == 1:
+                u_vr, c_vr, d_vr = await _resolve_android_vr_stream_info(vid)
+                if not u_vr:
+                    u_vr, c_vr, d_vr = await _resolve_piped_stream_info(vid)
+                req_url = u_vr or init_url
+                if c_vr > 0 and entry.total_len <= 0:
+                    entry.total_len = c_vr
+                if d_vr > 0 and entry.dur_s <= 0:
+                    entry.dur_s = d_vr
+            else:
+                req_url = init_url
+
+            ua_hdr = (
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                if "c=ANDROID_VR" in req_url
+                else _DESKTOP_CHROME_UA
+            )
             try:
+                # Always send a bounded Range (bytes=0-524287) so invid-api.poketube.fun
+                # completes cleanly without aborting an open-ended full-file download.
+                req_end = entry.target_bytes - 1
                 async with client.stream(
                     "GET",
                     req_url,
                     headers={
-                        "User-Agent": _DESKTOP_CHROME_UA,
+                        "User-Agent": ua_hdr,
                         "Accept": "*/*",
                         "Accept-Encoding": "identity",
                         "Referer": "https://www.youtube.com/",
-                        "Range": "bytes=0-",
+                        "Range": f"bytes=0-{req_end}",
                     },
-                    timeout=20.0,
+                    timeout=10.0,
                 ) as resp:
                     ctype = (resp.headers.get("content-type") or "").lower()
                     if resp.status_code not in (200, 206) or (
@@ -1560,7 +1608,7 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
                         tail = cr.rsplit("/", 1)[-1].strip()
                         if tail.isdigit():
                             clen = int(tail)
-                    if not clen and not resp.headers.get("content-encoding"):
+                    if not clen and not resp.headers.get("content-encoding") and resp.status_code == 200:
                         cl_hdr = resp.headers.get("content-length") or ""
                         if cl_hdr.isdigit():
                             clen = int(cl_hdr)
@@ -1570,38 +1618,49 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
                             clen = int(qs["clen"][0])
                         except Exception:
                             pass
-                    dur_s = 0.0
-                    try:
-                        dur_s = float((qs.get("dur") or ["0"])[0])
-                    except Exception:
-                        pass
+                    dur_s = entry.dur_s
+                    if dur_s <= 0:
+                        try:
+                            dur_s = float((qs.get("dur") or ["0"])[0])
+                        except Exception:
+                            pass
 
-                    entry.total_len = clen
-                    entry.dur_s = dur_s
+                    if clen > 0:
+                        entry.total_len = clen
+                    if dur_s > 0:
+                        entry.dur_s = dur_s
                     entry.ok = True
-                    if clen > 0 or dur_s > 0:
+                    if entry.total_len > 0:
                         cached = _STREAM_META_CACHE.get(vid)
                         _STREAM_META_CACHE[vid] = (
                             time.time(),
                             entry.final_url,
-                            clen if clen > 0 else (cached[2] if cached else 0),
-                            dur_s if dur_s > 0 else (cached[3] if (cached and len(cached) > 3) else 0.0),
+                            entry.total_len,
+                            entry.dur_s if entry.dur_s > 0 else (cached[3] if (cached and len(cached) > 3) else 0.0),
                         )
-                    entry.headers_ready.set()
+                        entry.headers_ready.set()
 
-                    target_computed = False
                     mvhd_checked = False
                     async for chunk in resp.aiter_bytes():
                         if not chunk:
                             continue
                         entry.buf.extend(chunk)
-                        if not target_computed and len(entry.buf) >= 64:
-                            target_computed = True
-                            entry.target_bytes = _calc_mp4_prewarm_target(bytes(entry.buf[:256]), entry.total_len)
+                        if entry.total_len <= 0 and len(entry.buf) >= 256:
+                            parsed_total = _parse_mp4_total_len(bytes(entry.buf))
+                            if parsed_total > 0:
+                                entry.total_len = parsed_total
+                                cached = _STREAM_META_CACHE.get(vid)
+                                _STREAM_META_CACHE[vid] = (
+                                    time.time(),
+                                    entry.final_url,
+                                    entry.total_len,
+                                    entry.dur_s if entry.dur_s > 0 else (cached[3] if (cached and len(cached) > 3) else 0.0),
+                                )
+                                entry.headers_ready.set()
                         if not mvhd_checked and len(entry.buf) >= 512:
                             mvhd_checked = True
                             if entry.dur_s <= 0:
-                                parsed_d = _parse_mp4_mvhd_duration(bytes(entry.buf[:8192]))
+                                parsed_d = _parse_mp4_mvhd_duration(bytes(entry.buf[:16384]))
                                 if parsed_d > 0:
                                     entry.dur_s = parsed_d
                                     cached = _STREAM_META_CACHE.get(vid)
@@ -1612,6 +1671,19 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
                         if len(entry.buf) >= entry.target_bytes:
                             break
                     if len(entry.buf) > 0:
+                        if entry.total_len <= 0:
+                            parsed_total = _parse_mp4_total_len(bytes(entry.buf))
+                            if parsed_total > 0:
+                                entry.total_len = parsed_total
+                        if entry.total_len > 0:
+                            cached = _STREAM_META_CACHE.get(vid)
+                            _STREAM_META_CACHE[vid] = (
+                                time.time(),
+                                entry.final_url,
+                                entry.total_len,
+                                entry.dur_s if entry.dur_s > 0 else (cached[3] if (cached and len(cached) > 3) else 0.0),
+                            )
+                        entry.headers_ready.set()
                         break
             except Exception:
                 if len(entry.buf) > 0:
@@ -1635,11 +1707,9 @@ def _ensure_stream_head_prewarm(vid: str, final_url: str) -> _StreamHeadPrewarm 
     existing = _STREAM_HEAD_CACHE.get(vid)
     if existing and (time.time() - existing.created_at) < 300.0 and (not existing.done or existing.ok):
         return existing
-    while len(_STREAM_HEAD_CACHE) >= 2:
+    while len(_STREAM_HEAD_CACHE) >= 16:
         oldest_k = next(iter(_STREAM_HEAD_CACHE))
-        old_e = _STREAM_HEAD_CACHE.pop(oldest_k, None)
-        if old_e and old_e.task and not old_e.task.done():
-            old_e.task.cancel()
+        _STREAM_HEAD_CACHE.pop(oldest_k, None)
     entry = _StreamHeadPrewarm(vid, final_url)
     _STREAM_HEAD_CACHE[vid] = entry
     entry.task = asyncio.create_task(_run_stream_head_prewarm(entry))
@@ -1744,24 +1814,9 @@ async def _probe_companion_stream_info(video_id: str) -> tuple[str, int, float]:
     entry = _ensure_stream_head_prewarm(video_id, ep_url)
     if entry is not None:
         try:
-            await asyncio.wait_for(entry.headers_ready.wait(), timeout=5.0)
+            await asyncio.wait_for(entry.headers_ready.wait(), timeout=7.5)
             if entry.ok and entry.final_url:
                 return entry.final_url, entry.total_len, entry.dur_s
-        except Exception:
-            pass
-    client = await _get_media_http_client()
-    tasks = [
-        asyncio.create_task(_probe_single_companion(client, tpl.format(vid=video_id)))
-        for tpl in _COMPANION_STREAM_ENDPOINTS
-    ]
-    for fut in asyncio.as_completed(tasks):
-        try:
-            u, c, d = await fut
-            if u:
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-                return u, c, d
         except Exception:
             pass
     return "", 0, 0.0
@@ -1874,21 +1929,21 @@ async def _refresh_total_length(vid: str, final_url: str):
 async def _resolve_stream_info_impl(video_id: str) -> tuple[str, int, float]:
     # Prioritize companion itag=18 muxed MP4 stream first so _STREAM_HEAD_CACHE and _STREAM_META_CACHE stay 100% consistent
     comp_task = asyncio.create_task(_probe_companion_stream_info(video_id))
-    piped_task = asyncio.create_task(_resolve_piped_stream_info(video_id))
     url, clen, dur_s = "", 0, 0.0
 
     try:
-        u, c, d = await asyncio.wait_for(comp_task, timeout=3.2)
+        u, c, d = await asyncio.wait_for(comp_task, timeout=6.5)
         if u:
             url, clen, dur_s = u, c, d
     except Exception:
         pass
 
     if not url:
+        piped_task = asyncio.create_task(_resolve_piped_stream_info(video_id))
         vr_task = asyncio.create_task(_resolve_android_vr_stream_info(video_id))
         tasks = {piped_task, vr_task}
         try:
-            for fut in asyncio.as_completed(tasks, timeout=4.0):
+            for fut in asyncio.as_completed(tasks, timeout=4.5):
                 try:
                     u, c, d = await fut
                     if u:
@@ -1902,9 +1957,6 @@ async def _resolve_stream_info_impl(video_id: str) -> tuple[str, int, float]:
             for t in tasks:
                 if not t.done():
                     t.cancel()
-    else:
-        if not piped_task.done():
-            piped_task.cancel()
 
     if not url:
         try:
@@ -1982,22 +2034,17 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
     client = await _get_media_http_client()
 
-    # Wait briefly if an in-flight stream resolve is already running for this video
-    if vid not in _STREAM_META_CACHE and vid in _INFLIGHT_STREAM_RESOLVES:
-        try:
-            await asyncio.wait_for(asyncio.shield(_INFLIGHT_STREAM_RESOLVES[vid]), timeout=1.8)
-        except Exception:
-            pass
-
-    # Serve HEAD, small range probes, and initial moov/mdat stream directly from prewarmed head buffer
+    # Always ensure head prewarm is running or completed so total_len and initial moov/mdat are available
     head_entry = _STREAM_HEAD_CACHE.get(vid)
-    if head_entry is None and req_start_b == 0 and request.method == "GET":
+    if head_entry is None:
         cached_m = _STREAM_META_CACHE.get(vid)
-        head_entry = _ensure_stream_head_prewarm(vid, cached_m[1] if (cached_m and cached_m[1]) else fast_primary)
+        head_entry = _ensure_stream_head_prewarm(
+            vid, cached_m[1] if (cached_m and cached_m[1]) else fast_primary
+        )
     if head_entry and (time.time() - head_entry.created_at) < 300.0:
         if not head_entry.headers_ready.is_set():
             try:
-                await asyncio.wait_for(head_entry.headers_ready.wait(), timeout=2.5)
+                await asyncio.wait_for(head_entry.headers_ready.wait(), timeout=8.0)
             except Exception:
                 pass
         if head_entry.ok and head_entry.total_len > 0:
@@ -2020,162 +2067,74 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     media_type=head_entry.media_type,
                 )
 
-            if req_start_b < len(head_entry.buf) or (not head_entry.done and req_start_b <= head_entry.target_bytes):
-                eff_end = req_end_b if (req_end_b is not None and req_end_b < total_b) else (total_b - 1)
-                eff_len = max(0, eff_end - req_start_b + 1)
-                out_headers["Content-Range"] = f"bytes {req_start_b}-{eff_end}/{total_b}"
-                out_headers["Content-Length"] = str(eff_len)
-                s_url_pre = head_entry.final_url or fast_primary
+            if req_start_b < len(head_entry.buf) or (not head_entry.done and req_start_b < head_entry.target_bytes):
+                # Cap each HTTP 206 response to the prewarmed buffer target (512KB-1MB) so Google Frontend
+                # flushes the complete 206 Partial Content response immediately without buffering full videos.
+                cap_end = min(total_b - 1, max(len(head_entry.buf), head_entry.target_bytes) - 1)
+                if req_end_b is not None:
+                    want_end = min(req_end_b, cap_end)
+                else:
+                    want_end = cap_end
 
-                async def _open_cont_resp(start_pos: int, end_pos: int, target_u: str):
-                    rng_hdr = f"bytes={start_pos}-{end_pos}"
-                    ua_hdr = (
-                        "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
-                        if "c=ANDROID_VR" in target_u
-                        else _DESKTOP_CHROME_UA
-                    )
-                    retry_headers = {
-                        "User-Agent": ua_hdr,
-                        "Accept": "*/*",
-                        "Accept-Encoding": "identity",
-                        "Referer": "https://www.youtube.com/",
-                        "Range": rng_hdr,
-                    }
-                    r_req = client.build_request("GET", target_u, headers=retry_headers)
-                    c_resp = await client.send(r_req, stream=True)
-                    if c_resp.status_code not in (200, 206):
-                        await c_resp.aclose()
-                        if target_u != fast_primary:
-                            retry_headers["User-Agent"] = _DESKTOP_CHROME_UA
-                            r_req = client.build_request("GET", fast_primary, headers=retry_headers)
-                            c_resp = await client.send(r_req, stream=True)
-                            if c_resp.status_code not in (200, 206):
-                                await c_resp.aclose()
-                                return None
-                        else:
-                            return None
-                    return c_resp
-
-                async def _stream_from_prewarm(
-                    h_entry=head_entry,
-                    init_start=req_start_b,
-                    exp_end=eff_end,
-                    s_url=s_url_pre,
-                ):
-                    cur_pos = init_start
-                    preconn_task: asyncio.Task | None = None
-                    preconn_pos = -1
+                deadline = time.monotonic() + 8.0
+                while len(head_entry.buf) <= want_end and not head_entry.done:
+                    rem = deadline - time.monotonic()
+                    if rem <= 0:
+                        break
                     try:
-                        # 1. Drain prewarmed in-memory MP4 header + moov + initial mdat at memory speed
-                        while cur_pos <= exp_end:
-                            avail = len(h_entry.buf)
-                            if (
-                                preconn_task is None
-                                and h_entry.done
-                                and avail <= exp_end
-                                and (avail - cur_pos) <= 1572864
-                            ):
-                                preconn_pos = avail
-                                preconn_task = asyncio.create_task(
-                                    _open_cont_resp(preconn_pos, exp_end, h_entry.final_url or s_url)
-                                )
-                            if cur_pos < avail:
-                                end_slice = min(avail, exp_end + 1, cur_pos + 262144)
-                                chunk = bytes(h_entry.buf[cur_pos:end_slice])
-                                cur_pos += len(chunk)
-                                yield chunk
-                            elif not h_entry.done:
-                                try:
-                                    async with h_entry.cond:
-                                        if len(h_entry.buf) <= cur_pos and not h_entry.done:
-                                            await asyncio.wait_for(h_entry.cond.wait(), timeout=0.25)
-                                except Exception:
-                                    pass
-                            else:
-                                break
+                        async with head_entry.cond:
+                            if len(head_entry.buf) <= want_end and not head_entry.done:
+                                await asyncio.wait_for(head_entry.cond.wait(), timeout=min(0.4, rem))
+                    except Exception:
+                        pass
 
-                        if cur_pos > exp_end:
-                            return
+                avail = len(head_entry.buf)
+                if avail > req_start_b:
+                    slice_end = min(avail, want_end + 1)
+                    body_bytes = bytes(head_entry.buf[req_start_b:slice_end])
+                    actual_end = req_start_b + len(body_bytes) - 1
+                    out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{total_b}"
+                    out_headers["Content-Length"] = str(len(body_bytes))
+                    return Response(
+                        body_bytes,
+                        status_code=206,
+                        headers=out_headers,
+                        media_type=head_entry.media_type,
+                    )
 
-                        # 2. Seamlessly continue streaming remaining mdat bytes from upstream
-                        retries = 0
-                        cur_resp = None
-                        try:
-                            while cur_pos <= exp_end and retries < 6:
-                                prev_pos = cur_pos
-                                try:
-                                    if preconn_task is not None and preconn_pos == cur_pos:
-                                        cur_resp = await preconn_task
-                                        preconn_task = None
-                                    else:
-                                        if preconn_task is not None:
-                                            preconn_task.cancel()
-                                            preconn_task = None
-                                        cur_resp = await _open_cont_resp(
-                                            cur_pos, exp_end, h_entry.final_url or s_url
-                                        )
-                                    if cur_resp is None:
-                                        break
-                                    async for chunk in cur_resp.aiter_bytes():
-                                        if chunk:
-                                            if cur_pos + len(chunk) > exp_end + 1:
-                                                chunk = chunk[: (exp_end + 1 - cur_pos)]
-                                            cur_pos += len(chunk)
-                                            yield chunk
-                                            if cur_pos > exp_end:
-                                                break
-                                except Exception:
-                                    pass
-                                finally:
-                                    if cur_resp is not None:
-                                        try:
-                                            await cur_resp.aclose()
-                                        except Exception:
-                                            pass
-                                        cur_resp = None
-                                if cur_pos > prev_pos:
-                                    retries = 0
-                                else:
-                                    retries += 1
-                        finally:
-                            if cur_resp is not None:
-                                try:
-                                    await cur_resp.aclose()
-                                except Exception:
-                                    pass
-                    finally:
-                        if preconn_task is not None and not preconn_task.done():
-                            preconn_task.cancel()
-
-                return StreamingResponse(
-                    _stream_from_prewarm(),
-                    status_code=206,
-                    headers=out_headers,
-                    media_type=head_entry.media_type,
-                )
-
+    max_chunk = 1048576  # 1 MB bounded chunk per HTTP 206 response
     for attempt in range(2):
         cached = _STREAM_META_CACHE.get(vid)
         resolved_url = cached[1] if (cached and (time.time() - cached[0]) < _STREAM_META_TTL) else ""
-        known_total = cached[2] if cached else 0
+        known_total = cached[2] if cached else (head_entry.total_len if (head_entry and head_entry.total_len > 0) else 0)
 
         candidates: list[str] = []
         if resolved_url:
             candidates.append(resolved_url)
+        if head_entry and head_entry.final_url and head_entry.final_url not in candidates:
+            candidates.append(head_entry.final_url)
         if fast_primary not in candidates:
             candidates.append(fast_primary)
 
         if attempt == 1:
             _STREAM_META_CACHE.pop(vid, None)
-            resolved_url, fresh_total, _ = await _resolve_stream_info(vid, force_refresh=True)
-            if resolved_url and resolved_url not in candidates:
-                candidates.insert(0, resolved_url)
-            if fresh_total > 0:
-                known_total = fresh_total
-            for tpl in _COMPANION_STREAM_ENDPOINTS:
-                u = tpl.format(vid=vid)
-                if u not in candidates:
-                    candidates.append(u)
+            u_vr, c_vr, d_vr = await _resolve_android_vr_stream_info(vid)
+            if not u_vr:
+                u_vr, c_vr, d_vr = await _resolve_piped_stream_info(vid)
+            if u_vr and u_vr not in candidates:
+                candidates.insert(0, u_vr)
+            if c_vr > 0:
+                known_total = c_vr
+
+        if known_total > 0 and req_start_b >= known_total:
+            return Response(
+                b"",
+                status_code=416,
+                headers={
+                    "Content-Range": f"bytes */{known_total}",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
 
         for target_url in candidates:
             try:
@@ -2184,24 +2143,22 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     if "c=ANDROID_VR" in target_url
                     else _DESKTOP_CHROME_UA
                 )
+                if req_end_b is not None:
+                    eff_req_end = min(req_end_b, req_start_b + max_chunk - 1)
+                else:
+                    eff_req_end = req_start_b + max_chunk - 1
+                if known_total > 0:
+                    eff_req_end = min(eff_req_end, known_total - 1)
+
                 req_headers = {
                     "User-Agent": ua_hdr,
                     "Accept": "*/*",
                     "Accept-Encoding": "identity",
                     "Referer": "https://www.youtube.com/",
+                    "Range": f"bytes={req_start_b}-{eff_req_end}",
                 }
-                converted_small_probe = False
-                if client_range:
-                    if known_total <= 0 and req_end_b is not None and (req_end_b - req_start_b) <= 65536:
-                        req_headers["Range"] = f"bytes={req_start_b}-"
-                        converted_small_probe = True
-                    else:
-                        req_headers["Range"] = client_range
-                elif request.method == "GET":
-                    # Always send Range: bytes=0- so companion upstream returns 206 with Content-Range & Content-Length
-                    req_headers["Range"] = "bytes=0-"
 
-                req = client.build_request(request.method, target_url, headers=req_headers)
+                req = client.build_request(request.method, target_url, headers=req_headers, timeout=12.0)
                 resp = await client.send(req, stream=True)
                 ctype = (resp.headers.get("content-type") or "").lower()
                 if resp.status_code not in (200, 206) or (
@@ -2213,27 +2170,12 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     continue
 
                 final_url = str(resp.url)
-                has_content_encoding = bool(resp.headers.get("content-encoding"))
                 cr_val = resp.headers.get("content-range") or ""
-                cl_val = resp.headers.get("content-length") or ""
-
-                start_b, end_b = req_start_b, (req_end_b if req_end_b is not None else 0)
                 m_cr = re.match(r"bytes\s+(\d+)-(\d+)/(.*)", cr_val)
                 if m_cr:
-                    if not converted_small_probe:
-                        start_b = int(m_cr.group(1))
-                        end_b = int(m_cr.group(2))
                     tail_total = m_cr.group(3).strip()
                     if tail_total.isdigit() and int(tail_total) > 0:
                         known_total = int(tail_total)
-                elif client_range:
-                    if req_end_b is None and cl_val.isdigit() and not has_content_encoding:
-                        end_b = start_b + int(cl_val) - 1
-                        if start_b == 0 and known_total <= 0:
-                            known_total = int(cl_val)
-                elif resp.status_code in (200, 206) and cl_val.isdigit() and not has_content_encoding:
-                    known_total = int(cl_val)
-                    end_b = max(0, known_total - 1)
 
                 if known_total <= 0:
                     try:
@@ -2253,9 +2195,8 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
                 if final_url:
                     _STREAM_META_CACHE[vid] = (time.time(), final_url, known_total, cached_dur)
-                    if known_total <= 0:
-                        asyncio.create_task(_refresh_total_length(vid, final_url))
 
+                media_type = resp.headers.get("content-type") or "video/mp4"
                 out_headers = {
                     "Accept-Ranges": "bytes",
                     "Cache-Control": "public, max-age=3600, immutable",
@@ -2266,151 +2207,40 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     if val:
                         out_headers[h_name.title()] = val
 
-                if converted_small_probe and req_end_b is not None:
-                    want_len = req_end_b - req_start_b + 1
-                    buf = bytearray()
-                    try:
-                        async for chunk in resp.aiter_bytes():
-                            if chunk:
-                                buf.extend(chunk)
-                                if len(buf) >= want_len:
-                                    break
-                    except Exception:
-                        pass
-                    finally:
-                        await resp.aclose()
-                    if cached_dur <= 0 and req_start_b == 0 and buf:
-                        parsed_d = _parse_mp4_mvhd_duration(bytes(buf))
-                        if parsed_d > 0 and final_url:
-                            cached_dur = parsed_d
-                            _STREAM_META_CACHE[vid] = (time.time(), final_url, known_total, cached_dur)
-                    body_bytes = bytes(buf[:want_len])
-                    actual_end = req_start_b + max(0, len(body_bytes) - 1)
-                    total_str = str(known_total) if known_total > actual_end else "*"
-                    out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{total_str}"
-                    out_headers["Content-Length"] = str(len(body_bytes))
-                    media_type = resp.headers.get("content-type") or "video/mp4"
-                    return Response(
-                        b"" if request.method == "HEAD" else body_bytes,
-                        status_code=206,
-                        headers=out_headers,
-                        media_type=media_type,
-                    )
-
-                eff_total = known_total
-                if cr_val.endswith("/*") and eff_total > end_b:
-                    cr_val = cr_val[:-2] + f"/{eff_total}"
-                elif not cr_val and client_range and resp.status_code == 206 and cl_val.isdigit():
-                    total_str = str(eff_total) if (eff_total > end_b) else "*"
-                    cr_val = f"bytes {start_b}-{end_b}/{total_str}"
-
-                if cr_val:
-                    out_headers["Content-Range"] = cr_val
-                if cl_val and not has_content_encoding:
-                    out_headers["Content-Length"] = cl_val
-
-                status_code = resp.status_code
-                if client_range and cr_val:
-                    status_code = 206
-
-                media_type = resp.headers.get("content-type") or "video/mp4"
-
                 if request.method == "HEAD":
                     await resp.aclose()
+                    eff_total = known_total if known_total > eff_req_end else (eff_req_end + 1)
+                    eff_len = max(0, eff_req_end - req_start_b + 1)
+                    out_headers["Content-Range"] = f"bytes {req_start_b}-{eff_req_end}/{eff_total}"
+                    out_headers["Content-Length"] = str(eff_len)
                     return Response(
-                        b"", status_code=status_code, headers=out_headers, media_type=media_type
+                        b"", status_code=206, headers=out_headers, media_type=media_type
                     )
 
-                # For small range probes (e.g. bytes=0-100) or small gzip-encoded responses,
-                # read the body directly so Content-Length is always exact without buffering full videos.
-                is_small_range = (end_b > 0 and (end_b - start_b) <= 65536) or (cl_val.isdigit() and int(cl_val) <= 65536)
-                if is_small_range or (has_content_encoding and cl_val.isdigit() and int(cl_val) <= 262144):
-                    body_bytes = await resp.aread()
+                want_len = max(1, eff_req_end - req_start_b + 1)
+                buf = bytearray()
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        if chunk:
+                            buf.extend(chunk)
+                            if len(buf) >= want_len:
+                                break
+                except Exception:
+                    pass
+                finally:
                     await resp.aclose()
-                    out_headers["Content-Length"] = str(len(body_bytes))
-                    if cr_val.endswith("/*") and eff_total > end_b:
-                        out_headers["Content-Range"] = cr_val[:-2] + f"/{eff_total}"
-                    return Response(
-                        body_bytes,
-                        status_code=status_code,
-                        headers=out_headers,
-                        media_type=media_type,
-                    )
 
-                expected_end = end_b if end_b > 0 else (known_total - 1 if known_total > 0 else 0)
-                stream_target_url = final_url or target_url
+                if not buf:
+                    continue
 
-                async def _stream_body(
-                    upstream_resp=resp,
-                    init_start=start_b,
-                    exp_end=expected_end,
-                    s_url=stream_target_url,
-                ):
-                    cur_pos = init_start
-                    cur_resp = upstream_resp
-                    retries = 0
-                    try:
-                        while True:
-                            prev_pos = cur_pos
-                            had_read_err = False
-                            try:
-                                async for chunk in cur_resp.aiter_bytes():
-                                    if chunk:
-                                        cur_pos += len(chunk)
-                                        yield chunk
-                            except Exception:
-                                had_read_err = True
-                            finally:
-                                try:
-                                    await cur_resp.aclose()
-                                except Exception:
-                                    pass
-
-                            if cur_pos > prev_pos:
-                                retries = 0
-
-                            if exp_end > 0:
-                                if cur_pos > exp_end:
-                                    break
-                            elif not had_read_err:
-                                break
-
-                            if retries >= 6:
-                                break
-                            retries += 1
-                            try:
-                                rng_hdr = f"bytes={cur_pos}-{exp_end}" if exp_end > 0 else f"bytes={cur_pos}-"
-                                retry_headers = {
-                                    "User-Agent": _DESKTOP_CHROME_UA,
-                                    "Accept": "*/*",
-                                    "Accept-Encoding": "identity",
-                                    "Referer": "https://www.youtube.com/",
-                                    "Range": rng_hdr,
-                                }
-                                r_req = client.build_request("GET", s_url, headers=retry_headers)
-                                cur_resp = await client.send(r_req, stream=True)
-                                if cur_resp.status_code not in (200, 206):
-                                    await cur_resp.aclose()
-                                    if s_url != fast_primary:
-                                        s_url = fast_primary
-                                        r_req = client.build_request("GET", s_url, headers=retry_headers)
-                                        cur_resp = await client.send(r_req, stream=True)
-                                        if cur_resp.status_code not in (200, 206):
-                                            await cur_resp.aclose()
-                                            break
-                                    else:
-                                        break
-                            except Exception:
-                                break
-                    finally:
-                        try:
-                            await cur_resp.aclose()
-                        except Exception:
-                            pass
-
-                return StreamingResponse(
-                    _stream_body(),
-                    status_code=status_code,
+                body_bytes = bytes(buf[:want_len])
+                actual_end = req_start_b + len(body_bytes) - 1
+                eff_total = known_total if known_total > actual_end else (actual_end + 1)
+                out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{eff_total}"
+                out_headers["Content-Length"] = str(len(body_bytes))
+                return Response(
+                    body_bytes,
+                    status_code=206,
                     headers=out_headers,
                     media_type=media_type,
                 )
@@ -3825,21 +3655,11 @@ async def _maybe_patch_youtube_payload(
         except Exception:
             pass
 
-    # 7. Strip ads and pre-warm top videos in browse/search feeds
+    # 7. Strip ads in browse/search feeds
     elif text.startswith("{") and any(k in text for k in ('"twoColumnBrowseResultsRenderer"', '"itemSectionRenderer"', '"richGridRenderer"')):
         try:
             obj = json.loads(text)
             _strip_feed_ads(obj)
-            raw_j = json.dumps(obj)
-            vids = re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', raw_j)
-            unique_vids = []
-            for v in vids:
-                if v not in unique_vids and v not in _STREAM_META_CACHE:
-                    unique_vids.append(v)
-                    if len(unique_vids) >= 2:
-                        break
-            for v in unique_vids:
-                asyncio.create_task(_resolve_stream_info(v))
             text = json.dumps(obj, ensure_ascii=False)
             modified = True
         except Exception:
@@ -4077,7 +3897,7 @@ async def youtube_http_relay(request: Request):
         anon_hdr = await _get_anon_visitor_cookie_header()
         if anon_hdr:
             existing_cookie_str = (
-                f"{existing_cookie_str}; {anon_hdr}" if existing_cookie_str else anon_hdr
+                f"{anon_hdr}; {existing_cookie_str}" if existing_cookie_str else anon_hdr
             )
             header_dict["Cookie"] = existing_cookie_str
     injected_pref = False
@@ -4219,11 +4039,7 @@ async def youtube_http_relay(request: Request):
             ):
                 anon_hdr = await _get_anon_visitor_cookie_header(force_refresh=True)
                 if anon_hdr:
-                    header_dict["Cookie"] = (
-                        f"{existing_cookie_str}; {anon_hdr}"
-                        if existing_cookie_str
-                        else anon_hdr
-                    )
+                    header_dict["Cookie"] = f"{anon_hdr}; PREF=f6=400&hl=ja&gl=JP"
                     upstream = await session.request(
                         method=method,
                         url=url,
@@ -4822,6 +4638,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   let lastTitle = "";
   let autoStartedVideoId = "";
   let lastShWatchTriggered = "";
+  let lastShWatchTime = 0;
   let reqSeq = 0;
   const startedAt = performance.now();
 
@@ -4906,7 +4723,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   function restore() {{
     try {{
       const params = new URLSearchParams(location.search);
-      if (params.get("q")) return INITIAL;
+      if (location.pathname !== "/youtube/" || params.get("q") || params.get("v") || params.get("url") || params.get("search_query")) return INITIAL;
       const saved = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
       if (saved && !isGoogleAuthTarget(saved)) return saved;
       return INITIAL;
@@ -5695,7 +5512,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const rawGetAttr = window.Element.prototype.getAttribute;
       const rawRemoveAttr = window.Element.prototype.removeAttribute;
 
-      // Pre-warm video stream moov atom on hover/pointerdown before click navigation finishes
+      // Pre-warm video stream moov atom on pointerdown/touchstart and intercept watch clicks for instant SPA yt-navigate
       if (doc.documentElement && !doc.documentElement.dataset.shPrewarmBound) {{
         doc.documentElement.dataset.shPrewarmBound = "1";
         const prewarmedVids = new Set();
@@ -5703,9 +5520,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           try {{
             const t = ev.target;
             if (!t || typeof t.closest !== "function") return;
-            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[href*='/shorts/']");
+            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[scramjet-attr-href*='watch?v='], a[href*='/shorts/'], a[scramjet-attr-href*='/shorts/']");
             if (!a) return;
-            const h = rawGetAttr.call(a, "href") || a.href || "";
+            const h = rawGetAttr.call(a, "scramjet-attr-href") || rawGetAttr.call(a, "href") || a.href || "";
             const m = h.match(/(?:[?&]|%3F|%26)v(?:=|%3D)([A-Za-z0-9_-]{{11}})/) || h.match(/\\/shorts\\/([A-Za-z0-9_-]{{11}})/);
             if (!m) return;
             const vid = m[1];
@@ -5714,13 +5531,46 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             fetch(location.origin + "/youtube/runtime/stream/" + vid + "?prewarm=1", {{
               method: "HEAD",
               credentials: "omit",
-               priority: "low"
+              priority: "low"
             }}).catch(() => {{}});
           }} catch (_) {{}}
         }};
         doc.addEventListener("pointerdown", onPrewarmTrigger, {{ passive: true, capture: true }});
         doc.addEventListener("touchstart", onPrewarmTrigger, {{ passive: true, capture: true }});
-        doc.addEventListener("pointerover", onPrewarmTrigger, {{ passive: true, capture: true }});
+
+        const onWatchClick = (ev) => {{
+          try {{
+            if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+            const t = ev.target;
+            if (!t || typeof t.closest !== "function") return;
+            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[scramjet-attr-href*='watch?v=']");
+            if (!a) return;
+            const h = rawGetAttr.call(a, "scramjet-attr-href") || rawGetAttr.call(a, "href") || a.href || "";
+            const m = h.match(/(?:[?&]|%3F|%26)v(?:=|%3D)([A-Za-z0-9_-]{{11}})/);
+            if (!m) return;
+            const vid = m[1];
+            const ytdApp = doc.querySelector("ytd-app");
+            if (ytdApp) {{
+              ev.preventDefault();
+              ev.stopPropagation();
+              lastShWatchTriggered = vid;
+              lastShWatchTime = Date.now();
+              const targetWatchUrl = "https://www.youtube.com/watch?v=" + vid;
+              observeUrl(targetWatchUrl);
+              ytdApp.dispatchEvent(new CustomEvent("yt-navigate", {{
+                bubbles: true,
+                composed: true,
+                detail: {{
+                  endpoint: {{
+                    commandMetadata: {{ webCommandMetadata: {{ url: "/watch?v=" + vid, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 }} }},
+                    watchEndpoint: {{ videoId: vid }}
+                  }}
+                }}
+              }}));
+            }}
+          }} catch (_) {{}}
+        }};
+        doc.addEventListener("click", onWatchClick, true);
       }}
 
       // Populate missing sidebar related video thumbnails (yt-lockup-view-model / ytd-compact-video-renderer)
@@ -5778,33 +5628,40 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       }}
 
       const currentTarget = targetUrl || readFrameTarget() || lastUrl || "";
+      let shWatchParam = "";
       try {{
         const uCur = new URL(currentTarget);
         const shWatch = uCur.searchParams.get("sh_watch") || "";
-        if (/^[A-Za-z0-9_-]{{11}}$/.test(shWatch) && lastShWatchTriggered !== shWatch) {{
+        if (/^[A-Za-z0-9_-]{{11}}$/.test(shWatch)) {{
+          shWatchParam = shWatch;
           const ytdApp = doc.querySelector("ytd-app");
-          if (ytdApp) {{
+          const flexy = doc.querySelector("ytd-watch-flexy");
+          const flexyVid = flexy ? (rawGetAttr.call(flexy, "video-id") || "") : "";
+          const nowSh = Date.now();
+          if (ytdApp && flexyVid !== shWatch && (lastShWatchTriggered !== shWatch || (nowSh - lastShWatchTime) > 1500)) {{
             lastShWatchTriggered = shWatch;
-            const existingLink = doc.querySelector(`a[href*="/watch?v=${{shWatch}}"]`);
-            if (existingLink) {{
-              existingLink.click();
-            }} else {{
-              ytdApp.dispatchEvent(new CustomEvent("yt-navigate", {{
-                bubbles: true,
-                composed: true,
-                detail: {{
-                  endpoint: {{
-                    commandMetadata: {{ webCommandMetadata: {{ url: "/watch?v=" + shWatch, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 }} }},
-                    watchEndpoint: {{ videoId: shWatch }}
-                  }}
+            lastShWatchTime = nowSh;
+            ytdApp.dispatchEvent(new CustomEvent("yt-navigate", {{
+              bubbles: true,
+              composed: true,
+              detail: {{
+                endpoint: {{
+                  commandMetadata: {{ webCommandMetadata: {{ url: "/watch?v=" + shWatch, webPageType: "WEB_PAGE_TYPE_WATCH", rootVe: 3832 }} }},
+                  watchEndpoint: {{ videoId: shWatch }}
                 }}
-              }}));
-            }}
+              }}
+            }}));
           }}
         }}
       }} catch (_) {{}}
 
       let videoId = extractVideoId(currentTarget);
+      if (!videoId) {{
+        const flexy = doc.querySelector("ytd-watch-flexy");
+        const fv = flexy ? (rawGetAttr.call(flexy, "video-id") || "") : "";
+        if (/^[A-Za-z0-9_-]{{11}}$/.test(fv)) videoId = fv;
+        else if (shWatchParam && doc.querySelector("ytd-watch-flexy, #movie_player video.html5-main-video")) videoId = shWatchParam;
+      }}
       const isShorts = /\\/shorts(\\/|$|\\?)/.test(currentTarget);
 
       // If on a standard watch page and #movie_player is trapped inside a hidden #player.skeleton while ytd-watch-flexy is visible, adopt #movie_player into ytd-watch-flexy's active player container
@@ -5903,6 +5760,39 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             }}
           }}
         }} catch (_) {{}}
+
+        // If mainVid is stuck at readyState < 2 (currentTime === 0) or has an error or missing stream src, bind direct muxed MP4 stream
+        if (videoId) {{
+          const curSrcAttr = rawGetAttr.call(mainVid, "src") || mainVid.src || "";
+          const directStreamUrl = location.origin + "/youtube/runtime/stream/" + videoId;
+          if (mainVid.dataset.shActiveVid !== videoId) {{
+            mainVid.dataset.shActiveVid = videoId;
+            mainVid.dataset.shActiveSince = String(Date.now());
+            mainVid.dataset.shDirectRetryCount = "0";
+          }}
+          const activeElapsed = Date.now() - Number(mainVid.dataset.shActiveSince || Date.now());
+          const retryCount = Number(mainVid.dataset.shDirectRetryCount || 0);
+          const hasValidDirectSrc = curSrcAttr.includes("/youtube/runtime/stream/" + videoId) || curSrcAttr.includes("/yts/stream/" + videoId);
+          if (
+            mainVid.readyState < 2 &&
+            Number(mainVid.currentTime || 0) === 0 &&
+            retryCount < 3 &&
+            (
+              Boolean(mainVid.error) ||
+              (!hasValidDirectSrc && activeElapsed > 1200) ||
+              (hasValidDirectSrc && activeElapsed > 4500)
+            )
+          ) {{
+            mainVid.dataset.shDirectRetryCount = String(retryCount + 1);
+            mainVid.dataset.shActiveSince = String(Date.now());
+            rawSetAttr.call(mainVid, "src", directStreamUrl);
+            mainVid.load();
+            mainVid.play().catch(() => {{
+              mainVid.muted = true;
+              mainVid.play().catch(() => {{}});
+            }});
+          }}
+        }}
 
         // If audio is playing (currentTime > 0.5) but videoWidth === 0 (audio-only or broken video track), force muxed MP4 stream
         if (!mainVid.paused && mainVid.readyState >= 2 && mainVid.videoWidth === 0 && Number(mainVid.currentTime || 0) > 0.5 && videoId && mainVid.dataset.shFixedZeroWidth !== videoId) {{
@@ -6426,8 +6316,29 @@ async def youtube_redirect():
 
 
 @router.get("/youtube/", response_class=HTMLResponse, include_in_schema=False)
-async def youtube_home(q: str = ""):
-    target = _target_from_input(q)
+@router.get("/youtube/watch", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/results", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/shorts", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/shorts/{video_id}", response_class=HTMLResponse, include_in_schema=False)
+async def youtube_home(
+    request: Request,
+    q: str = "",
+    v: str = "",
+    url: str = "",
+    search_query: str = "",
+    video_id: str = "",
+):
+    raw_in = q.strip() or url.strip()
+    if not raw_in:
+        if video_id.strip():
+            raw_in = f"https://www.youtube.com/shorts/{video_id.strip()}"
+        elif v.strip():
+            raw_in = f"https://www.youtube.com/watch?v={v.strip()}"
+        elif search_query.strip():
+            raw_in = search_query.strip()
+        elif request.url.path.rstrip("/") == "/youtube/shorts":
+            raw_in = "https://www.youtube.com/shorts"
+    target = _target_from_input(raw_in)
     parsed_target = urlparse(target)
     init_vid = _extract_request_video_id(parsed_target, b"")
     if init_vid:
@@ -6439,7 +6350,7 @@ async def youtube_home(q: str = ""):
         asyncio.create_task(_resolve_stream_info(init_vid))
         asyncio.create_task(_get_anon_visitor_cookie_header())
     print(
-        f"[YOUTUBE] shell query_present={bool(q.strip())} target_host={(parsed_target.hostname or '').lower()} init_vid={init_vid}",
+        f"[YOUTUBE] shell query_present={bool(raw_in)} target_host={(parsed_target.hostname or '').lower()} init_vid={init_vid}",
         flush=True,
     )
     response = HTMLResponse(_shell_html(target))
