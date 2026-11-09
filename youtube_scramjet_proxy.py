@@ -1665,6 +1665,8 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
                         if not chunk:
                             continue
                         entry.buf.extend(chunk)
+                        if not entry.headers_ready.is_set() and len(entry.buf) >= 1024:
+                            entry.headers_ready.set()
                         if entry.total_len <= 0 and len(entry.buf) >= 256:
                             parsed_total = _parse_mp4_total_len(bytes(entry.buf))
                             if parsed_total > 0:
@@ -1695,6 +1697,8 @@ async def _run_stream_head_prewarm(entry: _StreamHeadPrewarm):
                             parsed_total = _parse_mp4_total_len(bytes(entry.buf))
                             if parsed_total > 0:
                                 entry.total_len = parsed_total
+                            elif entry.dur_s > 0:
+                                entry.total_len = int(entry.dur_s * 58000)
                         if entry.total_len > 0:
                             cached = _STREAM_META_CACHE.get(vid)
                             _STREAM_META_CACHE[vid] = (
@@ -2067,8 +2071,15 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                 await asyncio.wait_for(head_entry.headers_ready.wait(), timeout=8.0)
             except Exception:
                 pass
-        if head_entry.ok and head_entry.total_len > 0:
-            total_b = head_entry.total_len
+        if head_entry.ok and (head_entry.total_len > 0 or len(head_entry.buf) > 0):
+            if head_entry.total_len <= 0 and len(head_entry.buf) > 0:
+                p_len = _parse_mp4_total_len(bytes(head_entry.buf))
+                if p_len > 0:
+                    head_entry.total_len = p_len
+                elif head_entry.dur_s > 0:
+                    head_entry.total_len = int(head_entry.dur_s * 58000)
+            total_b = head_entry.total_len if head_entry.total_len > 0 else (len(head_entry.buf) + 1048576)
+            total_str = str(head_entry.total_len) if head_entry.total_len > 0 else "*"
             out_headers = {
                 "Accept-Ranges": "bytes",
                 "Cache-Control": "public, max-age=3600, immutable",
@@ -2078,7 +2089,7 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                 eff_end = req_end_b if (req_end_b is not None and req_end_b < total_b) else (total_b - 1)
                 eff_len = max(0, eff_end - req_start_b + 1)
                 if client_range:
-                    out_headers["Content-Range"] = f"bytes {req_start_b}-{eff_end}/{total_b}"
+                    out_headers["Content-Range"] = f"bytes {req_start_b}-{eff_end}/{total_str}"
                 out_headers["Content-Length"] = str(eff_len)
                 return Response(
                     b"",
@@ -2113,7 +2124,7 @@ async def youtube_runtime_stream(video_id: str, request: Request):
                     slice_end = min(avail, want_end + 1)
                     body_bytes = bytes(head_entry.buf[req_start_b:slice_end])
                     actual_end = req_start_b + len(body_bytes) - 1
-                    out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{total_b}"
+                    out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{total_str}"
                     out_headers["Content-Length"] = str(len(body_bytes))
                     return Response(
                         body_bytes,
@@ -2229,7 +2240,12 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
                 if request.method == "HEAD":
                     await resp.aclose()
-                    eff_total = known_total if known_total > eff_req_end else (eff_req_end + 1)
+                    if known_total > 0:
+                        eff_total = str(known_total)
+                    elif cached_dur > 0:
+                        eff_total = str(max(eff_req_end + 1048576, int(cached_dur * 57500)))
+                    else:
+                        eff_total = "*"
                     eff_len = max(0, eff_req_end - req_start_b + 1)
                     out_headers["Content-Range"] = f"bytes {req_start_b}-{eff_req_end}/{eff_total}"
                     out_headers["Content-Length"] = str(eff_len)
@@ -2255,7 +2271,12 @@ async def youtube_runtime_stream(video_id: str, request: Request):
 
                 body_bytes = bytes(buf[:want_len])
                 actual_end = req_start_b + len(body_bytes) - 1
-                eff_total = known_total if known_total > actual_end else (actual_end + 1)
+                if known_total > 0:
+                    eff_total = str(known_total)
+                elif cached_dur > 0:
+                    eff_total = str(max(actual_end + 1048576, int(cached_dur * 57500)))
+                else:
+                    eff_total = "*"
                 out_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/{eff_total}"
                 out_headers["Content-Length"] = str(len(body_bytes))
                 return Response(

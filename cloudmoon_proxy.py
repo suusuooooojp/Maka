@@ -49,13 +49,16 @@ _CACHE: Dict[str, bytes] = {}
 _API_CACHE: Dict[str, tuple[float, bytes, int]] = {}
 
 
+_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy"))
+
 def _get_http_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
         _HTTP_CLIENT = httpx.AsyncClient(
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=2),
             follow_redirects=True,
             verify=False,
-            timeout=httpx.Timeout(30.0, connect=8.0),
+            timeout=httpx.Timeout(15.0, connect=6.0),
             limits=httpx.Limits(
                 max_keepalive_connections=64,
                 max_connections=128,
@@ -71,6 +74,147 @@ def _get_http_client() -> httpx.AsyncClient:
             },
         )
     return _HTTP_CLIENT
+
+
+def _render_cloudmoon_fallback_html(err_msg: str = "") -> str:
+    return """<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>CloudMoon (クラウドムーン) — School Hub</title>
+<link rel="stylesheet" href="/design-system/m3.css">
+<script src="/design-system/m3.js"></script>
+<style>
+:root {
+  --bg: var(--md-sys-color-surface);
+  --surf: var(--md-sys-color-surface-container);
+  --on-surf: var(--md-sys-color-on-surface);
+  --prim: var(--md-sys-color-primary);
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--on-surf);
+  font-family: var(--md-sys-typescale-font-plain);
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.cm-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: var(--surf);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+}
+.cm-title { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 16px; }
+.cm-body {
+  flex: 1;
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 32px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.cm-hero {
+  background: var(--surf);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-large);
+  padding: 24px;
+  text-align: center;
+}
+.cm-hero h1 { font-size: 24px; margin-bottom: 8px; color: var(--prim); }
+.cm-hero p { font-size: 14px; opacity: 0.85; margin-bottom: 18px; }
+.cm-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 24px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--prim);
+  color: var(--md-sys-color-on-primary);
+  text-decoration: none;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+}
+.cm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+}
+.cm-card {
+  background: var(--surf);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cm-card h3 { font-size: 16px; font-weight: 700; }
+.cm-card p { font-size: 13px; opacity: 0.8; }
+.cm-card a {
+  align-self: flex-start;
+  padding: 6px 16px;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-secondary-container);
+  color: var(--md-sys-color-on-secondary-container);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+}
+</style>
+</head>
+<body>
+<nav class="cm-nav">
+  <div class="cm-title"><a href="/" style="color:inherit;text-decoration:none">← School Hub</a> / <span>🌙 CloudMoon クラウドゲーミング</span></div>
+  <button class="cm-btn" onclick="location.reload()" style="padding:6px 14px;font-size:12px">再試行</button>
+</nav>
+<main class="cm-body">
+  <div class="cm-hero">
+    <h1>🌙 CloudMoon クラウドゲーム接続</h1>
+    <p>学校環境やモバイル端末から即座に遊べるクラウドゲームおよび内蔵ゲームハブです。</p>
+    <button class="cm-btn" onclick="location.reload()">クラウドサーバーに再接続</button>
+  </div>
+  <div class="cm-grid">
+    <div class="cm-card">
+      <div>
+        <h3>Roblox & クラウドゲーム</h3>
+        <p>ブラウザ上で無制限プレイ可能なクラウドアカウント連携ゲーム</p>
+      </div>
+      <a href="https://web.cloudmoonapp.com" target="_blank" rel="noopener">別窓で直接起動</a>
+    </div>
+    <div class="cm-card">
+      <div>
+        <h3>太鼓の達人 (Taiko Web)</h3>
+        <p>楽曲プレイ対応の軽量ブラウザリズムゲーム</p>
+      </div>
+      <a href="/taiko/">今すぐプレイ</a>
+    </div>
+    <div class="cm-card">
+      <div>
+        <h3>マインクラフト (Eaglercraft)</h3>
+        <p>日本語完全ローカライズ・マルチプレイ対応マイクラ</p>
+      </div>
+      <a href="/eagler/">今すぐプレイ</a>
+    </div>
+    <div class="cm-card">
+      <div>
+        <h3>トランプ 大富豪</h3>
+        <p>4人対戦・革命・8切り・しばり対応オンラインカードゲーム</p>
+      </div>
+      <a href="/trump/">今すぐプレイ</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>"""
 
 
 _AD_FREE_CSS = """<style id="sh-cloudmoon-adblock">
@@ -1413,7 +1557,11 @@ async def _proxy_html_or_asset(target_url: str, request: Request) -> Response:
     }
     try:
         upstream = await client.get(target_url, headers=req_headers)
+        if upstream.status_code >= 500 and ("text/html" in req_headers.get("Accept", "") or target_url.endswith(("/ja/", "/cloudmoon/", "/"))):
+            return HTMLResponse(_render_cloudmoon_fallback_html(f"Upstream returned {upstream.status_code}"))
     except Exception as exc:
+        if "text/html" in req_headers.get("Accept", "") or not any(target_url.split("?")[0].endswith(ext) for ext in (".js", ".css", ".png", ".jpg", ".wasm", ".json", ".ico")):
+            return HTMLResponse(_render_cloudmoon_fallback_html(str(exc)))
         return Response(
             content=f"Proxy error: {exc}".encode("utf-8"),
             status_code=502,

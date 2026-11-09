@@ -513,7 +513,7 @@ async def _fetch_tiktok_user_profile(username: str, sessionid: str = "") -> Opti
     # 1. If sessionid is provided without username, query TikTok passport account info
     if sessionid and not clean_user:
         try:
-            r_acc = await s.get("https://www.tiktok.com/passport/web/account/info/", headers=headers)
+            r_acc = await s.get("https://www.tiktok.com/passport/web/account/info/", headers=headers, timeout=3.0)
             if r_acc.status_code == 200:
                 acc_data = r_acc.json().get("data") or {}
                 if acc_data.get("username") or acc_data.get("user_id_str"):
@@ -536,7 +536,7 @@ async def _fetch_tiktok_user_profile(username: str, sessionid: str = "") -> Opti
         return None
 
     try:
-        r = await s.get(f"https://www.tiktok.com/@{urllib.parse.quote(clean_user)}", headers=headers)
+        r = await s.get(f"https://www.tiktok.com/@{urllib.parse.quote(clean_user)}", headers=headers, timeout=3.0)
         if r.status_code == 200:
             m = re.search(
                 r'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
@@ -783,7 +783,10 @@ async def tiktok_api_login(request: Request) -> JSONResponse:
     user_profile: Optional[Dict[str, Any]] = None
 
     if method == "cookie" and sessionid:
-        user_profile = await _fetch_tiktok_user_profile(username, sessionid=sessionid)
+        try:
+            user_profile = await asyncio.wait_for(_fetch_tiktok_user_profile(username, sessionid=sessionid), timeout=3.5)
+        except Exception:
+            user_profile = None
         if not user_profile:
             short_hash = hashlib.sha256(sessionid.encode("utf-8")).hexdigest()[:6]
             user_profile = {
@@ -802,7 +805,10 @@ async def tiktok_api_login(request: Request) -> JSONResponse:
     elif method in ("account", "username"):
         clean_handle = username.lstrip("@").split("@")[0].strip() or "tiktok_user"
         # Attempt to hydrate real TikTok profile if handle exists on TikTok
-        user_profile = await _fetch_tiktok_user_profile(clean_handle)
+        try:
+            user_profile = await asyncio.wait_for(_fetch_tiktok_user_profile(clean_handle), timeout=3.5)
+        except Exception:
+            user_profile = None
         if not user_profile:
             short_hash = hashlib.sha256(f"{clean_handle}:{password}".encode("utf-8")).hexdigest()[:6]
             user_profile = {
@@ -2068,11 +2074,17 @@ _TIKTOK_HTML = r"""<!DOCTYPE html>
     z-index: 80;
     display: flex;
     flex-direction: column;
+    visibility: hidden;
+    pointer-events: none;
     transform: translateX(100%);
-    transition: transform .24s cubic-bezier(0.16, 1, 0.3, 1);
+    transition: transform .24s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.24s;
     box-shadow: -12px 0 36px rgba(0, 0, 0, 0.7);
   }
-  .tt-comment-drawer.open { transform: translateX(0); }
+  .tt-comment-drawer.open {
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateX(0);
+  }
   .tt-comment-head {
     padding: 16px 18px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);

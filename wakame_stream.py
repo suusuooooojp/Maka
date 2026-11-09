@@ -396,7 +396,12 @@ class StreamManager:
             await resp.aclose()
 
         body_bytes = bytes(buf[:want_len])
+        if not body_bytes:
+            return Response("Stream switching to embed", status_code=204, headers={"Cache-Control": "no-store"})
+        actual_end = req_start_b + len(body_bytes) - 1
         res_headers["Content-Length"] = str(len(body_bytes))
+        if "Content-Range" not in res_headers:
+            res_headers["Content-Range"] = f"bytes {req_start_b}-{actual_end}/*"
         return Response(body_bytes, status_code=206, headers=res_headers)
 
 
