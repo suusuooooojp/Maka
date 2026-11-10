@@ -1,7 +1,10 @@
 import os
 import sys
 
-_vendor_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
+_app_dir = os.path.dirname(os.path.abspath(__file__))
+if _app_dir not in sys.path:
+    sys.path.insert(0, _app_dir)
+_vendor_dir = os.path.join(_app_dir, "_vendor")
 if os.path.isdir(_vendor_dir) and _vendor_dir not in sys.path:
     sys.path.insert(0, _vendor_dir)
 
@@ -1347,7 +1350,7 @@ async def wisp_endpoint(websocket: WebSocket):
 
 
 proxies = []
-for filename in sorted(os.listdir(".")):
+for filename in sorted(os.listdir(_app_dir)):
   if not filename.endswith("_proxy.py"):
     continue
   module_name = filename[:-3]
