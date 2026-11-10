@@ -109,9 +109,12 @@ const activateApp = () => {
 		if (isUnfocused) {
 			window.focus();
 		}
-		if (!cachedCanvasEl) cachedCanvasEl = document.getElementById("canvas");
-		if (cachedCanvasEl && document.activeElement !== cachedCanvasEl && document.activeElement && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA" && document.activeElement.tagName !== "SELECT") {
-			cachedCanvasEl.focus();
+		if (document.activeElement && document.activeElement !== document.body && document.activeElement.tagName !== "INPUT" && document.activeElement.tagName !== "TEXTAREA" && document.activeElement.tagName !== "SELECT") {
+			document.activeElement.blur();
+		}
+		if (window.getSelection) {
+			const sel = window.getSelection();
+			if (sel && sel.rangeCount > 0) sel.removeAllRanges();
 		}
 	} catch(e) {}
 
@@ -139,12 +142,12 @@ activateApp();
 });
 pageEvents.add(root, ["touchstart", "touchmove", "touchend"], event => {
 	if(event.cancelable && cancelTouch){
-		if(event.target.tagName === "SELECT" || event.target.closest('#companion-toggle-btn') || event.target.closest('#companion-sidebar') || event.target.closest('#focus-live-badge') || event.target.closest('#game-fps-counter') || event.target.closest('.btn-fps-target') || event.target.closest('a') || event.target.closest('button')){
+		if(event.target.tagName === "SELECT" || event.target.tagName === "INPUT" || event.target.tagName === "TEXTAREA" || event.target.closest('#companion-toggle-btn') || event.target.closest('#companion-sidebar') || event.target.closest('#focus-live-badge') || event.target.closest('#game-fps-counter') || event.target.closest('.btn-fps-target') || event.target.closest('a') || event.target.closest('button') || event.target.closest('.view')){
 			return
 		}
 		event.preventDefault()
 	}
-})
+}, undefined, { passive: false })
 var versionDiv = document.getElementById("version")
 var versionLink = document.getElementById("version-link")
 if (versionLink) {

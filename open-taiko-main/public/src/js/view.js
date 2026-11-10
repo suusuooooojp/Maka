@@ -101,7 +101,12 @@ class View{
 			this.player = this.controller.multiplayer ? p2.player : 1
 		}
 		
-		this.touchEnabled = this.controller.touchEnabled
+		this.touchEnabled = Boolean(
+			this.controller.touchEnabled ||
+			"ontouchstart" in window ||
+			(navigator && navigator.maxTouchPoints > 0)
+		)
+		this.controller.touchEnabled = this.touchEnabled
 		this.touch = -Infinity
 		this.touchAnimation = settings.getItem("touchAnimation")
 		this.recentCanvasPointers = []
@@ -117,7 +122,7 @@ class View{
 			pageEvents.add(this.canvas, "pointerdown", this.onpointerdown.bind(this), undefined, {passive: false})
 			pageEvents.add(this.canvas, ["pointerup", "pointercancel", "touchend", "touchcancel"], this.onpointerup.bind(this), undefined, {passive: true})
 			pageEvents.add(this.canvas, "touchstart", this.ontouch.bind(this), undefined, {passive: false})
-			if(this.controller.touchEnabled){
+			if(this.touchEnabled){
 				this.enableTouchUI()
 			}
 		}
@@ -190,7 +195,10 @@ class View{
 		this.portrait = winW < winH
 		var touchMultiplayer = this.touchEnabled && this.multiplayer && !this.portrait
 		
-		this.pixelRatio = window.devicePixelRatio || 1
+		this.pixelRatio = Math.min(
+			window.devicePixelRatio || 1,
+			this.touchEnabled ? 1.25 : 1.5
+		)
 		var resolution = this.resolution || (this.resolution = settings.getItem("resolution"))
 		if(resolution === "medium"){
 			this.pixelRatio *= 0.75
@@ -763,8 +771,8 @@ class View{
 		this.touchCircle = {
 			x: winW / 2,
 			y: this.portrait ? (this.touchDrum.y + this.touchDrum.h / 2) : (winH + this.touchDrum.h * 0.1),
-			rx: this.portrait ? (this.touchDrum.w * 0.38) : (this.touchDrum.w / 2 - this.touchDrum.h * 0.03),
-			ry: this.portrait ? (this.touchDrum.h * 0.38) : (this.touchDrum.h * 1.07)
+			rx: this.portrait ? (this.touchDrum.w * 0.40) : (this.touchDrum.w / 2),
+			ry: this.portrait ? (this.touchDrum.h * 0.40) : (this.touchDrum.h * 1.12)
 		}
 		
 		if(this.multiplayer !== 2){
@@ -2082,30 +2090,13 @@ class View{
 		if(!event || event.pointerType === "mouse"){
 			return
 		}
-		var now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now()
-		if(!this.recentCanvasPointers){
-			this.recentCanvasPointers = []
+		if(event.pointerType === "touch" && "ontouchstart" in window){
+			return
 		}
-		while(this.recentCanvasPointers.length > 0 && now - this.recentCanvasPointers[0].time > 30){
-			this.recentCanvasPointers.shift()
-		}
-		this.recentCanvasPointers.push({
-			id: event.pointerId,
-			x: event.clientX || 0,
-			y: event.clientY || 0,
-			time: now
-		})
 		this.ontouch(event)
 	}
 	onpointerup(event){
-		if(!event || !this.recentCanvasPointers){
-			return
-		}
-		for(var i = this.recentCanvasPointers.length - 1; i >= 0; i--){
-			if(this.recentCanvasPointers[i].id === event.pointerId){
-				this.recentCanvasPointers.splice(i, 1)
-			}
-		}
+		return
 	}
 	ontouch(event){
 		if(!("changedTouches" in event)){
@@ -2114,8 +2105,9 @@ class View{
 		if(!this.touchUIInitialized){
 			this.enableTouchUI()
 		}
-		var isTouchStart = event.type === "touchstart"
-		var now = (typeof performance !== "undefined" && performance.now) ? performance.now() : Date.now()
+		if(event.cancelable !== false && typeof event.preventDefault === "function"){
+			event.preventDefault()
+		}
 		var rect = (this.canvas && this.canvas.getBoundingClientRect) ? this.canvas.getBoundingClientRect() : {left: 0, top: 0}
 		var ratio = this.ratio || 1
 		var pixelRatio = this.pixelRatio || 1
@@ -2125,24 +2117,7 @@ class View{
 		var scaleY = pixelRatio / ratio
 		for(var i = 0; i < event.changedTouches.length; i++){
 			var touch = event.changedTouches[i]
-			if(event.cancelable !== false && typeof event.preventDefault === "function"){
-				event.preventDefault()
-			}
 			var touchId = touch.identifier !== undefined ? touch.identifier : touch.pointerId
-			if(isTouchStart && this.recentCanvasPointers && this.recentCanvasPointers.length > 0){
-				var matchedIdx = -1
-				for(var j = 0; j < this.recentCanvasPointers.length; j++){
-					var pt = this.recentCanvasPointers[j]
-					if(now - pt.time <= 16 && (pt.id === touchId || (Math.abs(pt.x - (touch.clientX || 0)) <= 10 && Math.abs(pt.y - (touch.clientY || 0)) <= 10))){
-						matchedIdx = j
-						break
-					}
-				}
-				if(matchedIdx !== -1){
-					this.recentCanvasPointers.splice(matchedIdx, 1)
-					continue
-				}
-			}
 			var relX = typeof touch.clientX === "number" ? (touch.clientX - rect.left) : touch.pageX
 			var relY = typeof touch.clientY === "number" ? (touch.clientY - rect.top) : touch.pageY
 			if(this.controller.game.paused){
@@ -2155,7 +2130,7 @@ class View{
 				var pageX = relX * scaleX
 				var pageY = relY * scaleY
 				
-				var c = this.touchCircle || {x: logicalW / 2, y: logicalH, rx: logicalW / 4, ry: logicalH / 3}
+				var c = this.touchCircle || {x: logicalW / 2, y: logicalH, rx: logicalW / 3, ry: logicalH / 2.5}
 				var centerX = c.x || (logicalW / 2)
 				var dx = c.rx ? (pageX - centerX) / c.rx : 0
 				var dy = c.ry ? (pageY - c.y) / c.ry : 0

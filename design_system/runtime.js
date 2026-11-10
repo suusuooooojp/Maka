@@ -208,6 +208,16 @@
       '      </div>',
       '      <input type="range" class="md-slider" id="m3ScaleSlider" min="85" max="115" step="5" value="100">',
       '    </div>',
+      '    <hr class="md-divider" style="margin:4px 0;">',
+      '    <div>',
+      '      <label class="md-typescale-label-large" for="m3AdminNameInput" style="display:block;margin-bottom:6px;">6. ユーザー名 / 管理者モード</label>',
+      '      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">',
+      '        <input type="text" id="m3AdminNameInput" placeholder="名前を入力 (suusuo で管理者モード)" style="flex:1;min-width:160px;height:38px;padding:0 12px;border-radius:10px;border:1px solid var(--md-sys-color-outline-variant,#c4c7c5);background:var(--md-sys-color-surface-container-lowest,#fff);color:var(--md-sys-color-on-surface,#1f1f1f);font-size:13.5px;">',
+      '        <button type="button" class="md-btn md-btn-tonal" id="m3AdminApplyBtn" style="height:38px;">適用</button>',
+      '        <button type="button" class="md-btn md-btn-filled" id="m3OpenAdminPanelBtn" style="height:38px;background:#b3261e;color:#fff;display:none;">👑 管理者設定を開く</button>',
+      '      </div>',
+      '      <div id="m3AdminStatusNote" class="md-typescale-body-small" style="margin-top:4px;color:var(--md-sys-color-on-surface-variant);">「suusuo」と入力して適用すると、アプリの一時停止・ダイアログ設定が可能になります</div>',
+      '    </div>',
       '  </div>',
       '  <hr class="md-divider">',
       '  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">',
@@ -266,6 +276,78 @@
         applyScale(scaleSlider.value);
       });
     }
+
+    var adminNameInput = document.getElementById("m3AdminNameInput");
+    var adminApplyBtn = document.getElementById("m3AdminApplyBtn");
+    var openAdminPanelBtn = document.getElementById("m3OpenAdminPanelBtn");
+    var adminStatusNote = document.getElementById("m3AdminStatusNote");
+
+    function refreshAdminInSettings() {
+      var savedAdmin = "";
+      try {
+        savedAdmin = (localStorage.getItem("sh_admin_user") || localStorage.getItem("sh_openchat_auth_user") || "").trim();
+      } catch (_) {}
+      var isSuusuo = savedAdmin.toLowerCase() === "suusuo" || document.cookie.indexOf("sh_admin_user=suusuo") !== -1;
+      if (adminNameInput && !adminNameInput.value && savedAdmin) {
+        adminNameInput.value = savedAdmin;
+      }
+      if (openAdminPanelBtn) {
+        openAdminPanelBtn.style.display = isSuusuo ? "inline-flex" : "none";
+      }
+      if (adminStatusNote) {
+        adminStatusNote.textContent = isSuusuo
+          ? "👑 管理者モード (suusuo) が有効です。「👑 管理者設定を開く」からアプリの一時停止・ダイアログ設定を行えます。"
+          : "「suusuo」と入力して適用すると、アプリの一時停止・ダイアログ設定が可能になります";
+        adminStatusNote.style.color = isSuusuo ? "#b3261e" : "var(--md-sys-color-on-surface-variant)";
+      }
+    }
+
+    function applyAdminName() {
+      if (!adminNameInput) return;
+      var val = String(adminNameInput.value || "").trim();
+      if (val.toLowerCase() === "suusuo") {
+        try {
+          localStorage.setItem("sh_admin_user", "suusuo");
+          document.cookie = "sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax";
+        } catch (_) {}
+        window.dispatchEvent(new CustomEvent("sh-admin-mode-change", { detail: { isAdmin: true, username: "suusuo" } }));
+        refreshAdminInSettings();
+        showSnackbar("👑 管理者モード (suusuo) を有効化しました");
+        if (typeof window.__shOpenAdminModal === "function") {
+          closeSettings();
+          window.__shOpenAdminModal();
+        }
+      } else {
+        try {
+          localStorage.removeItem("sh_admin_user");
+          document.cookie = "sh_admin_user=; path=/; max-age=0; SameSite=Lax";
+        } catch (_) {}
+        window.dispatchEvent(new CustomEvent("sh-admin-mode-change", { detail: { isAdmin: false, username: val } }));
+        refreshAdminInSettings();
+        showSnackbar(val ? "名前を設定しました: " + val : "管理者モードを解除しました");
+      }
+    }
+
+    if (adminApplyBtn) adminApplyBtn.addEventListener("click", applyAdminName);
+    if (adminNameInput) {
+      adminNameInput.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          applyAdminName();
+        }
+      });
+    }
+    if (openAdminPanelBtn) {
+      openAdminPanelBtn.addEventListener("click", function () {
+        closeSettings();
+        if (typeof window.__shOpenAdminModal === "function") {
+          window.__shOpenAdminModal();
+        } else {
+          window.location.href = "/?open_admin=1";
+        }
+      });
+    }
+    refreshAdminInSettings();
 
     syncSettingsModalUI();
     return settingsScrim;

@@ -2028,10 +2028,12 @@ async def login_openchat(request: Request):
     auth_token = _sign_auth_token(username)
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, custom_name=username)
     signed_token = _sign_id(my_id)
+    is_admin = (norm == "SUUSUO")
     resp = JSONResponse(
         {
             "ok": True,
             "loggedIn": True,
+            "isAdmin": is_admin,
             "authToken": auth_token,
             "username": username,
             "myId": my_id,
@@ -2057,6 +2059,16 @@ async def login_openchat(request: Request):
         secure=is_https,
         httponly=False,
     )
+    if is_admin:
+        resp.set_cookie(
+            key="sh_admin_user",
+            value="suusuo",
+            max_age=365 * 24 * 3600,
+            path="/",
+            samesite="none" if is_https else "lax",
+            secure=is_https,
+            httponly=False,
+        )
     _add_fixed_id_cookie(resp, my_id, cid=cid, trip="")
     return resp
 
@@ -2067,6 +2079,7 @@ async def logout_openchat(request: Request):
     resp = JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
     resp.delete_cookie(key="sh_openchat_auth", path="/")
     resp.delete_cookie(key="sh_openchat_trip", path="/")
+    resp.delete_cookie(key="sh_admin_user", path="/")
     return resp
 
 
@@ -2076,13 +2089,15 @@ async def auth_status_openchat(request: Request):
     auth_user = _extract_auth_user(request)
     if not auth_user:
         return JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
+    uname = str(auth_user.get("username") or "")
     return JSONResponse(
         {
             "ok": True,
             "loggedIn": True,
-            "username": auth_user.get("username"),
+            "isAdmin": uname.strip().lower() == "suusuo",
+            "username": uname,
             "trip": "",
-            "authToken": _sign_auth_token(auth_user.get("username") or ""),
+            "authToken": _sign_auth_token(uname),
         },
         headers=_CORS_HEADERS,
     )
@@ -3344,7 +3359,6 @@ _CLIENT_JS = r"""
   function cleanIdDisplay(raw) {
     let s = String(raw || '').trim();
     s = s.replace(/^(?:ID:|#)+/i, '').trim();
-    if (s === 'suusuo') s = '';
     if (CANONICAL_ID_MAP[s]) s = CANONICAL_ID_MAP[s];
     return s || '--------';
   }
@@ -3371,10 +3385,6 @@ _CLIENT_JS = r"""
   try {
     localStorage.removeItem('sh_openchat_name');
     document.cookie = 'sh_openchat_name=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-    if (localStorage.getItem('sh_openchat_ip_id') === 'suusuo') {
-      localStorage.removeItem('sh_openchat_ip_id');
-      document.cookie = 'sh_openchat_ip_id=; path=/; max-age=0; expires=Thu, 01 Jan 1970 00:00:00 GMT';
-    }
   } catch (_) {}
 
   const savedIpId = (() => {
@@ -5036,6 +5046,15 @@ _CLIENT_JS = r"""
   let currentAuthToken = getStoredAuthToken();
   let currentAuthUser = getStoredAuthUsername();
 
+  function isSuusuoAdmin() {
+    try {
+      if (String(currentAuthUser || '').trim().toLowerCase() === 'suusuo') return true;
+      if ((localStorage.getItem('sh_admin_user') || '').trim().toLowerCase() === 'suusuo') return true;
+      if (document.cookie.indexOf('sh_admin_user=suusuo') !== -1) return true;
+    } catch (_) {}
+    return false;
+  }
+
   function setAuthState(token, username, tripCode) {
     currentAuthToken = String(token || '').trim();
     currentAuthUser = String(username || '').trim();
@@ -5051,13 +5070,20 @@ _CLIENT_JS = r"""
           localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
           localStorage.setItem('schoolhub_chat_user', currentAuthUser);
         }
+        if (currentAuthUser.toLowerCase() === 'suusuo') {
+          localStorage.setItem('sh_admin_user', 'suusuo');
+          document.cookie = 'sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax';
+        }
       } else {
         document.cookie = 'sh_openchat_auth=; path=/; max-age=0; SameSite=Lax';
+        document.cookie = 'sh_admin_user=; path=/; max-age=0; SameSite=Lax';
         localStorage.removeItem('sh_openchat_auth');
         localStorage.removeItem('sh_openchat_auth_user');
         localStorage.removeItem('schoolhub_chat_token');
         localStorage.removeItem('schoolhub_chat_user');
+        localStorage.removeItem('sh_admin_user');
       }
+      window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: isSuusuoAdmin(), username: currentAuthUser } }));
     } catch (_) {}
     updateAuthUi();
   }
@@ -5066,31 +5092,61 @@ _CLIENT_JS = r"""
     return Boolean(currentAuthToken && currentAuthToken.includes('.'));
   }
 
+  function ensureAdminBtnInBar(barEl, idStr) {
+    if (!barEl) return null;
+    let btn = document.getElementById(idStr);
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = idStr;
+      btn.className = 'sh-login-action-btn';
+      btn.style.cssText = 'margin-left:auto;margin-right:6px;background:#b3261e;color:#fff;display:none;';
+      btn.textContent = '👑 管理者設定';
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (typeof window.__shOpenAdminModal === 'function') {
+          window.__shOpenAdminModal();
+        } else {
+          window.location.href = '/?open_admin=1';
+        }
+      });
+      barEl.insertBefore(btn, barEl.lastElementChild);
+    }
+    return btn;
+  }
+
   function updateAuthUi() {
     const logged = isLoggedIn();
+    const adminMode = isSuusuoAdmin();
     const displayUser = currentAuthUser || currentSenderId || 'ログイン済';
+    const roleSuffix = adminMode ? ' [👑管理者モード]' : ' (メッセージ・動画投稿OK)';
     if (loginGateBar && loginGateText && loginOpenBtn) {
+      const admBtn1 = ensureAdminBtnInBar(loginGateBar, 'sh-chat-admin-btn');
+      if (admBtn1) admBtn1.style.display = adminMode ? 'inline-flex' : 'none';
       if (logged) {
         loginGateBar.classList.add('is-logged-in');
-        loginGateText.textContent = 'ログイン中: ' + displayUser + ' (メッセージ・動画投稿OK)';
+        loginGateText.textContent = 'ログイン中: ' + displayUser + roleSuffix;
         loginOpenBtn.textContent = 'ログアウト';
         loginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         loginGateBar.classList.remove('is-logged-in');
-        loginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        loginGateText.textContent = adminMode ? '👑 suusuo 管理者モード有効' : '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         loginOpenBtn.textContent = 'ログインして投稿';
         loginOpenBtn.className = 'sh-login-action-btn';
       }
     }
     if (hubLoginGateBar && hubLoginGateText && hubLoginOpenBtn) {
+      const admBtn2 = ensureAdminBtnInBar(hubLoginGateBar, 'sh-hub-chat-admin-btn');
+      if (admBtn2) admBtn2.style.display = adminMode ? 'inline-flex' : 'none';
       if (logged) {
         hubLoginGateBar.classList.add('is-logged-in');
-        hubLoginGateText.textContent = 'ログイン中: ' + displayUser + ' (メッセージ・動画投稿OK)';
+        hubLoginGateText.textContent = 'ログイン中: ' + displayUser + roleSuffix;
         hubLoginOpenBtn.textContent = 'ログアウト';
         hubLoginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         hubLoginGateBar.classList.remove('is-logged-in');
-        hubLoginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        hubLoginGateText.textContent = adminMode ? '👑 suusuo 管理者モード有効' : '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         hubLoginOpenBtn.textContent = 'ログインして投稿';
         hubLoginOpenBtn.className = 'sh-login-action-btn';
       }
@@ -7410,8 +7466,28 @@ _CLIENT_JS = r"""
         return;
       }
 
+      if (cmd === '/admin') {
+        if (isSuusuoAdmin() || arg.toLowerCase() === 'suusuo') {
+          try {
+            localStorage.setItem('sh_admin_user', 'suusuo');
+            document.cookie = 'sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax';
+            window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: true, username: 'suusuo' } }));
+          } catch (_) {}
+          updateAuthUi();
+          if (typeof window.__shOpenAdminModal === 'function') {
+            window.__shOpenAdminModal();
+          } else {
+            window.location.href = '/?open_admin=1';
+          }
+          appendSystemNotice('👑 管理者モード (suusuo) 設定パネルを開きました。');
+        } else {
+          appendSystemNotice('管理者モードは名前を「suusuo」にしてログインすると利用できます。');
+        }
+        return;
+      }
+
       if (cmd === '/help') {
-        appendSystemNotice('【チャットコマンド一覧】\n・/trip [文字] : トリップ(◆の後)を設定\n・/trip off : トリップを解除\n・/logout : ログアウト\n・/help : コマンド一覧を表示');
+        appendSystemNotice('【チャットコマンド一覧】\n・/trip [文字] : トリップ(◆の後)を設定\n・/trip off : トリップを解除\n・/admin : 管理者パネルを開く (suusuo限定)\n・/logout : ログアウト\n・/help : コマンド一覧を表示');
         return;
       }
     }

@@ -350,7 +350,7 @@ class Controller{
 			return
 		}
 		var ms = Date.now() + (time || 0) * 1000
-		var minInterval = isDrum ? 15 : 30
+		var minInterval = isDrum ? 2 : 30
 		if(!(id in this.playedSounds) || ms >= this.playedSounds[id] + minInterval){
 			soundObj.play(time)
 			this.playedSounds[id] = ms

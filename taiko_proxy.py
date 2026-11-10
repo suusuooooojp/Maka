@@ -267,7 +267,7 @@ def _get_config_payload() -> dict:
             "project_number": "",
         },
         "_version": {
-            "commit_short": "20261108v1",
+            "commit_short": "20261110v2",
             "version": "1.0",
             "url": "https://github.com/sammwyy/open-taiko",
         },

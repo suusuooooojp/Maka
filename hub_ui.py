@@ -122,7 +122,7 @@ def render_home(proxies, request=None):
             f'''<div class="card-title-group">'''
             f'''<span class="card-icon-box" data-cat="{cat_esc}">{svc_svg}</span>'''
             f'''<div class="card-title-text">'''
-            f'''<div class="card-title"><b>{name_esc}</b></div>'''
+            f'''<div class="card-title"><b>{name_esc}</b><span class="card-pause-badge">⏸ 一時停止中</span></div>'''
             f'''<span class="cat-tag">{cat_label_esc}</span>'''
             f'''</div>'''
             f'''</div>'''
@@ -2016,6 +2016,94 @@ body.sidebar-collapsed .m3-layout-body {{
     display: none;
   }}
 }}
+.card.service.is-paused {{
+  opacity: 0.72;
+  border-color: var(--md-sys-color-error, #b3261e) !important;
+  position: relative;
+}}
+.card-pause-badge {{
+  display: none;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  background: var(--md-sys-color-error-container, #f9dedc);
+  color: var(--md-sys-color-error, #b3261e);
+  margin-left: 6px;
+}}
+.card.service.is-paused .card-pause-badge {{
+  display: inline-flex;
+}}
+.sh-modal-scrim {{
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.56);
+  backdrop-filter: blur(4px);
+  z-index: 2147483645;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  box-sizing: border-box;
+}}
+.sh-modal-scrim.open {{
+  display: flex;
+}}
+.sh-modal-card {{
+  width: 100%;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--md-sys-color-surface-container-lowest, #ffffff);
+  color: var(--md-sys-color-on-surface, #1f1f1f);
+  border: 1px solid var(--md-sys-color-outline-variant, #c4c7c5);
+  border-radius: 24px;
+  padding: 22px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.28);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}}
+.sh-admin-svc-grid {{
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  max-height: 210px;
+  overflow-y: auto;
+  padding: 10px;
+  border-radius: 14px;
+  background: var(--md-sys-color-surface-container-low, #f0f4f9);
+  border: 1px solid var(--md-sys-color-outline-variant, #c4c7c5);
+}}
+.sh-admin-svc-item {{
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: var(--md-sys-color-surface-container-lowest, #fff);
+  border: 1px solid var(--md-sys-color-outline-variant, #c4c7c5);
+}}
+.sh-admin-input, .sh-admin-textarea, .sh-admin-select {{
+  width: 100%;
+  box-sizing: border-box;
+  border-radius: 12px;
+  border: 1px solid var(--md-sys-color-outline-variant, #c4c7c5);
+  background: var(--md-sys-color-surface-container-lowest, #fff);
+  color: var(--md-sys-color-on-surface, #1f1f1f);
+  padding: 9px 12px;
+  font-size: 13.5px;
+  font-family: inherit;
+}}
+.sh-admin-textarea {{
+  min-height: 76px;
+  resize: vertical;
+}}
 </style>
 </head>
 <body>
@@ -2037,6 +2125,10 @@ body.sidebar-collapsed .m3-layout-body {{
   </div>
 
   <div class="topbar-right">
+    <button type="button" class="topbar-action-btn" id="suusuoAdminBtn" style="display:none;background:#b3261e;color:#ffffff;border-color:#b3261e;" title="管理者設定 (suusuo)" aria-label="管理者設定">
+      <span>👑</span>
+      <span class="btn-label">管理者設定</span>
+    </button>
     <button type="button" class="topbar-action-btn" id="headerSearchBtn" title="検索欄へ移動" aria-label="検索">
       {ic_search}
       <span class="btn-label">検索</span>
@@ -2084,7 +2176,7 @@ body.sidebar-collapsed .m3-layout-body {{
       <button type="button" class="sidebar-item" data-nav-filter="FAV" data-tooltip="ピン留め固定">
         <span class="item-icon">{ic_pin}</span>
         <span class="item-label">ピン留め固定</span>
-        <span class="item-badge" id="sidebarFavCount">0</span>
+        <span class="item-badge" id="sidebarFavCount">1</span>
       </button>
 
       <div class="sidebar-section-label" style="margin-top:8px;">ダッシュボード</div>
@@ -2127,7 +2219,7 @@ body.sidebar-collapsed .m3-layout-body {{
           <button type="button" class="tab-btn" data-filter="Games" role="tab" aria-selected="false">ゲーム<span class="tab-count">({counts["Games"]})</span></button>
           <button type="button" class="tab-btn" data-filter="Watch" role="tab" aria-selected="false">動画・SNS<span class="tab-count">({counts["Watch"]})</span></button>
           <button type="button" class="tab-btn" data-filter="Browser" role="tab" aria-selected="false">ブラウザ<span class="tab-count">({counts["Browser"]})</span></button>
-          <button type="button" class="tab-btn" data-filter="FAV" role="tab" aria-selected="false">固定<span class="tab-count" id="favTabCount">(0)</span></button>
+          <button type="button" class="tab-btn" data-filter="FAV" role="tab" aria-selected="false">固定<span class="tab-count" id="favTabCount">(1)</span></button>
         </div>
         <div class="recent-bar" id="recentBar">
           <span class="recent-label">{ic_clock}<span>最近利用:</span></span>
@@ -2315,6 +2407,135 @@ body.sidebar-collapsed .m3-layout-body {{
 
 <div class="toast" id="hub-toast" role="status" aria-live="polite"></div>
 
+<!-- Custom Announcement Dialog Modal -->
+<div class="sh-modal-scrim" id="shCustomDialogModal" role="dialog" aria-modal="true" aria-labelledby="shCustomDialogTitle">
+  <div class="sh-modal-card" style="max-width:440px;text-align:center;">
+    <div style="font-size:32px;line-height:1;">📢</div>
+    <h2 id="shCustomDialogTitle" style="margin:0;font-size:19px;font-weight:700;">管理者からのお知らせ</h2>
+    <div id="shCustomDialogBody" style="font-size:14px;line-height:1.65;color:var(--md-sys-color-on-surface-variant,#444746);white-space:pre-wrap;word-break:break-word;text-align:left;background:var(--md-sys-color-surface-container-low,#f0f4f9);padding:14px;border-radius:14px;"></div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px;">
+      <button type="button" class="md-btn md-btn-filled" id="shCustomDialogCloseBtn" style="width:100%;height:42px;">確認</button>
+      <button type="button" class="md-btn md-btn-tonal" id="shCustomDialogAdminEditBtn" style="width:100%;height:38px;display:none;">👑 管理者(suusuo)としてダイアログ設定を編集</button>
+    </div>
+  </div>
+</div>
+
+<!-- Paused Service Alert Modal -->
+<div class="sh-modal-scrim" id="shPauseAlertModal" role="alertdialog" aria-modal="true" aria-labelledby="shPauseAlertTitle">
+  <div class="sh-modal-card" style="max-width:440px;text-align:center;">
+    <div style="width:52px;height:52px;border-radius:16px;background:var(--md-sys-color-error-container,#f9dedc);color:var(--md-sys-color-error,#b3261e);display:inline-flex;align-items:center;justify-content:center;font-size:26px;margin:0 auto;">⏸</div>
+    <div><span id="shPauseAlertServiceBadge" style="display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;background:var(--md-sys-color-error-container,#f9dedc);color:var(--md-sys-color-error,#b3261e);">一時停止中</span></div>
+    <h2 id="shPauseAlertTitle" style="margin:0;font-size:19px;font-weight:700;">アプリは一時停止中です</h2>
+    <div id="shPauseAlertBody" style="font-size:14px;line-height:1.6;color:var(--md-sys-color-on-surface-variant,#444746);white-space:pre-wrap;word-break:break-word;"></div>
+    <div style="display:flex;flex-direction:column;gap:8px;margin-top:4px;">
+      <button type="button" class="md-btn md-btn-filled" id="shPauseAlertCloseBtn" style="width:100%;height:42px;">閉じる</button>
+      <a class="md-btn md-btn-tonal" id="shPauseAlertBypassBtn" href="/" style="width:100%;height:38px;display:none;text-decoration:none;box-sizing:border-box;">👑 管理者(suusuo)として開く</a>
+    </div>
+  </div>
+</div>
+
+<!-- suusuo Administrator Control Panel Modal -->
+<div class="sh-modal-scrim" id="shAdminPanelModal" role="dialog" aria-modal="true" aria-labelledby="shAdminPanelTitle">
+  <div class="sh-modal-card">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+      <div>
+        <h2 id="shAdminPanelTitle" style="margin:0;font-size:18px;font-weight:700;display:flex;align-items:center;gap:6px;">👑 suusuo 管理者モード設定</h2>
+        <div style="font-size:12px;color:var(--md-sys-color-on-surface-variant,#444746);margin-top:2px;">アプリの一時停止・カスタムダイアログをリアルタイムに制御します</div>
+      </div>
+      <button type="button" class="md-icon-btn" id="shAdminPanelCloseBtn" aria-label="閉じる">{ic_clear}</button>
+    </div>
+
+    <hr class="md-divider" style="margin:0;">
+
+    <!-- 1. App Pause Settings -->
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div>
+          <div style="font-weight:700;font-size:14.5px;">1. 全アプリ一括一時停止</div>
+          <div style="font-size:12px;color:var(--md-sys-color-on-surface-variant,#444746);">ONにするとすべてのアプリを一時停止状態にします</div>
+        </div>
+        <label class="md-switch">
+          <input type="checkbox" id="shAdminPauseAllSwitch">
+          <span class="md-switch-track"><span class="md-switch-thumb"></span></span>
+        </label>
+      </div>
+
+      <div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+          <span style="font-weight:700;font-size:13.5px;">個別アプリの一時停止（チェックしたアプリを停止）</span>
+          <div style="display:flex;gap:6px;">
+            <button type="button" class="md-btn md-btn-tonal" id="shAdminSelectAllSvcBtn" style="height:28px;padding:0 10px;font-size:11.5px;">全選択</button>
+            <button type="button" class="md-btn md-btn-text" id="shAdminClearAllSvcBtn" style="height:28px;padding:0 10px;font-size:11.5px;">全解除</button>
+          </div>
+        </div>
+        <div class="sh-admin-svc-grid" id="shAdminSvcChecklist"></div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr;gap:8px;">
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminPauseTitleInput">一時停止ダイアログのタイトル</label>
+          <input type="text" class="sh-admin-input" id="shAdminPauseTitleInput" maxlength="120" value="アプリは一時停止中です">
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminPauseMsgInput">一時停止ダイアログのメッセージ</label>
+          <textarea class="sh-admin-textarea" id="shAdminPauseMsgInput" maxlength="1000" style="min-height:56px;">現在、管理者(suusuo)によりこのアプリは一時停止されています。しばらくお待ちください。</textarea>
+        </div>
+      </div>
+    </div>
+
+    <hr class="md-divider" style="margin:0;">
+
+    <!-- 2. Custom Dialog Settings -->
+    <div style="display:flex;flex-direction:column;gap:10px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div>
+          <div style="font-weight:700;font-size:14.5px;">2. ダイアログ（お知らせ・警告）表示設定</div>
+          <div style="font-size:12px;color:var(--md-sys-color-on-surface-variant,#444746);">ONにすると訪問ユーザーにカスタムダイアログを表示します</div>
+        </div>
+        <label class="md-switch">
+          <input type="checkbox" id="shAdminDialogEnabledSwitch">
+          <span class="md-switch-track"><span class="md-switch-thumb"></span></span>
+        </label>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminDialogTitleInput">ダイアログのタイトル</label>
+          <input type="text" class="sh-admin-input" id="shAdminDialogTitleInput" maxlength="120" value="管理者からのお知らせ">
+        </div>
+        <div>
+          <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminDialogBtnTextInput">確認ボタンの文字</label>
+          <input type="text" class="sh-admin-input" id="shAdminDialogBtnTextInput" maxlength="40" value="確認">
+        </div>
+      </div>
+
+      <div>
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminDialogMsgInput">ダイアログの本文メッセージ</label>
+        <textarea class="sh-admin-textarea" id="shAdminDialogMsgInput" maxlength="2000" placeholder="ユーザーに表示したいお知らせやメッセージを入力してください..."></textarea>
+      </div>
+
+      <div>
+        <label style="display:block;font-size:12px;font-weight:600;margin-bottom:4px;" for="shAdminDialogModeSelect">ダイアログの表示モード</label>
+        <select class="sh-admin-select" id="shAdminDialogModeSelect">
+          <option value="always">毎回表示（ページを開くたびに表示）</option>
+          <option value="once">1回のみ表示（確認ボタンを押したら次回から非表示）</option>
+          <option value="lock">強制ロック表示（閉じるボタンを隠して画面を固定）</option>
+        </select>
+      </div>
+    </div>
+
+    <hr class="md-divider" style="margin:0;">
+
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;">
+      <button type="button" class="md-btn md-btn-tonal" id="shAdminPreviewDialogBtn">ダイアログをプレビュー</button>
+      <div style="display:flex;gap:8px;">
+        <button type="button" class="md-btn md-btn-text" id="shAdminCancelBtn">キャンセル</button>
+        <button type="button" class="md-btn md-btn-filled" id="shAdminSaveBtn" style="background:#b3261e;color:#fff;">保存して即時反映</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script>
 (() => {{
   window.__SH_HUB_TRACKER_ACTIVE = true;
@@ -2493,24 +2714,44 @@ body.sidebar-collapsed .m3-layout-body {{
   }}
 
   // --- Favorites (Pin) & Recently Used Services ---
+  function hasFav(favSet, targetName) {{
+    if (!favSet || !targetName) return false;
+    if (favSet.has(targetName)) return true;
+    const lower = String(targetName).toLowerCase();
+    for (const item of favSet) {{
+      if (String(item || "").toLowerCase() === lower) return true;
+    }}
+    return false;
+  }}
+  function deleteFav(favSet, targetName) {{
+    if (!favSet || !targetName) return;
+    const lower = String(targetName).toLowerCase();
+    for (const item of [...favSet]) {{
+      if (String(item || "").toLowerCase() === lower) {{
+        favSet.delete(item);
+      }}
+    }}
+  }}
   function getFavs() {{
     try {{
       const stored = localStorage.getItem(FAV_KEY);
       let s;
       if (stored === null) {{
-        s = new Set(["youtube"]);
+        s = new Set(["YouTube"]);
         saveFavs(s);
       }} else {{
-        s = new Set(JSON.parse(stored || "[]"));
+        const parsed = JSON.parse(stored || "[]");
+        s = new Set(Array.isArray(parsed) ? parsed.map(x => (String(x || "").toLowerCase() === "youtube" ? "YouTube" : x)) : ["YouTube"]);
       }}
-      if (!localStorage.getItem(FAV_KEY + "_yt_auto_v1")) {{
-        s.add("youtube");
-        try {{ localStorage.setItem(FAV_KEY + "_yt_auto_v1", "1"); }} catch (_) {{}}
+      if (!localStorage.getItem(FAV_KEY + "_yt_auto_v2")) {{
+        deleteFav(s, "YouTube");
+        s.add("YouTube");
+        try {{ localStorage.setItem(FAV_KEY + "_yt_auto_v2", "1"); }} catch (_) {{}}
         saveFavs(s);
       }}
       return s;
     }}
-    catch (_) {{ return new Set(["youtube"]); }}
+    catch (_) {{ return new Set(["YouTube"]); }}
   }}
   function saveFavs(set) {{
     try {{ localStorage.setItem(FAV_KEY, JSON.stringify([...set])); }} catch (_) {{}}
@@ -2546,7 +2787,12 @@ body.sidebar-collapsed .m3-layout-body {{
         a.className = "recent-chip";
         a.href = item.path || "/";
         a.textContent = item.name;
-        a.addEventListener("click", () => {{
+        a.addEventListener("click", (e) => {{
+          if (isServicePaused(item.name, item.path)) {{
+            e.preventDefault();
+            showPauseAlert(item.name, item.path);
+            return;
+          }}
           isInternalNav = true;
           sendBeaconEvent("active", "open", item.name, item.path, true);
         }});
@@ -2566,7 +2812,12 @@ body.sidebar-collapsed .m3-layout-body {{
           </div>
           <span class="recent-card-badge">最近利用</span>
         `;
-        cardEl.addEventListener("click", () => {{
+        cardEl.addEventListener("click", (e) => {{
+          if (isServicePaused(item.name, item.path)) {{
+            e.preventDefault();
+            showPauseAlert(item.name, item.path);
+            return;
+          }}
           isInternalNav = true;
           sendBeaconEvent("active", "open", item.name, item.path, true);
         }});
@@ -2584,7 +2835,7 @@ body.sidebar-collapsed .m3-layout-body {{
     cards.forEach(card => {{
       const name = card.dataset.name;
       const btn = card.querySelector(".fav-btn");
-      const pinned = favs.has(name);
+      const pinned = hasFav(favs, name);
       if (btn) {{
         btn.classList.toggle("pinned", pinned);
         btn.setAttribute("aria-pressed", pinned ? "true" : "false");
@@ -2599,8 +2850,8 @@ body.sidebar-collapsed .m3-layout-body {{
       e.stopPropagation();
       const name = btn.dataset.fav;
       const favs = getFavs();
-      if (favs.has(name)) {{
-        favs.delete(name);
+      if (hasFav(favs, name)) {{
+        deleteFav(favs, name);
         toast(`「${{name}}」の固定を解除しました`);
       }} else {{
         favs.add(name);
@@ -2667,7 +2918,7 @@ body.sidebar-collapsed .m3-layout-body {{
       const text = card.innerText.toLowerCase();
       const matchCat =
         activeFilter === "ALL" ||
-        (activeFilter === "FAV" ? favs.has(card.dataset.name) : cat === activeFilter);
+        (activeFilter === "FAV" ? hasFav(favs, card.dataset.name) : cat === activeFilter);
       const matchQuery = !q || name.includes(q) || kw.includes(q) || text.includes(q);
       const show = matchCat && matchQuery;
       card.style.display = show ? "flex" : "none";
@@ -2708,16 +2959,36 @@ body.sidebar-collapsed .m3-layout-body {{
     if (e.key === "Enter") {{
       const q = searchInput.value.trim();
       if (!q) return;
+      if (q.toLowerCase() === "suusuo") {{
+        try {{
+          localStorage.setItem("sh_admin_user", "suusuo");
+          document.cookie = "sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax";
+        }} catch (_) {{}}
+        syncAdminModeUI();
+        openAdminPanelModal();
+        searchInput.value = "";
+        filterCards();
+        toast("👑 suusuo 管理者モードを有効化しました");
+        return;
+      }}
       const visibleCards = cards.filter(c => c.style.display !== "none");
       if (visibleCards.length === 1) {{
         visibleCards[0].click();
       }} else if (/^https?:\\/\\//i.test(q) || (q.includes(".") && !q.includes(" "))) {{
         const target = "/interstellar/?url=" + encodeURIComponent(q);
+        if (isServicePaused("Interstellar", "/interstellar/")) {{
+          showPauseAlert("Interstellar", target);
+          return;
+        }}
         isInternalNav = true;
         sendBeaconEvent("active", "open", "Interstellar", target, true);
         location.href = target;
       }} else {{
         const target = "/youtube/?q=" + encodeURIComponent("https://www.youtube.com/results?search_query=" + encodeURIComponent(q));
+        if (isServicePaused("YouTube", "/youtube/")) {{
+          showPauseAlert("YouTube", target);
+          return;
+        }}
         isInternalNav = true;
         sendBeaconEvent("active", "open", "YouTube", target, true);
         location.href = target;
@@ -2730,6 +3001,10 @@ body.sidebar-collapsed .m3-layout-body {{
     const target = q
       ? "/youtube/?q=" + encodeURIComponent("https://www.youtube.com/results?search_query=" + encodeURIComponent(q))
       : "/youtube/";
+    if (isServicePaused("YouTube", "/youtube/")) {{
+      showPauseAlert("YouTube", target);
+      return;
+    }}
     isInternalNav = true;
     sendBeaconEvent("active", "open", "YouTube", target, true);
     location.href = target;
@@ -2737,6 +3012,10 @@ body.sidebar-collapsed .m3-layout-body {{
   $("quickWakame")?.addEventListener("click", () => {{
     const q = (searchInput?.value || "").trim();
     const target = q ? "/wakame/search?q=" + encodeURIComponent(q) : "/wakame/";
+    if (isServicePaused("わかめtube Plus", "/wakame/")) {{
+      showPauseAlert("わかめtube Plus", target);
+      return;
+    }}
     isInternalNav = true;
     sendBeaconEvent("active", "open", "わかめtube Plus", target, true);
     location.href = target;
@@ -2744,6 +3023,10 @@ body.sidebar-collapsed .m3-layout-body {{
   $("quickBrowser")?.addEventListener("click", () => {{
     const q = (searchInput?.value || "").trim();
     const target = q ? "/interstellar/?url=" + encodeURIComponent(q) : "/interstellar/";
+    if (isServicePaused("Interstellar", "/interstellar/")) {{
+      showPauseAlert("Interstellar", target);
+      return;
+    }}
     isInternalNav = true;
     sendBeaconEvent("active", "open", "Interstellar", target, true);
     location.href = target;
@@ -2763,6 +3046,285 @@ body.sidebar-collapsed .m3-layout-body {{
       if (latestSnapshot) updateDashboard(latestSnapshot);
     }});
   }});
+
+  // --- suusuo Admin Mode, App Pause & Custom Dialog System ---
+  let adminConfig = {{
+    pauseAll: false,
+    pausedServices: [],
+    pauseTitle: "アプリは一時停止中です",
+    pauseMessage: "現在、管理者(suusuo)によりこのアプリは一時停止されています。しばらくお待ちください。",
+    dialogEnabled: false,
+    dialogTitle: "管理者からのお知らせ",
+    dialogMessage: "",
+    dialogButtonText: "確認",
+    dialogMode: "always",
+    updatedAt: 0,
+  }};
+
+  function isSuusuoAdmin() {{
+    try {{
+      const u1 = (localStorage.getItem("sh_admin_user") || "").trim().toLowerCase();
+      const u2 = (localStorage.getItem("sh_openchat_auth_user") || localStorage.getItem("schoolhub_chat_user") || "").trim().toLowerCase();
+      if (u1 === "suusuo" || u2 === "suusuo") return true;
+      if (document.cookie.indexOf("sh_admin_user=suusuo") !== -1) return true;
+    }} catch (_) {{}}
+    return false;
+  }}
+
+  function syncAdminModeUI() {{
+    const adminBtn = $("suusuoAdminBtn");
+    const isAdm = isSuusuoAdmin();
+    if (adminBtn) {{
+      adminBtn.style.display = isAdm ? "inline-flex" : "none";
+    }}
+    const editBtn = $("shCustomDialogAdminEditBtn");
+    if (editBtn) {{
+      editBtn.style.display = isAdm ? "inline-flex" : "none";
+    }}
+  }}
+
+  function isServicePaused(serviceName, servicePath) {{
+    if (!adminConfig) return false;
+    if (adminConfig.pauseAll) return true;
+    const list = Array.isArray(adminConfig.pausedServices) ? adminConfig.pausedServices : [];
+    if (!list.length) return false;
+    const normName = String(serviceName || "").trim().toLowerCase();
+    const normPath = String(servicePath || "").trim().toLowerCase().replace(/\\/+$/, "");
+    return list.some(item => {{
+      const v = String(item || "").trim().toLowerCase().replace(/\\/+$/, "");
+      return v && (v === normName || (normPath && v === normPath));
+    }});
+  }}
+
+  function applyAdminConfigToCards() {{
+    cards.forEach(card => {{
+      const name = card.dataset.name || "";
+      const path = card.dataset.path || "";
+      const paused = isServicePaused(name, path);
+      card.classList.toggle("is-paused", paused);
+    }});
+  }}
+
+  function showPauseAlert(serviceName, targetPath) {{
+    const modal = $("shPauseAlertModal");
+    if (!modal) return;
+    const badgeEl = $("shPauseAlertServiceBadge");
+    const titleEl = $("shPauseAlertTitle");
+    const bodyEl = $("shPauseAlertBody");
+    const bypassBtn = $("shPauseAlertBypassBtn");
+    if (badgeEl) badgeEl.textContent = `${{serviceName || "アプリ"}} — 一時停止中`;
+    if (titleEl) titleEl.textContent = adminConfig.pauseTitle || "アプリは一時停止中です";
+    if (bodyEl) bodyEl.textContent = adminConfig.pauseMessage || "現在、管理者によりこのアプリは一時停止されています。";
+    if (bypassBtn) {{
+      if (isSuusuoAdmin() && targetPath) {{
+        const sep = targetPath.includes("?") ? "&" : "?";
+        bypassBtn.href = `${{targetPath}}${{sep}}admin_bypass=1`;
+        bypassBtn.style.display = "inline-flex";
+      }} else {{
+        bypassBtn.style.display = "none";
+      }}
+    }}
+    modal.classList.add("open");
+  }}
+
+  $("shPauseAlertCloseBtn")?.addEventListener("click", () => {{
+    $("shPauseAlertModal")?.classList.remove("open");
+  }});
+  $("shPauseAlertModal")?.addEventListener("click", (e) => {{
+    if (e.target === $("shPauseAlertModal")) $("shPauseAlertModal")?.classList.remove("open");
+  }});
+
+  let lastShownDialogSignature = "";
+  function evaluateCustomDialog(forcePreview = false) {{
+    const modal = $("shCustomDialogModal");
+    if (!modal) return;
+    if (!forcePreview && !adminConfig.dialogEnabled) {{
+      modal.classList.remove("open");
+      return;
+    }}
+    const titleStr = adminConfig.dialogTitle || "管理者からのお知らせ";
+    const msgStr = adminConfig.dialogMessage || "";
+    const btnStr = adminConfig.dialogButtonText || "確認";
+    const modeStr = adminConfig.dialogMode || "always";
+    const sig = `${{adminConfig.updatedAt || 0}}_${{titleStr}}_${{msgStr}}_${{modeStr}}`;
+
+    if (!forcePreview) {{
+      if (modeStr === "once") {{
+        try {{
+          if (localStorage.getItem("sh_dialog_ack_sig") === sig) return;
+        }} catch (_) {{}}
+      }} else if (lastShownDialogSignature === sig) {{
+        return;
+      }}
+    }}
+    lastShownDialogSignature = sig;
+
+    if ($("shCustomDialogTitle")) $("shCustomDialogTitle").textContent = titleStr;
+    if ($("shCustomDialogBody")) $("shCustomDialogBody").textContent = msgStr || "（メッセージなし）";
+    const closeBtn = $("shCustomDialogCloseBtn");
+    if (closeBtn) {{
+      closeBtn.textContent = btnStr;
+      closeBtn.style.display = (modeStr === "lock" && !forcePreview && !isSuusuoAdmin()) ? "none" : "inline-flex";
+    }}
+    const editBtn = $("shCustomDialogAdminEditBtn");
+    if (editBtn) {{
+      editBtn.style.display = isSuusuoAdmin() ? "inline-flex" : "none";
+    }}
+    modal.classList.add("open");
+  }}
+
+  $("shCustomDialogCloseBtn")?.addEventListener("click", () => {{
+    const modal = $("shCustomDialogModal");
+    if (modal) modal.classList.remove("open");
+    if (adminConfig.dialogMode === "once" && lastShownDialogSignature) {{
+      try {{ localStorage.setItem("sh_dialog_ack_sig", lastShownDialogSignature); }} catch (_) {{}}
+    }}
+  }});
+  $("shCustomDialogAdminEditBtn")?.addEventListener("click", () => {{
+    $("shCustomDialogModal")?.classList.remove("open");
+    openAdminPanelModal();
+  }});
+
+  function populateAdminPanelForm() {{
+    const pauseAllSw = $("shAdminPauseAllSwitch");
+    const pauseTitleIn = $("shAdminPauseTitleInput");
+    const pauseMsgIn = $("shAdminPauseMsgInput");
+    const dlgSw = $("shAdminDialogEnabledSwitch");
+    const dlgTitleIn = $("shAdminDialogTitleInput");
+    const dlgBtnIn = $("shAdminDialogBtnTextInput");
+    const dlgMsgIn = $("shAdminDialogMsgInput");
+    const dlgModeSel = $("shAdminDialogModeSelect");
+    const checklist = $("shAdminSvcChecklist");
+
+    if (pauseAllSw) pauseAllSw.checked = Boolean(adminConfig.pauseAll);
+    if (pauseTitleIn) pauseTitleIn.value = adminConfig.pauseTitle || "アプリは一時停止中です";
+    if (pauseMsgIn) pauseMsgIn.value = adminConfig.pauseMessage || "現在、管理者(suusuo)によりこのアプリは一時停止されています。しばらくお待ちください。";
+    if (dlgSw) dlgSw.checked = Boolean(adminConfig.dialogEnabled);
+    if (dlgTitleIn) dlgTitleIn.value = adminConfig.dialogTitle || "管理者からのお知らせ";
+    if (dlgBtnIn) dlgBtnIn.value = adminConfig.dialogButtonText || "確認";
+    if (dlgMsgIn) dlgMsgIn.value = adminConfig.dialogMessage || "";
+    if (dlgModeSel) dlgModeSel.value = adminConfig.dialogMode || "always";
+
+    if (checklist) {{
+      const pausedSet = new Set((adminConfig.pausedServices || []).map(x => String(x || "").toLowerCase()));
+      checklist.innerHTML = cards.map(c => {{
+        const sName = c.dataset.name || "";
+        const checked = pausedSet.has(sName.toLowerCase()) ? "checked" : "";
+        return `<label class="sh-admin-svc-item"><input type="checkbox" class="sh-admin-svc-cb" value="${{escHtml(sName)}}" ${{checked}}><span>${{escHtml(sName)}}</span></label>`;
+      }}).join("");
+    }}
+  }}
+
+  function openAdminPanelModal() {{
+    populateAdminPanelForm();
+    $("shAdminPanelModal")?.classList.add("open");
+  }}
+  window.__shOpenAdminModal = openAdminPanelModal;
+
+  function closeAdminPanelModal() {{
+    $("shAdminPanelModal")?.classList.remove("open");
+  }}
+
+  $("suusuoAdminBtn")?.addEventListener("click", openAdminPanelModal);
+  $("shAdminPanelCloseBtn")?.addEventListener("click", closeAdminPanelModal);
+  $("shAdminCancelBtn")?.addEventListener("click", closeAdminPanelModal);
+  $("shAdminPanelModal")?.addEventListener("click", (e) => {{
+    if (e.target === $("shAdminPanelModal")) closeAdminPanelModal();
+  }});
+
+  $("shAdminSelectAllSvcBtn")?.addEventListener("click", () => {{
+    document.querySelectorAll(".sh-admin-svc-cb").forEach(cb => {{ cb.checked = true; }});
+  }});
+  $("shAdminClearAllSvcBtn")?.addEventListener("click", () => {{
+    document.querySelectorAll(".sh-admin-svc-cb").forEach(cb => {{ cb.checked = false; }});
+  }});
+
+  function readAdminFormToConfig() {{
+    const selectedSvcs = [...document.querySelectorAll(".sh-admin-svc-cb")]
+      .filter(cb => cb.checked)
+      .map(cb => cb.value);
+    return {{
+      pauseAll: Boolean($("shAdminPauseAllSwitch")?.checked),
+      pausedServices: selectedSvcs,
+      pauseTitle: ($("shAdminPauseTitleInput")?.value || "アプリは一時停止中です").trim(),
+      pauseMessage: ($("shAdminPauseMsgInput")?.value || "現在、管理者(suusuo)によりこのアプリは一時停止されています。しばらくお待ちください。").trim(),
+      dialogEnabled: Boolean($("shAdminDialogEnabledSwitch")?.checked),
+      dialogTitle: ($("shAdminDialogTitleInput")?.value || "管理者からのお知らせ").trim(),
+      dialogButtonText: ($("shAdminDialogBtnTextInput")?.value || "確認").trim(),
+      dialogMessage: ($("shAdminDialogMsgInput")?.value || "").trim(),
+      dialogMode: $("shAdminDialogModeSelect")?.value || "always",
+    }};
+  }}
+
+  $("shAdminPreviewDialogBtn")?.addEventListener("click", () => {{
+    const draft = readAdminFormToConfig();
+    adminConfig = {{ ...adminConfig, ...draft }};
+    evaluateCustomDialog(true);
+  }});
+
+  $("shAdminSaveBtn")?.addEventListener("click", async () => {{
+    const saveBtn = $("shAdminSaveBtn");
+    const draft = readAdminFormToConfig();
+    if (saveBtn) {{
+      saveBtn.disabled = true;
+      saveBtn.textContent = "保存中...";
+    }}
+    try {{
+      const res = await fetch("/api/admin/config", {{
+        method: "POST",
+        headers: {{
+          "Content-Type": "application/json",
+          "X-Admin-User": "suusuo",
+        }},
+        body: JSON.stringify({{ adminUser: "suusuo", config: draft }}),
+      }});
+      const data = await res.json().catch(() => null);
+      if (res.ok && data && data.ok && data.config) {{
+        adminConfig = data.config;
+        applyAdminConfigToCards();
+        closeAdminPanelModal();
+        toast("👑 管理者設定を保存・反映しました");
+        if (adminConfig.dialogEnabled) {{
+          lastShownDialogSignature = "";
+          evaluateCustomDialog(false);
+        }}
+      }} else {{
+        toast((data && data.error) || "保存に失敗しました");
+      }}
+    }} catch (_) {{
+      toast("通信エラーが発生しました");
+    }} finally {{
+      if (saveBtn) {{
+        saveBtn.disabled = false;
+        saveBtn.textContent = "保存して即時反映";
+      }}
+    }}
+  }});
+
+  async function fetchAdminConfig() {{
+    try {{
+      const res = await fetch("/api/admin/config", {{ cache: "no-store" }});
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data && data.ok && data.config) {{
+        adminConfig = data.config;
+        applyAdminConfigToCards();
+        evaluateCustomDialog(false);
+      }}
+    }} catch (_) {{}}
+  }}
+
+  window.addEventListener("sh-admin-mode-change", () => {{
+    syncAdminModeUI();
+  }});
+  syncAdminModeUI();
+  fetchAdminConfig();
+  setInterval(fetchAdminConfig, 5000);
+  try {{
+    if (new URLSearchParams(location.search).get("open_admin") === "1" && isSuusuoAdmin()) {{
+      setTimeout(openAdminPanelModal, 200);
+    }}
+  }} catch (_) {{}}
 
   // --- Unified Session ID & Real-time Activity Heartbeat ---
   function getCookieSid() {{
@@ -2835,9 +3397,15 @@ body.sidebar-collapsed .m3-layout-body {{
   }}
 
   cards.forEach(card => {{
-    card.addEventListener("click", () => {{
+    card.addEventListener("click", (e) => {{
       const name = card.dataset.name || "Service";
       const path = card.dataset.path || "/";
+      if (isServicePaused(name, path)) {{
+        e.preventDefault();
+        e.stopPropagation();
+        showPauseAlert(name, path);
+        return;
+      }}
       isInternalNav = true;
       pushRecent(name, path);
       sendBeaconEvent("active", "open", name, path, true);
