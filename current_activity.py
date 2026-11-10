@@ -111,6 +111,7 @@ _CCU_SAMPLE_HOOK: Optional[Callable[[int, int, dict], None]] = None
 _STORAGE_STATUS_HOOK: Optional[Callable[[], dict]] = None
 _PEER_SYNC_HOOK: Optional[Callable[[dict], dict]] = None
 _SESSION_TOUCH_HOOK: Optional[Callable[..., None]] = None
+_REGISTER_ORIGIN_HOOK: Optional[Callable[[str], None]] = None
 
 
 def _now() -> float:
@@ -407,10 +408,16 @@ def _normalize_origin_url(raw_url: str) -> str:
             _ORIGIN_NORM_CACHE[raw_url] = ""
             return ""
         if host.startswith("untitled-hello-") and host.endswith(".run.app"):
-            res = "https://miruhukaka.ai.studio"
-            if len(_ORIGIN_NORM_CACHE) < 2000:
-                _ORIGIN_NORM_CACHE[raw_url] = res
-            return res
+            if _STORAGE_STATUS_HOOK is not None:
+                try:
+                    st = _STORAGE_STATUS_HOOK() or {}
+                    for u in st.get("self_urls") or []:
+                        su = str(u or "").strip().rstrip("/")
+                        if su.endswith(".cloud.run"):
+                            return su
+                except Exception:
+                    pass
+            return "https://miruhukaka.ai.studio"
         scheme = "https" if (host.endswith((".onrender.com", ".ai.studio", ".cloud.run", ".run.app", ".luhu.jp")) or parsed.scheme == "https") else "http"
         if parsed.port and not ((scheme == "https" and parsed.port == 443) or (scheme == "http" and parsed.port == 80)):
             netloc = f"{host}:{parsed.port}"
@@ -422,6 +429,88 @@ def _normalize_origin_url(raw_url: str) -> str:
         return res
     except Exception:
         return ""
+
+
+def extract_request_origin(request_or_ws, body_origin: str = "") -> str:
+    """Extract and register the public origin from request body/headers, prioritizing .cloud.run URLs."""
+    candidates: List[str] = []
+    if body_origin and isinstance(body_origin, str):
+        candidates.append(body_origin.strip())
+    if request_or_ws is not None:
+        try:
+            headers = getattr(request_or_ws, "headers", None) or {}
+            orig_hdr = (headers.get("origin") or "").strip()
+            if orig_hdr and orig_hdr != "null":
+                candidates.append(orig_hdr)
+            ref_hdr = (headers.get("referer") or "").strip()
+            if ref_hdr.startswith(("http://", "https://")):
+                from urllib.parse import urlsplit
+                rp = urlsplit(ref_hdr)
+                if rp.scheme and rp.netloc:
+                    candidates.append(f"{rp.scheme}://{rp.netloc}")
+            url_obj = getattr(request_or_ws, "url", None)
+            scheme = getattr(url_obj, "scheme", "https") if url_obj else "https"
+            if scheme in ("ws", "wss"):
+                scheme = "https" if scheme == "wss" else "http"
+            proto = (headers.get("x-forwarded-proto") or scheme or "https").split(",")[0].strip()
+            if proto in ("ws", "wss"):
+                proto = "https" if proto == "wss" else "http"
+            xf_host = (headers.get("x-forwarded-host") or "").split(",")[0].strip()
+            if xf_host:
+                candidates.append(f"{proto}://{xf_host}")
+            raw_host = (headers.get("host") or "").split(",")[0].strip()
+            if raw_host:
+                candidates.append(f"{proto}://{raw_host}")
+        except Exception:
+            pass
+
+    from urllib.parse import urlsplit
+    # 1. Prefer explicit .cloud.run origins first
+    for cand in candidates:
+        try:
+            chost = (urlsplit(cand).hostname or "").lower().rstrip(".")
+        except Exception:
+            chost = ""
+        if chost.endswith(".cloud.run"):
+            norm = _normalize_origin_url(cand)
+            if norm:
+                if _REGISTER_ORIGIN_HOOK is not None:
+                    try:
+                        _REGISTER_ORIGIN_HOOK(norm)
+                    except Exception:
+                        pass
+                return norm
+
+    # 2. Next prefer any non-internal (non untitled-hello-*.run.app) public origin
+    for cand in candidates:
+        try:
+            chost = (urlsplit(cand).hostname or "").lower().rstrip(".")
+        except Exception:
+            chost = ""
+        if chost and not chost.startswith(("untitled-hello-", "ais-dev-")):
+            norm = _normalize_origin_url(cand)
+            if norm:
+                if _REGISTER_ORIGIN_HOOK is not None:
+                    try:
+                        _REGISTER_ORIGIN_HOOK(norm)
+                    except Exception:
+                        pass
+                return norm
+
+    # 3. Fallback to default self origin (which prefers .cloud.run) or normalize remaining candidate
+    def_self = _get_default_self_origin()
+    if def_self and def_self.endswith(".cloud.run"):
+        return def_self
+    for cand in candidates:
+        norm = _normalize_origin_url(cand)
+        if norm:
+            if _REGISTER_ORIGIN_HOOK is not None:
+                try:
+                    _REGISTER_ORIGIN_HOOK(cand)
+                except Exception:
+                    pass
+            return norm
+    return def_self
 
 
 def _is_fake_subresource_event(ev: Event) -> bool:
@@ -538,6 +627,11 @@ def _update_session_tab_locked(
     clean_path = (path or "/")[:500]
     norm_svc = _normalize_service_name(svc, clean_path)
     norm_orig = _normalize_origin_url(origin)
+    if norm_orig and norm_orig.endswith(".cloud.run") and _REGISTER_ORIGIN_HOOK is not None:
+        try:
+            _REGISTER_ORIGIN_HOOK(norm_orig)
+        except Exception:
+            pass
 
     _CLOSED_SESSIONS.pop(sid, None)
     sdata = _SESSIONS.get(sid)
@@ -565,7 +659,25 @@ def _update_session_tab_locked(
             }
 
     tabs: Dict[str, dict] = sdata["tabs"]
-    eff_orig = norm_orig or _normalize_origin_url(str(sdata.get("origin") or "")) or _get_default_self_origin()
+    prev_sess_orig = _normalize_origin_url(str(sdata.get("origin") or ""))
+    # Never let a fallback/non-.cloud.run touch overwrite an established .cloud.run origin on this session
+    if prev_sess_orig.endswith(".cloud.run") and not norm_orig.endswith(".cloud.run"):
+        eff_orig = prev_sess_orig
+    else:
+        eff_orig = norm_orig or prev_sess_orig or _get_default_self_origin()
+
+    # If we just learned a .cloud.run origin for this session, upgrade existing tabs and recent events of this session
+    if eff_orig.endswith(".cloud.run"):
+        for tinfo in tabs.values():
+            if isinstance(tinfo, dict):
+                t_orig = _normalize_origin_url(str(tinfo.get("origin") or ""))
+                if not t_orig.endswith(".cloud.run"):
+                    tinfo["origin"] = eff_orig
+        for ev in reversed(_EVENTS[-80:]):
+            if (now - float(ev.ts or 0.0)) > 60.0:
+                break
+            if ev.session == sid and not str(ev.origin or "").endswith(".cloud.run"):
+                ev.origin = eff_orig
 
     clean_tab = (tab or "").strip()[:64]
     if state in ("closed", "leaving"):
@@ -756,10 +868,15 @@ def _get_default_self_origin() -> str:
     if _STORAGE_STATUS_HOOK is not None:
         try:
             st = _STORAGE_STATUS_HOOK() or {}
+            candidates = []
             for u in st.get("self_urls") or []:
                 norm = _normalize_origin_url(str(u or ""))
                 if norm:
-                    return norm
+                    if ".cloud.run" in norm:
+                        return norm
+                    candidates.append(norm)
+            if candidates:
+                return candidates[0]
         except Exception:
             pass
     return ""
@@ -862,6 +979,11 @@ def touch_session_activity(
         return
     now = _now()
     norm_origin = _normalize_origin_url(origin)
+    if norm_origin and _REGISTER_ORIGIN_HOOK is not None:
+        try:
+            _REGISTER_ORIGIN_HOOK(norm_origin)
+        except Exception:
+            pass
     hook_args = None
     eff_svc = ""
     eff_path = ""
@@ -1473,15 +1595,21 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
         for p in (storage_info.get("peers") or [])
         if _normalize_origin_url(p)
     ]
-    self_urls_list = [
+    self_urls_raw = [
         _normalize_origin_url(p)
         for p in (storage_info.get("self_urls") or [])
         if _normalize_origin_url(p)
     ]
+    cloud_run_self_urls = [u for u in self_urls_raw if ".cloud.run" in u]
+    other_self_urls = [u for u in self_urls_raw if ".cloud.run" not in u]
+    self_urls_list = list(dict.fromkeys(cloud_run_self_urls + other_self_urls))
     default_origin = (
         self_urls_list[0]
         if self_urls_list
-        else ("https://miruhukaka.ai.studio" if "https://miruhukaka.ai.studio" in peers_list else (peers_list[0] if peers_list else "https://miruhukaka.ai.studio"))
+        else (
+            next((p for p in peers_list if ".cloud.run" in p), "")
+            or ("https://miruhukaka.ai.studio" if "https://miruhukaka.ai.studio" in peers_list else (peers_list[0] if peers_list else "https://miruhukaka.ai.studio"))
+        )
     )
 
     peer_status_map = storage_info.get("peer_status") if isinstance(storage_info.get("peer_status"), dict) else {}
@@ -1507,11 +1635,14 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
             if sid_k:
                 sess_origins_map.setdefault(sid_k, set()).add(so)
 
-    unambiguous_sess_origin: Dict[str, str] = {
-        sid_k: next(iter(orig_set))
-        for sid_k, orig_set in sess_origins_map.items()
-        if len(orig_set) == 1
-    }
+    unambiguous_sess_origin: Dict[str, str] = {}
+    for sid_k, orig_set in sess_origins_map.items():
+        if len(orig_set) == 1:
+            unambiguous_sess_origin[sid_k] = next(iter(orig_set))
+        elif len(orig_set) > 1:
+            cr_origs = [o for o in orig_set if ".cloud.run" in o]
+            if len(cr_origs) == 1:
+                unambiguous_sess_origin[sid_k] = cr_origs[0]
 
     peer_counts: Counter = Counter()
     peer_last_access_ts: Dict[str, float] = {}
@@ -1541,42 +1672,58 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
         peer_ccu[default_origin] += (live_ccu - sum(peer_ccu.values()))
         peer_last_access_ts[default_origin] = max(peer_last_access_ts.get(default_origin, 0.0), current)
 
+    if is_live_global:
+        for cr_url in cloud_run_self_urls:
+            if not _is_peer_suspended(cr_url):
+                if peer_counts.get(cr_url, 0) <= 0:
+                    peer_counts[cr_url] = max(1, int(peer_ccu.get(cr_url, 0)))
+                peer_last_access_ts[cr_url] = max(peer_last_access_ts.get(cr_url, 0.0), current)
+
     for pu, ccu_val in peer_ccu.items():
         if ccu_val > 0 and peer_counts.get(pu, 0) < ccu_val:
             peer_counts[pu] = ccu_val
 
-    all_peer_urls = list(dict.fromkeys(peers_list + self_urls_list + list(peer_counts.keys()) + list(peer_ccu.keys())))
+    all_peer_urls = list(dict.fromkeys(self_urls_list + peers_list + list(peer_counts.keys()) + list(peer_ccu.keys())))
     if not all_peer_urls:
         all_peer_urls = [default_origin]
 
-    # 5-day inactivity filter: keep only peers with active CCU or visitor access within the last 5 days
+    # 5-day inactivity filter: keep only peers with active CCU, active self .cloud.run URL, or visitor access within the last 5 days
     eligible_peers = [
         pu
         for pu in all_peer_urls
         if not _is_peer_suspended(pu)
         and (
             peer_ccu.get(pu, 0) > 0
+            or (pu in cloud_run_self_urls and is_live_global)
             or (peer_counts.get(pu, 0) > 0 and peer_last_access_ts.get(pu, 0.0) >= inactive_cutoff)
         )
     ]
 
     # Filter peer_counts to only eligible active peers
     filtered_peer_counts = Counter({
-        pu: peer_counts[pu]
+        pu: max(peer_counts.get(pu, 0), 1 if (pu in cloud_run_self_urls and is_live_global) else 0)
         for pu in eligible_peers
-        if peer_counts.get(pu, 0) > 0
+        if peer_counts.get(pu, 0) > 0 or (pu in cloud_run_self_urls and is_live_global)
     })
 
     sorted_peers = sorted(
         eligible_peers,
-        key=lambda u: (filtered_peer_counts.get(u, 0), peer_ccu.get(u, 0), u in self_urls_list or u == default_origin),
+        key=lambda u: (
+            filtered_peer_counts.get(u, 0),
+            peer_ccu.get(u, 0),
+            u in cloud_run_self_urls,
+            u in self_urls_list or u == default_origin,
+        ),
         reverse=True,
     )
 
     peer_ranking = []
     for rank_idx, pu in enumerate(sorted_peers, start=1):
         p_meta = peer_status_map.get(pu) if isinstance(peer_status_map, dict) else None
-        is_self = pu in self_urls_list or (not self_urls_list and pu == default_origin)
+        if cloud_run_self_urls:
+            is_self = pu in cloud_run_self_urls
+        else:
+            is_self = pu in self_urls_list or (not self_urls_list and pu == default_origin)
         p_ccu_val = int(peer_ccu.get(pu, 0))
         p_acc_val = max(p_ccu_val, int(filtered_peer_counts.get(pu, 0)))
         meta_active = (
@@ -1584,7 +1731,7 @@ def _aggregate_stats(events: List[Event], *, now: float | None = None) -> dict:
             and p_meta.get("status") == "active"
             and (current - float(p_meta.get("last_sync_ts") or 0.0)) < 180.0
         )
-        status_str = "active" if (is_self or p_ccu_val > 0 or meta_active) else "standby"
+        status_str = "active" if (is_self or p_ccu_val > 0 or meta_active or ".cloud.run" in pu and pu in self_urls_list) else "standby"
         peer_ranking.append({
             "rank": rank_idx,
             "url": pu,
@@ -1731,11 +1878,7 @@ async def heartbeat(request: Request):
     tab = str(data.get("tab") or "").strip()[:64]
     include_stats = bool(data.get("include_stats"))
 
-    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
-    req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
-    req_origin = _normalize_origin_url(str(data.get("origin") or "")) or (
-        _normalize_origin_url(f"{req_proto}://{req_host}") if req_host else ""
-    )
+    req_origin = extract_request_origin(request, str(data.get("origin") or ""))
 
     now = _now()
     hook_args = None
@@ -1750,6 +1893,11 @@ async def heartbeat(request: Request):
             if old_c and session not in _SESSIONS:
                 old_c["session"] = session
                 _SESSIONS[session] = old_c
+            for ev in reversed(_EVENTS[-80:]):
+                if ev.session == cookie_sid:
+                    ev.session = session
+                    if eff_origin and (not ev.origin or (".cloud.run" in eff_origin and ".cloud.run" not in ev.origin)):
+                        ev.origin = eff_origin
         eff_svc, eff_path, eff_origin = _update_session_tab_locked(
             session,
             service,
@@ -1766,12 +1914,23 @@ async def heartbeat(request: Request):
         b5, max_ccu, by_svc = _record_ccu_locked(now)
         hook_args = (b5, max_ccu, by_svc)
         if state not in ("closed", "leaving"):
+            recorded_now = False
             if source in ACCESS_SOURCES:
                 if _can_record_access_locked(session, service, now, source=source, path=path):
                     _add_event(session, service, path, state, source, eff_origin)
+                    recorded_now = True
             elif _can_record_comm_locked(session, service, now, path=path):
                 eff_src = "home" if service == "School Hub" else "visit"
                 _add_event(session, service, path, state, eff_src, eff_origin)
+                recorded_now = True
+            if not recorded_now and eff_origin and ".cloud.run" in eff_origin:
+                has_cr_event = any(
+                    ev.session == session and getattr(ev, "origin", "") == eff_origin
+                    for ev in reversed(_EVENTS[-120:])
+                )
+                if not has_cr_event:
+                    eff_src = source if source in ACCESS_SOURCES else ("home" if service == "School Hub" else "visit")
+                    _add_event(session, service, path, state, eff_src, eff_origin)
 
     if _CCU_SAMPLE_HOOK is not None and hook_args is not None:
         try:
@@ -1797,12 +1956,14 @@ async def heartbeat(request: Request):
 
 
 @router.get("/snapshot", include_in_schema=False)
-async def snapshot():
+async def snapshot(request: Request):
+    extract_request_origin(request)
     return build_snapshot_payload()
 
 
 @router.get("/stats", include_in_schema=False)
-async def stats():
+async def stats(request: Request):
+    extract_request_origin(request)
     with _LOCK:
         _prune()
         result = _aggregate_stats(list(_EVENTS))
@@ -1812,6 +1973,7 @@ async def stats():
 @router.get("/stream", include_in_schema=False)
 async def stream(request: Request):
     """Server-Sent Events (SSE) stream for low-latency live dashboard updates."""
+    extract_request_origin(request)
     async def event_generator():
         last_ver = -1
         last_sent = 0.0
@@ -1862,6 +2024,7 @@ __all__ = [
     "_aggregate_stats",
     "build_snapshot_payload",
     "extract_client_fp",
+    "extract_request_origin",
     "merge_external_state",
     "router",
     "touch_session_activity",

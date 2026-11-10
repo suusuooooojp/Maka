@@ -101,6 +101,7 @@ _LAST_LOCAL_SESS_PUSH: float = 0.0
 _SYNC_COUNT: int = 0
 
 _SELF_URLS: Set[str] = set()
+_HAS_EXPLICIT_PUBLIC_ORIGIN: bool = False
 _KNOWN_PEERS: Set[str] = {
     _PRIMARY_HUB_URL,
     _SECONDARY_HUB_URL,
@@ -118,8 +119,16 @@ _HTTP_CLIENT: Optional[httpx.Client] = None
 _HTTP_LOCK = threading.Lock()
 
 
+def _get_cloud_run_self_url() -> str:
+    """Return the active .cloud.run self URL if one has been registered for this deployment."""
+    for u in sorted(_SELF_URLS):
+        if u.endswith(".cloud.run"):
+            return u
+    return ""
+
+
 def _normalize_peer_url(raw_url: str) -> str:
-    """Normalize a deployment origin URL, mapping internal AI Studio Cloud Run hosts to miruhukaka.ai.studio and rejecting test/local hosts."""
+    """Normalize a deployment origin URL, mapping internal Cloud Run hosts to the active .cloud.run origin (or miruhukaka.ai.studio) and rejecting test/local hosts."""
     if not raw_url or not isinstance(raw_url, str):
         return ""
     clean = raw_url.strip().rstrip("/")
@@ -138,7 +147,8 @@ def _normalize_peer_url(raw_url: str) -> str:
         ):
             return ""
         if host.startswith("untitled-hello-") and host.endswith(".run.app"):
-            return "https://miruhukaka.ai.studio"
+            cr_self = _get_cloud_run_self_url()
+            return cr_self if cr_self else "https://miruhukaka.ai.studio"
         scheme = "https" if (host.endswith((".onrender.com", ".ai.studio", ".cloud.run", ".run.app", ".luhu.jp")) or parsed.scheme == "https") else "http"
         if parsed.port and not ((scheme == "https" and parsed.port == 443) or (scheme == "http" and parsed.port == 80)):
             netloc = f"{host}:{parsed.port}"
@@ -176,6 +186,7 @@ for _env_url in (
         _SELF_URLS.add(_norm)
         _KNOWN_PEERS.add(_norm)
         _SUSPENDED_PEERS.discard(_norm)
+        _HAS_EXPLICIT_PUBLIC_ORIGIN = True
 
 for _peer in (os.getenv("SYNC_PEER_URLS", "") or "").split(","):
     _norm_p = _normalize_peer_url(_peer)
@@ -185,13 +196,28 @@ for _peer in (os.getenv("SYNC_PEER_URLS", "") or "").split(","):
 
 def register_public_origin(origin: str) -> None:
     """Record the public origin of the current deployment from incoming HTTP requests."""
+    global _HAS_EXPLICIT_PUBLIC_ORIGIN
+    if not origin or not isinstance(origin, str):
+        return
+    raw_clean = origin.strip().rstrip("/")
+    try:
+        raw_host = (urllib.parse.urlsplit(raw_clean).hostname or "").lower().rstrip(".")
+    except Exception:
+        raw_host = ""
+    is_internal_run_app = raw_host.startswith("untitled-hello-") and raw_host.endswith(".run.app")
+    if is_internal_run_app and _HAS_EXPLICIT_PUBLIC_ORIGIN:
+        return
     normalized = _normalize_peer_url(origin)
     if not normalized:
         return
+    if not is_internal_run_app:
+        _HAS_EXPLICIT_PUBLIC_ORIGIN = True
+        if normalized.endswith(".cloud.run") and "https://miruhukaka.ai.studio" in _SELF_URLS:
+            _SELF_URLS.discard("https://miruhukaka.ai.studio")
     _SUSPENDED_PEERS.discard(normalized)
+    _KNOWN_PEERS.add(normalized)
     if normalized not in _SELF_URLS:
         _SELF_URLS.add(normalized)
-        _KNOWN_PEERS.add(normalized)
         _DIRTY_CLOUD.set()
         _WAKE_SYNC.set()
 
@@ -1380,6 +1406,7 @@ _activity._CCU_SAMPLE_HOOK = _on_ccu_sample
 _activity._SESSION_TOUCH_HOOK = _on_session_touch
 _activity._STORAGE_STATUS_HOOK = get_persistence_status
 _activity._PEER_SYNC_HOOK = _handle_incoming_peer_sync
+_activity._REGISTER_ORIGIN_HOOK = register_public_origin
 
 
 def _init_background():

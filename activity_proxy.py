@@ -12,7 +12,7 @@ except Exception as exc:
 
 from fastapi import Request
 
-from current_activity import extract_client_fp, router, touch_session_activity
+from current_activity import extract_client_fp, extract_request_origin, router, touch_session_activity
 
 try:
     from app import app as _schoolhub_app
@@ -174,14 +174,13 @@ if _schoolhub_app is not None:
                 request.scope["path"] = f"/activity/{suffix}"
                 path = request.scope["path"]
 
+        proto = "https"
         origin_url = ""
         try:
-            host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip()
             proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
-            if host:
-                origin_url = f"{proto}://{host}"
-                if _activity_persistence is not None:
-                    _activity_persistence.register_public_origin(origin_url)
+            origin_url = extract_request_origin(request)
+            if origin_url and _activity_persistence is not None:
+                _activity_persistence.register_public_origin(origin_url)
         except Exception:
             pass
 

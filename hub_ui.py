@@ -7,19 +7,27 @@ from hub_data import enrich_service
 from design_system.icons import svg_icon
 
 try:
-    from current_activity import build_snapshot_payload
+    from current_activity import build_snapshot_payload, extract_request_origin
 except Exception:
     build_snapshot_payload = None
+    extract_request_origin = None
 
 JST = ZoneInfo("Asia/Tokyo")
 
 
 def render_home(proxies, request=None):
+    req_origin = ""
+    if request is not None and extract_request_origin is not None:
+        try:
+            req_origin = extract_request_origin(request)
+        except Exception:
+            req_origin = ""
+
     initial_snapshot = None
     initial_snapshot_json = "null"
     if build_snapshot_payload is not None:
         try:
-            initial_snapshot = build_snapshot_payload()
+            initial_snapshot = build_snapshot_payload(force=bool(req_origin))
             initial_snapshot_json = json.dumps(initial_snapshot, ensure_ascii=False).replace("</", "<\\/")
         except Exception:
             initial_snapshot = None
@@ -52,12 +60,17 @@ def render_home(proxies, request=None):
     peers_list = storage_info.get("peers") if isinstance(storage_info.get("peers"), list) else []
     if not peers_list:
         peers_list = [
-            "https://miruhukaka.ai.studio",
             "https://chatwork.cloud.run",
+            "https://miruhukaka.ai.studio",
             "https://great.luhu.jp",
         ]
     self_urls_list = storage_info.get("self_urls") if isinstance(storage_info.get("self_urls"), list) else []
-    primary_origin = self_urls_list[0] if self_urls_list else (peers_list[0] if peers_list else "https://miruhukaka.ai.studio")
+    cloud_run_self = next((u for u in self_urls_list if ".cloud.run" in str(u)), "")
+    primary_origin = (
+        req_origin
+        if (req_origin and ".cloud.run" in req_origin)
+        else (cloud_run_self or (self_urls_list[0] if self_urls_list else (peers_list[0] if peers_list else "https://chatwork.cloud.run")))
+    )
     peers_count = len(peers_list)
     pg_ok = "PG" if storage_info.get("postgres_active") else ""
     bb_ok = "BB" if storage_info.get("bitbucket_active") else ""
@@ -291,6 +304,11 @@ def render_home(proxies, request=None):
    School Hub — Google Material Design 3 Application Layout
    Inspired by Google Drive, Google Cloud Console, Google Account & Gemini
    ========================================================================== */
+:root {{
+  --sh-topbar-h: 48px;
+  --sh-sidebar-w: 188px;
+  --sh-sidebar-collapsed-w: 60px;
+}}
 *, *::before, *::after {{
   box-sizing: border-box;
 }}
@@ -303,8 +321,8 @@ html, body {{
   background-color: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
   font-family: var(--md-sys-typescale-font-plain);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: 13px;
+  line-height: 1.4;
   -webkit-font-smoothing: antialiased;
   transition: background-color 320ms cubic-bezier(0.2, 0, 0, 1), color 320ms cubic-bezier(0.2, 0, 0, 1);
 }}
@@ -339,37 +357,46 @@ button, input, textarea, select {{
   font: inherit;
 }}
 
-/* --- App Shell: Top App Bar + Collapsible Sidebar + Main Content --- */
+/* --- App Shell: Fixed Top App Bar + Fixed Left Sidebar + Main Content --- */
 .m3-top-app-bar {{
-  position: sticky;
+  position: fixed;
   top: 0;
-  z-index: 200;
-  height: 64px;
+  left: 0;
+  right: 0;
+  width: 100%;
+  z-index: 500;
+  height: var(--sh-topbar-h);
   background-color: var(--md-sys-color-surface-container-lowest);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  padding: 0 16px;
+  padding: 0 12px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: nowrap;
+  gap: 8px;
+  overflow: hidden;
 }}
 .topbar-left {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: nowrap;
+  gap: 8px;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }}
 .brand-link {{
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   font-family: var(--md-sys-typescale-font-brand);
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--md-sys-color-on-surface);
   white-space: nowrap;
   min-width: 0;
+  flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }}
@@ -386,68 +413,73 @@ button, input, textarea, select {{
 .brand-sub {{
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
-  font-size: 17px;
+  font-size: 15px;
   overflow: hidden;
   text-overflow: ellipsis;
 }}
 .live-status-pill {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 10px;
+  gap: 5px;
+  height: 24px;
+  padding: 0 9px;
   border-radius: 9999px;
   background-color: var(--md-sys-color-tertiary-container);
   color: var(--md-sys-color-on-tertiary-container);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  flex-shrink: 0;
 }}
 .live-status-dot {{
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background-color: var(--md-sys-color-tertiary);
+  flex-shrink: 0;
 }}
 
 .topbar-right {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: nowrap;
+  gap: 6px;
   flex-shrink: 0;
 }}
 .topbar-meta-chip {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 8px;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
   background-color: var(--md-sys-color-surface-container-low);
   border: 1px solid var(--md-sys-color-outline-variant);
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+  flex-shrink: 0;
 }}
 .topbar-action-btn {{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  height: 36px;
-  padding: 0 12px;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
   border-radius: 9999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: background-color 150ms ease, border-color 150ms ease;
   white-space: nowrap;
+  flex-shrink: 0;
 }}
 .topbar-action-btn:hover {{
   background-color: var(--md-sys-color-surface-container-low);
@@ -462,45 +494,53 @@ button, input, textarea, select {{
   filter: brightness(0.97);
 }}
 
-/* --- Layout Body: Sidebar + Main Workspace --- */
+/* --- Layout Body: Fixed Sidebar Offset + Main Workspace --- */
 .m3-layout-body {{
   display: flex;
-  min-height: calc(100vh - 64px);
+  min-height: 100dvh;
   width: 100%;
+  padding-top: var(--sh-topbar-h);
+  padding-left: var(--sh-sidebar-w);
+  transition: padding-left 200ms cubic-bezier(0.2, 0, 0, 1);
+}}
+body.sidebar-collapsed .m3-layout-body {{
+  padding-left: var(--sh-sidebar-collapsed-w);
 }}
 
-/* PC Sidebar (Collapsible: 240px expanded, 72px collapsed) */
+/* Fixed Left Sidebar (188px expanded, 60px collapsed) */
 .m3-sidebar {{
-  width: 240px;
+  position: fixed;
+  top: var(--sh-topbar-h);
+  left: 0;
+  bottom: 0;
+  width: var(--sh-sidebar-w);
+  height: calc(100dvh - var(--sh-topbar-h));
   flex-shrink: 0;
   background-color: var(--md-sys-color-surface-container-lowest);
   border-right: 1px solid var(--md-sys-color-outline-variant);
-  padding: 12px 10px;
+  padding: 8px 8px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  position: sticky;
-  top: 64px;
-  height: calc(100vh - 64px);
   overflow-y: auto;
   overflow-x: hidden;
   transition: width 200ms cubic-bezier(0.2, 0, 0, 1), padding 200ms cubic-bezier(0.2, 0, 0, 1);
-  z-index: 120;
+  z-index: 400;
 }}
 .m3-sidebar.collapsed {{
-  width: 72px;
-  padding: 12px 8px;
+  width: var(--sh-sidebar-collapsed-w);
+  padding: 8px 6px;
 }}
 .sidebar-nav-list {{
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }}
 .sidebar-section-label {{
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface-variant);
-  padding: 8px 14px 4px;
+  padding: 6px 10px 2px;
   letter-spacing: 0.04em;
   white-space: nowrap;
   overflow: hidden;
@@ -512,15 +552,15 @@ button, input, textarea, select {{
   position: relative;
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   width: 100%;
-  height: 44px;
-  padding: 0 14px;
+  height: 36px;
+  padding: 0 10px;
   border-radius: 9999px;
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 13.5px;
+  font-size: 12.5px;
   font-weight: 500;
   cursor: pointer;
   text-align: left;
@@ -540,8 +580,8 @@ button, input, textarea, select {{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
 }}
 .sidebar-item .item-label {{
@@ -550,7 +590,7 @@ button, input, textarea, select {{
   text-overflow: ellipsis;
 }}
 .sidebar-item .item-badge {{
-  font-size: 11.5px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
   color: inherit;
   opacity: 0.8;
@@ -568,12 +608,12 @@ button, input, textarea, select {{
 .m3-sidebar.collapsed .sidebar-item[data-tooltip]:hover::after {{
   content: attr(data-tooltip);
   position: fixed;
-  left: 78px;
+  left: 66px;
   background-color: var(--md-sys-color-inverse-surface);
   color: var(--md-sys-color-inverse-on-surface);
-  padding: 5px 10px;
+  padding: 4px 9px;
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   white-space: nowrap;
   z-index: 9999;
@@ -582,11 +622,11 @@ button, input, textarea, select {{
 }}
 
 .sidebar-footer {{
-  padding-top: 8px;
+  padding-top: 6px;
   border-top: 1px solid var(--md-sys-color-outline-variant);
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }}
 
 /* Mobile Slide-Out Drawer Scrim */
@@ -604,55 +644,55 @@ button, input, textarea, select {{
   opacity: 1;
 }}
 
-/* --- Main Content Container --- */
+/* --- Main Content Container (High-Density Full-Width Workspace) --- */
 .m3-main-workspace {{
   flex: 1;
   min-width: 0;
-  padding: 24px 28px 64px;
-  max-width: 1440px;
-  margin: 0 auto;
+  padding: 10px 14px 40px;
+  max-width: 100%;
+  margin: 0;
   width: 100%;
 }}
 
-/* --- Search & Category Control Surface (Section 6) --- */
+/* --- Search & Category Control Surface (Section 6 — Compact) --- */
 .m3-search-surface {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 16px;
-  padding: 18px 20px;
-  margin-bottom: 20px;
+  border-radius: 12px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 6px;
 }}
 .search-omnibox-row {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }}
 .search-field-container {{
-  flex: 1 1 340px;
+  flex: 1 1 280px;
   position: relative;
   display: flex;
   align-items: center;
 }}
 .search-leading-icon {{
   position: absolute;
-  left: 16px;
+  left: 12px;
   color: var(--md-sys-color-on-surface-variant);
   display: inline-flex;
   pointer-events: none;
 }}
 #search {{
   width: 100%;
-  height: 48px;
-  padding: 0 76px 0 46px;
+  height: 36px;
+  padding: 0 64px 0 38px;
   border-radius: 9999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-low);
   color: var(--md-sys-color-on-surface);
-  font-size: 14.5px;
+  font-size: 13px;
   outline: none;
   transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
 }}
@@ -666,9 +706,9 @@ button, input, textarea, select {{
 }}
 .search-clear-btn {{
   position: absolute;
-  right: 42px;
-  width: 28px;
-  height: 28px;
+  right: 36px;
+  width: 24px;
+  height: 24px;
   border-radius: 50%;
   border: none;
   background: transparent;
@@ -685,15 +725,15 @@ button, input, textarea, select {{
 }}
 .search-kbd-hint {{
   position: absolute;
-  right: 14px;
-  height: 22px;
-  min-width: 22px;
-  padding: 0 6px;
-  border-radius: 6px;
+  right: 10px;
+  height: 20px;
+  min-width: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 11.5px;
+  font-size: 11px;
   font-family: var(--md-sys-typescale-font-mono);
   display: inline-flex;
   align-items: center;
@@ -704,14 +744,14 @@ button, input, textarea, select {{
 /* Search Suggestions Dropdown */
 .search-suggestions {{
   position: absolute;
-  top: calc(100% + 6px);
+  top: calc(100% + 4px);
   left: 0;
   right: 0;
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
+  border-radius: 10px;
   box-shadow: var(--md-sys-elevation-2);
-  padding: 6px;
+  padding: 4px;
   z-index: 180;
   display: none;
   flex-direction: column;
@@ -724,10 +764,10 @@ button, input, textarea, select {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  font-size: 13px;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
   color: var(--md-sys-color-on-surface);
   cursor: pointer;
 }}
@@ -735,27 +775,27 @@ button, input, textarea, select {{
   background-color: var(--md-sys-color-surface-container-low);
 }}
 .suggestion-meta {{
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--md-sys-color-on-surface-variant);
 }}
 
 .quick-launch-group {{
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }}
 .quick-launch-btn {{
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  height: 40px;
-  padding: 0 14px;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
   border-radius: 9999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: background-color 150ms ease, border-color 150ms ease;
@@ -770,26 +810,26 @@ button, input, textarea, select {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
 }}
 .m3-category-tabs {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
 }}
 .tab-btn {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 38px;
-  padding: 0 16px;
+  gap: 4px;
+  height: 28px;
+  padding: 0 11px;
   border-radius: 9999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   cursor: pointer;
   transition: all 220ms cubic-bezier(0.2, 0, 0, 1);
@@ -809,26 +849,26 @@ button, input, textarea, select {{
   color: var(--md-sys-color-on-primary);
   border-color: transparent;
   font-weight: 600;
-  box-shadow: 0 2px 8px rgba(11, 87, 208, 0.28);
+  box-shadow: 0 2px 6px rgba(11, 87, 208, 0.24);
 }}
 [data-theme="dark"] .tab-btn.active {{
   background-color: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
 }}
 .tab-count {{
-  font-size: 11.5px;
+  font-size: 11px;
   opacity: 0.85;
   font-variant-numeric: tabular-nums;
 }}
 
-/* Recently Used Services Bar & Section */
+/* Recently Used Services Bar (Inline) */
 .recent-bar {{
   display: none;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-wrap: wrap;
-  font-size: 12px;
+  font-size: 11.5px;
 }}
 .recent-bar.visible {{
   display: inline-flex;
@@ -836,20 +876,20 @@ button, input, textarea, select {{
 .recent-label {{
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
 }}
 .recent-chip {{
   display: inline-flex;
   align-items: center;
-  height: 28px;
-  padding: 0 10px;
+  height: 24px;
+  padding: 0 8px;
   border-radius: 6px;
   background-color: var(--md-sys-color-surface-container-low);
   border: 1px solid var(--md-sys-color-outline-variant);
   color: var(--md-sys-color-on-surface);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 500;
   transition: background-color 150ms ease, border-color 150ms ease;
 }}
@@ -858,56 +898,49 @@ button, input, textarea, select {{
   border-color: var(--md-sys-color-primary);
 }}
 
-.recent-section {{
-  display: none;
-  margin-bottom: 20px;
-}}
+/* Hide duplicate tall recent cards section since inline .recent-bar chips are already shown */
+.recent-section,
 .recent-section.visible {{
-  display: block;
+  display: none !important;
 }}
 .subsection-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 6px;
 }}
 .subsection-title {{
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13.5px;
+  gap: 6px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface-variant);
   margin: 0;
 }}
 .recent-cards-grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
 }}
 .recent-service-card {{
   background-color: var(--md-sys-color-surface-container-low);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
-  padding: 10px 14px;
+  border-radius: 10px;
+  padding: 7px 10px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  transition: background-color 150ms ease, border-color 150ms ease;
-}}
-.recent-service-card:hover {{
-  background-color: var(--md-sys-color-surface-container);
-  border-color: var(--md-sys-color-primary);
+  gap: 8px;
 }}
 .recent-card-left {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
 }}
 .recent-card-name {{
-  font-size: 13.5px;
+  font-size: 12.5px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface);
   white-space: nowrap;
@@ -915,9 +948,9 @@ button, input, textarea, select {{
   text-overflow: ellipsis;
 }}
 .recent-card-badge {{
-  font-size: 10.5px;
+  font-size: 10px;
   font-weight: 600;
-  padding: 2px 7px;
+  padding: 1px 6px;
   border-radius: 9999px;
   background-color: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
@@ -925,46 +958,46 @@ button, input, textarea, select {{
   flex-shrink: 0;
 }}
 
-/* --- Service Cards Grid (15 Services — Uniform Height & Clean M3 Hierarchy) --- */
+/* --- Service Cards Grid (High-Density: 5-7 columns on PC, 2 columns on Mobile) --- */
 .grid {{
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(195px, 1fr));
+  gap: 8px;
 }}
 .card.service {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 16px;
-  padding: 16px;
-  min-height: 152px;
+  border-radius: 12px;
+  padding: 9px 11px;
+  min-height: 88px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  gap: 10px;
-  transition: transform 240ms cubic-bezier(0.2, 0, 0, 1),
-              box-shadow 240ms cubic-bezier(0.2, 0, 0, 1),
-              background-color 320ms cubic-bezier(0.2, 0, 0, 1),
-              border-color 320ms cubic-bezier(0.2, 0, 0, 1),
-              opacity 200ms ease;
+  gap: 5px;
+  transition: transform 200ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 200ms cubic-bezier(0.2, 0, 0, 1),
+              background-color 280ms cubic-bezier(0.2, 0, 0, 1),
+              border-color 280ms cubic-bezier(0.2, 0, 0, 1),
+              opacity 180ms ease;
   will-change: transform, box-shadow;
 }}
 .card.service:hover {{
-  transform: translateY(-4px);
+  transform: translateY(-2px);
   background-color: var(--md-sys-color-surface-container-low);
   border-color: var(--md-sys-color-primary);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.07), 0 1px 4px rgba(0, 0, 0, 0.04);
 }}
 [data-theme="dark"] .card.service:hover {{
-  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45), 0 1px 4px rgba(0, 0, 0, 0.25);
 }}
 .card.service:active {{
-  transform: translateY(-1px) scale(0.99);
+  transform: translateY(0) scale(0.99);
   transition-duration: 80ms;
 }}
 @keyframes m3CardEnter {{
   0% {{
     opacity: 0;
-    transform: translateY(14px) scale(0.97);
+    transform: translateY(8px) scale(0.98);
   }}
   100% {{
     opacity: 1;
@@ -973,27 +1006,31 @@ button, input, textarea, select {{
 }}
 .card-head {{
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px;
 }}
 .card-title-group {{
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
   flex: 1;
 }}
 .card-icon-box {{
-  width: 40px;
-  height: 40px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
   background-color: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
+}}
+.card-icon-box svg {{
+  width: 16px;
+  height: 16px;
 }}
 .card-icon-box[data-cat="Games"] {{
   background-color: var(--md-sys-color-secondary-container);
@@ -1007,7 +1044,7 @@ button, input, textarea, select {{
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
+  gap: 1px;
   min-width: 0;
   flex: 1;
 }}
@@ -1018,8 +1055,9 @@ button, input, textarea, select {{
 .card-title b {{
   display: block;
   font-family: var(--md-sys-typescale-font-brand);
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.25;
   color: var(--md-sys-color-on-surface);
   white-space: nowrap;
   overflow: hidden;
@@ -1028,18 +1066,18 @@ button, input, textarea, select {{
 .cat-tag {{
   display: inline-flex;
   align-items: center;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 500;
-  padding: 1px 8px;
-  border-radius: 6px;
+  padding: 0 6px;
+  border-radius: 4px;
   background-color: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
   white-space: nowrap;
 }}
 .fav-btn {{
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
@@ -1063,26 +1101,26 @@ button, input, textarea, select {{
 }}
 .card-sub {{
   display: flex;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px;
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 12.5px;
+  font-size: 11px;
+  min-width: 0;
 }}
 .card-desc {{
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
-  line-height: 1.4;
+  line-height: 1.3;
   min-width: 0;
-  flex: 1 1 160px;
+  flex: 1 1 80px;
 }}
 .card-path {{
   font-family: var(--md-sys-typescale-font-mono);
-  font-size: 11px;
-  padding: 2px 6px;
+  font-size: 10px;
+  padding: 1px 5px;
   border-radius: 4px;
   background-color: var(--md-sys-color-surface-container-low);
   color: var(--md-sys-color-on-surface-variant);
@@ -1090,24 +1128,24 @@ button, input, textarea, select {{
   flex-shrink: 0;
 }}
 .card-foot {{
-  padding-top: 10px;
+  padding-top: 5px;
   border-top: 1px solid var(--md-sys-color-outline-variant);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }}
 .service-status {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
 }}
 .status-dot {{
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background-color: var(--md-sys-color-outline);
 }}
@@ -1124,50 +1162,51 @@ button, input, textarea, select {{
 
 .empty-search {{
   display: none;
-  padding: 28px 20px;
+  padding: 18px 14px;
   text-align: center;
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 14px;
+  border-radius: 12px;
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 13.5px;
-  margin-top: 12px;
+  font-size: 12.5px;
+  margin-top: 8px;
 }}
 
-/* --- Section 7: Statistics & Operations Dashboard (Google Cloud Console Style) --- */
+/* --- Section 7: Statistics & Operations Dashboard (Compact Cloud Console Style) --- */
 .stats-section {{
-  margin-top: 32px;
-  padding-top: 24px;
+  margin-top: 16px;
+  padding-top: 14px;
   border-top: 1px solid var(--md-sys-color-outline-variant);
+  scroll-margin-top: calc(var(--sh-topbar-h) + 8px);
 }}
 .section-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  margin-bottom: 10px;
 }}
 .section-title-group {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }}
 .section-title-group h2 {{
   margin: 0;
   font-family: var(--md-sys-typescale-font-brand);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface);
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }}
 .section-subtitle-badge {{
-  font-size: 12px;
+  font-size: 11px;
   color: var(--md-sys-color-on-surface-variant);
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 9999px;
   background-color: var(--md-sys-color-surface-container-low);
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -1177,17 +1216,17 @@ button, input, textarea, select {{
   display: inline-flex;
   background-color: var(--md-sys-color-surface-container-low);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 8px;
-  padding: 3px;
-  gap: 3px;
+  border-radius: 7px;
+  padding: 2px;
+  gap: 2px;
 }}
 .range-btn {{
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
-  padding: 5px 12px;
-  border-radius: 6px;
-  font-size: 12.5px;
+  padding: 3px 10px;
+  border-radius: 5px;
+  font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
   transition: background-color 150ms ease, color 150ms ease;
@@ -1205,47 +1244,47 @@ button, input, textarea, select {{
 .kpi-grid {{
   display: grid;
   grid-template-columns: repeat(6, 1fr);
-  gap: 12px;
-  margin-bottom: 16px;
+  gap: 8px;
+  margin-bottom: 10px;
 }}
 .kpi-card {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
-  padding: 14px 16px;
+  border-radius: 10px;
+  padding: 8px 11px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
-  min-height: 98px;
+  min-height: 68px;
 }}
 .kpi-label {{
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   color: var(--md-sys-color-on-surface-variant);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
 }}
 .kpi-tag {{
-  font-size: 10.5px;
+  font-size: 9.5px;
   font-weight: 600;
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: 4px;
   background-color: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
 }}
 .kpi-value {{
   font-family: var(--md-sys-typescale-font-brand);
-  font-size: 24px;
+  font-size: 19px;
   font-weight: 700;
   color: var(--md-sys-color-on-surface);
-  margin: 6px 0 4px;
+  margin: 2px 0;
   font-variant-numeric: tabular-nums;
-  line-height: 1.2;
+  line-height: 1.15;
 }}
 .kpi-sub {{
-  font-size: 11.5px;
+  font-size: 10.5px;
   color: var(--md-sys-color-on-surface-variant);
   font-variant-numeric: tabular-nums;
 }}
@@ -1254,38 +1293,38 @@ button, input, textarea, select {{
 .charts-grid {{
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 14px;
-  margin-bottom: 14px;
+  gap: 10px;
+  margin-bottom: 10px;
 }}
 .chart-card {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
-  padding: 16px;
+  border-radius: 10px;
+  padding: 11px 12px;
   position: relative;
 }}
 .chart-head {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 10px;
+  gap: 6px;
+  margin-bottom: 6px;
 }}
 .chart-title {{
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface);
   margin: 0;
 }}
 .chart-badge {{
-  font-size: 12px;
+  font-size: 11px;
   color: var(--md-sys-color-on-surface-variant);
   font-variant-numeric: tabular-nums;
 }}
 .canvas-wrap {{
   position: relative;
   width: 100%;
-  height: 190px;
+  height: 145px;
 }}
 .chart-canvas {{
   display: block;
@@ -1298,9 +1337,9 @@ button, input, textarea, select {{
   pointer-events: none;
   background-color: var(--md-sys-color-inverse-surface);
   color: var(--md-sys-color-inverse-on-surface);
-  padding: 5px 10px;
-  border-radius: 6px;
-  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
   opacity: 0;
@@ -1313,35 +1352,35 @@ button, input, textarea, select {{
 .panel-card {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
-  padding: 16px;
+  border-radius: 10px;
+  padding: 11px 12px;
 }}
 .peer-rank-panel {{
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }}
 .bottom-grid {{
   display: grid;
   grid-template-columns: 1.25fr 1fr;
-  gap: 14px;
+  gap: 10px;
 }}
 .panel-title {{
-  margin: 0 0 12px;
-  font-size: 14px;
+  margin: 0 0 8px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface);
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
 }}
 .panel-title small {{
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 400;
-  font-size: 12px;
+  font-size: 11px;
 }}
 .rank-row {{
-  padding: 8px 0;
+  padding: 5px 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }}
 .rank-row:last-child {{
@@ -1351,15 +1390,15 @@ button, input, textarea, select {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  font-size: 13px;
-  margin-bottom: 6px;
+  gap: 6px;
+  font-size: 12px;
+  margin-bottom: 4px;
   flex-wrap: wrap;
 }}
 .rank-name-wrap {{
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
   flex-wrap: wrap;
 }}
@@ -1367,13 +1406,13 @@ button, input, textarea, select {{
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 22px;
-  padding: 0 6px;
-  border-radius: 6px;
+  min-width: 20px;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 5px;
   background-color: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }}
@@ -1399,9 +1438,9 @@ button, input, textarea, select {{
   text-decoration: underline;
 }}
 .peer-status-badge {{
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 2px 8px;
+  padding: 1px 7px;
   border-radius: 9999px;
   background-color: var(--md-sys-color-surface-container);
   color: var(--md-sys-color-on-surface-variant);
@@ -1413,8 +1452,8 @@ button, input, textarea, select {{
 .rank-metrics {{
   display: inline-flex;
   align-items: center;
-  gap: 10px;
-  font-size: 12px;
+  gap: 8px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
 }}
 .rank-ccu-pill {{
@@ -1426,7 +1465,7 @@ button, input, textarea, select {{
 }}
 .rank-bar-bg {{
   width: 100%;
-  height: 5px;
+  height: 4px;
   border-radius: 9999px;
   background-color: var(--md-sys-color-surface-container);
   overflow: hidden;
@@ -1449,10 +1488,10 @@ button, input, textarea, select {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px 0;
+  gap: 6px;
+  padding: 5px 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  font-size: 13px;
+  font-size: 12px;
 }}
 .recent-row:last-child {{
   border-bottom: none;
@@ -1460,7 +1499,7 @@ button, input, textarea, select {{
 .recent-main {{
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }}
 .recent-dot {{
   width: 6px;
@@ -1474,94 +1513,95 @@ button, input, textarea, select {{
 }}
 .recent-time {{
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 12px;
+  font-size: 11.5px;
   font-family: var(--md-sys-typescale-font-mono);
   font-variant-numeric: tabular-nums;
 }}
 .empty-note {{
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 12.5px;
-  padding: 8px 0;
+  font-size: 12px;
+  padding: 6px 0;
 }}
 
 /* --- Section 8: Embedded OpenChat (Google Chat / Google Messages Style) --- */
 .hub-chat-section {{
-  margin-top: 28px;
+  margin-top: 16px;
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 16px;
+  border-radius: 12px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  scroll-margin-top: calc(var(--sh-topbar-h) + 8px);
 }}
 .hub-chat-header {{
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
+  padding: 10px 14px;
   background-color: var(--md-sys-color-surface-container-low);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }}
 .hub-chat-title-wrap {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex-wrap: wrap;
 }}
 .hub-chat-badge {{
   background-color: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  padding: 3px 10px;
+  padding: 2px 8px;
   border-radius: 9999px;
 }}
 .hub-chat-title {{
   margin: 0;
   font-family: var(--md-sys-typescale-font-brand);
-  font-size: 16px;
+  font-size: 14.5px;
   font-weight: 600;
   color: var(--md-sys-color-on-surface);
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }}
 .hub-chat-sub {{
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--md-sys-color-on-surface-variant);
 }}
 .hub-chat-meta-right {{
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }}
 .hub-status-pill {{
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
+  gap: 5px;
+  font-size: 11.5px;
   color: var(--md-sys-color-tertiary);
   font-weight: 600;
   white-space: nowrap;
   flex-shrink: 0;
 }}
 .hub-status-dot {{
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
   background-color: var(--md-sys-color-tertiary);
   flex-shrink: 0;
 }}
 .hub-my-id-btn {{
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   font-family: var(--md-sys-typescale-font-mono);
   color: var(--md-sys-color-on-secondary-container);
   background-color: var(--md-sys-color-secondary-container);
   border: 1px solid var(--md-sys-color-outline-variant);
-  padding: 4px 10px;
+  padding: 3px 9px;
   border-radius: 9999px;
   cursor: pointer;
   white-space: nowrap;
@@ -1569,7 +1609,7 @@ button, input, textarea, select {{
 }}
 .hub-chat-body-wrapper {{
   position: relative;
-  height: 440px;
+  height: 360px;
   display: flex;
   flex-direction: column;
 }}
@@ -1578,36 +1618,36 @@ button, input, textarea, select {{
   min-height: 0 !important;
   overflow-y: scroll !important;
   overflow-x: hidden !important;
-  padding: 16px 20px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
   overscroll-behavior: contain;
   background-color: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
 }}
 .hub-chat-scroll-btn {{
   position: absolute;
-  bottom: 14px;
+  bottom: 12px;
   left: 50%;
   transform: translateX(-50%);
   background-color: var(--md-sys-color-primary);
   color: var(--md-sys-color-on-primary);
   border: none;
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 7px 16px;
+  padding: 6px 14px;
   border-radius: 9999px;
   cursor: pointer;
   box-shadow: var(--md-sys-elevation-2);
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
   z-index: 5;
 }}
 .hub-chat-footer {{
-  padding: 12px 16px;
+  padding: 10px 14px;
   background-color: var(--md-sys-color-surface-container-low);
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }}
@@ -1618,10 +1658,10 @@ button, input, textarea, select {{
   gap: 8px;
   background-color: var(--md-sys-color-primary-container);
   color: var(--md-sys-color-on-primary-container);
-  border-radius: 8px;
-  padding: 6px 12px;
-  margin-bottom: 8px;
-  font-size: 12px;
+  border-radius: 7px;
+  padding: 5px 10px;
+  margin-bottom: 6px;
+  font-size: 11.5px;
 }}
 .hub-reply-info {{
   display: flex;
@@ -1648,7 +1688,7 @@ button, input, textarea, select {{
 .hub-chat-form {{
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
 }}
 .hub-chat-input-row {{
   display: flex;
@@ -1659,14 +1699,14 @@ button, input, textarea, select {{
 .hub-chat-input {{
   flex: 1 1 140px;
   min-width: 110px;
-  min-height: 42px;
-  max-height: 110px;
+  min-height: 38px;
+  max-height: 100px;
   resize: none;
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 12px;
-  padding: 10px 32px 10px 12px;
-  font-size: 14px;
+  border-radius: 10px;
+  padding: 8px 30px 8px 11px;
+  font-size: 13px;
   line-height: 1.4;
   color: var(--md-sys-color-on-surface);
   outline: none;
@@ -1677,8 +1717,8 @@ button, input, textarea, select {{
 }}
 .hub-input-clear {{
   position: absolute;
-  right: 84px;
-  top: 11px;
+  right: 80px;
+  top: 9px;
   background-color: var(--md-sys-color-surface-container);
   border: none;
   color: var(--md-sys-color-on-surface-variant);
@@ -1697,14 +1737,14 @@ button, input, textarea, select {{
   color: var(--md-sys-color-on-primary);
   border: none;
   border-radius: 9999px;
-  padding: 0 18px;
-  font-size: 13.5px;
+  padding: 0 15px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
-  height: 42px;
+  height: 38px;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   white-space: nowrap;
   flex-shrink: 0;
 }}
@@ -1713,7 +1753,7 @@ button, input, textarea, select {{
   justify-content: space-between;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--md-sys-color-on-surface-variant);
   padding: 0 2px;
 }}
@@ -1724,11 +1764,11 @@ button, input, textarea, select {{
   right: 20px;
   bottom: 20px;
   z-index: 900;
-  padding: 10px 16px;
+  padding: 8px 14px;
   border-radius: 8px;
   background-color: var(--md-sys-color-inverse-surface);
   color: var(--md-sys-color-inverse-on-surface);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 500;
   box-shadow: var(--md-sys-elevation-3);
   opacity: 0;
@@ -1746,10 +1786,10 @@ button, input, textarea, select {{
   left: 0;
   right: 0;
   bottom: 0;
-  height: 64px;
+  height: 56px;
   background-color: var(--md-sys-color-surface-container-lowest);
   border-top: 1px solid var(--md-sys-color-outline-variant);
-  z-index: 220;
+  z-index: 450;
   justify-content: space-around;
   align-items: center;
   padding: 0 4px;
@@ -1760,20 +1800,20 @@ button, input, textarea, select {{
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 3px;
-  height: 52px;
+  gap: 2px;
+  height: 48px;
   border: none;
   background: transparent;
   color: var(--md-sys-color-on-surface-variant);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 500;
   cursor: pointer;
   padding: 0;
   white-space: nowrap;
 }}
 .bottom-nav-pill {{
-  width: 48px;
-  height: 28px;
+  width: 44px;
+  height: 24px;
   border-radius: 9999px;
   display: flex;
   align-items: center;
@@ -1796,11 +1836,15 @@ button, input, textarea, select {{
   }}
 }}
 
-/* Tablet (601px - 1024px): Sidebar switches to Navigation Rail (72px) */
+/* Tablet (601px - 1024px): Sidebar switches to Fixed Navigation Rail (60px) */
 @media (max-width: 1024px) and (min-width: 601px) {{
+  .m3-layout-body,
+  body.sidebar-collapsed .m3-layout-body {{
+    padding-left: var(--sh-sidebar-collapsed-w);
+  }}
   .m3-sidebar {{
-    width: 72px;
-    padding: 12px 8px;
+    width: var(--sh-sidebar-collapsed-w);
+    padding: 8px 6px;
   }}
   .m3-sidebar .sidebar-section-label,
   .m3-sidebar .sidebar-item .item-label,
@@ -1812,19 +1856,27 @@ button, input, textarea, select {{
     padding: 0;
   }}
   .m3-main-workspace {{
-    padding: 20px 20px 56px;
+    padding: 10px 12px 44px;
   }}
   .charts-grid, .bottom-grid {{
     grid-template-columns: 1fr;
   }}
 }}
 
-/* Smartphone (<= 600px): Bottom Navigation Bar + Single-column Cards */
+/* Smartphone (<= 600px): Fixed Top Bar + Bottom Navigation Bar + 2-column Compact Cards */
 @media (max-width: 600px) {{
+  :root {{
+    --sh-topbar-h: 46px;
+  }}
   .m3-top-app-bar {{
-    height: 54px;
+    height: var(--sh-topbar-h);
     padding: 0 8px;
-    gap: 6px;
+    gap: 4px;
+  }}
+  .m3-layout-body,
+  body.sidebar-collapsed .m3-layout-body {{
+    padding-top: var(--sh-topbar-h);
+    padding-left: 0 !important;
   }}
   .topbar-left {{
     gap: 4px;
@@ -1837,20 +1889,20 @@ button, input, textarea, select {{
     flex-shrink: 0;
   }}
   #menuToggleBtn {{
-    width: 32px;
-    height: 32px;
-    min-width: 32px;
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
     flex-shrink: 0;
   }}
   .brand-link {{
-    font-size: 16px;
+    font-size: 15px;
     gap: 4px;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }}
   .brand-sub {{
-    font-size: 12.5px;
+    font-size: 12px;
     white-space: nowrap;
   }}
   .live-status-pill,
@@ -1861,9 +1913,9 @@ button, input, textarea, select {{
     display: none;
   }}
   .topbar-action-btn {{
-    width: 32px;
-    height: 32px;
-    min-width: 32px;
+    width: 30px;
+    height: 30px;
+    min-width: 30px;
     padding: 0;
     justify-content: center;
     flex-shrink: 0;
@@ -1872,23 +1924,24 @@ button, input, textarea, select {{
     display: none !important;
   }}
   #search {{
-    padding: 0 40px 0 42px;
-    font-size: 13.5px;
+    height: 34px;
+    padding: 0 34px 0 36px;
+    font-size: 12.5px;
   }}
   .search-clear-btn {{
-    right: 10px;
+    right: 8px;
   }}
   .m3-sidebar {{
     position: fixed;
-    top: 0;
+    top: var(--sh-topbar-h);
     left: 0;
     bottom: 0;
-    height: 100vh;
-    width: 268px !important;
-    padding: 16px 12px !important;
+    height: calc(100dvh - var(--sh-topbar-h));
+    width: 240px !important;
+    padding: 12px 10px !important;
     transform: translateX(-100%);
     transition: transform 220ms cubic-bezier(0.2, 0, 0, 1);
-    z-index: 350;
+    z-index: 460;
   }}
   .m3-sidebar.mobile-open {{
     transform: translateX(0);
@@ -1900,49 +1953,59 @@ button, input, textarea, select {{
   }}
   .m3-sidebar .sidebar-item {{
     justify-content: flex-start !important;
-    padding: 0 14px !important;
+    padding: 0 12px !important;
   }}
   .m3-main-workspace {{
-    padding: 12px 10px 88px;
+    padding: 8px 8px 72px;
   }}
   .m3-search-surface {{
-    padding: 12px;
+    padding: 8px 10px;
+    margin-bottom: 8px;
   }}
   .grid {{
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }}
+  .card.service {{
+    padding: 8px 9px;
+    min-height: 82px;
+    gap: 4px;
+  }}
+  .card-path {{
+    display: none;
   }}
   .kpi-grid {{
-    grid-template-columns: repeat(2, 1fr);
-    gap: 8px;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
   }}
   .kpi-value {{
-    font-size: 20px;
+    font-size: 16px;
   }}
   .charts-grid, .bottom-grid {{
     grid-template-columns: 1fr;
   }}
   .hub-chat-header {{
-    padding: 10px 12px;
-    gap: 8px;
+    padding: 8px 10px;
+    gap: 6px;
   }}
   .hub-chat-meta-right {{
     gap: 6px;
     flex-wrap: wrap;
   }}
   .hub-chat-footer {{
-    padding: 10px;
+    padding: 8px;
   }}
   .hub-chat-input-row {{
     gap: 4px;
   }}
   .hub-chat-input {{
-    padding: 8px 26px 8px 10px;
-    font-size: 13px;
+    padding: 7px 26px 7px 10px;
+    font-size: 12.5px;
   }}
   .hub-chat-send-btn {{
     padding: 0 12px;
-    font-size: 12.5px;
-    height: 38px;
+    font-size: 12px;
+    height: 36px;
   }}
   .m3-bottom-nav {{
     display: flex;
@@ -2334,12 +2397,14 @@ button, input, textarea, select {{
   function setSidebarCollapsed(collapsed) {{
     if (!sidebar) return;
     sidebar.classList.toggle("collapsed", collapsed);
+    document.body.classList.toggle("sidebar-collapsed", collapsed);
     try {{ localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); }} catch (_) {{}}
     setTimeout(drawAllCharts, 220);
   }}
   try {{
     if (localStorage.getItem(SIDEBAR_KEY) === "1" && window.innerWidth > 1024) {{
       sidebar?.classList.add("collapsed");
+      document.body.classList.add("sidebar-collapsed");
     }}
   }} catch (_) {{}}
 
@@ -2976,26 +3041,60 @@ button, input, textarea, select {{
     if ($("kpiActiveServices")) $("kpiActiveServices").textContent = String(activeServiceCount);
 
     const st = s.storage || {{}};
+    const curOrigin = (location && location.origin && /^https?:\\/\\//i.test(location.origin)) ? location.origin.replace(/\\/+$/, "") : "";
+    const isPublicOrigin = Boolean(
+      curOrigin
+      && !curOrigin.includes("localhost")
+      && !curOrigin.includes("127.0.0.1")
+      && !curOrigin.includes("untitled-hello-")
+      && !curOrigin.includes("ais-dev-")
+    );
     const rawPeerRanking = Array.isArray(s.peer_ranking) && s.peer_ranking.length
-      ? s.peer_ranking
+      ? s.peer_ranking.map(p => ({{ ...p }}))
       : [{{
           rank: 1,
-          url: location.origin,
-          ccu: liveCcu,
-          access_count: Number(s.access_events || 0),
-          comm_count: Number(s.access_events || 0),
+          url: isPublicOrigin ? curOrigin : "https://chatwork.cloud.run",
+          ccu: Math.max(1, liveCcu),
+          access_count: Math.max(1, Number(s.access_events || 0)),
+          comm_count: Math.max(1, Number(s.access_events || 0)),
           is_self: true,
           status: "active",
         }}];
+    if (isPublicOrigin) {{
+      const existingSelf = rawPeerRanking.find(p => String(p.url || "").replace(/\\/+$/, "") === curOrigin);
+      if (existingSelf) {{
+        existingSelf.ccu = Math.max(1, Number(existingSelf.ccu || 0));
+        existingSelf.access_count = Math.max(1, Number(existingSelf.access_count || 0), existingSelf.ccu);
+        existingSelf.comm_count = Math.max(1, Number(existingSelf.comm_count || 0), existingSelf.access_count);
+        existingSelf.is_self = true;
+        existingSelf.status = "active";
+      }} else {{
+        rawPeerRanking.push({{
+          rank: rawPeerRanking.length + 1,
+          url: curOrigin,
+          ccu: Math.max(1, liveCcu),
+          access_count: Math.max(1, todayVisitors || 1),
+          comm_count: Math.max(1, todayVisitors || 1),
+          is_self: true,
+          status: "active",
+        }});
+      }}
+    }}
     let peerRanking = rawPeerRanking
       .filter(p =>
-        Number(p.ccu || 0) > 0 || Number(p.access_count || 0) > 0 || Number(p.comm_count || 0) > 0
+        Number(p.ccu || 0) > 0 || Number(p.access_count || 0) > 0 || Number(p.comm_count || 0) > 0 || String(p.url || "").includes(".cloud.run")
       )
       .slice()
       .sort((a, b) => {{
         const aComm = Math.max(Number(a.access_count || 0), Number(a.comm_count || 0));
         const bComm = Math.max(Number(b.access_count || 0), Number(b.comm_count || 0));
-        return (bComm - aComm) || (Number(b.ccu || 0) - Number(a.ccu || 0));
+        if (bComm !== aComm) return bComm - aComm;
+        const aCcu = Number(a.ccu || 0);
+        const bCcu = Number(b.ccu || 0);
+        if (bCcu !== aCcu) return bCcu - aCcu;
+        const aCr = String(a.url || "").includes(".cloud.run") ? 1 : 0;
+        const bCr = String(b.url || "").includes(".cloud.run") ? 1 : 0;
+        return bCr - aCr;
       }});
     if (!peerRanking.length) {{
       peerRanking = [rawPeerRanking[0]];
@@ -3013,11 +3112,11 @@ button, input, textarea, select {{
       const maxPeerComm = Math.max(1, ...peerRanking.map(p => Math.max(Number(p.access_count || 0), Number(p.comm_count || 0))));
       peerRankBox.innerHTML = peerRanking.map((p, idx) => {{
         const rankNum = idx + 1;
-        const pUrl = String(p.url || location.origin);
+        const pUrl = String(p.url || curOrigin || "https://chatwork.cloud.run").replace(/\\/+$/, "");
         const pCcu = Number(p.ccu || 0);
-        const pComm = Math.max(Number(p.access_count || 0), Number(p.comm_count || 0));
-        const isSelf = Boolean(p.is_self) || pUrl === location.origin;
-        const isOnline = p.status === "active" || isSelf || pCcu > 0;
+        const pComm = Math.max(1, Number(p.access_count || 0), Number(p.comm_count || 0));
+        const isSelf = isPublicOrigin ? (pUrl === curOrigin) : Boolean(p.is_self);
+        const isOnline = p.status === "active" || isSelf || pCcu > 0 || pUrl.includes(".cloud.run");
         const badgeText = isSelf ? "現在拠点・稼働中" : (isOnline ? "稼働中" : "同期待機");
         const badgeCls = isOnline ? "peer-status-badge online" : "peer-status-badge standby";
         const rankBadgeCls = rankNum <= 3 ? `rank-badge rank-${{rankNum}}` : "rank-badge";

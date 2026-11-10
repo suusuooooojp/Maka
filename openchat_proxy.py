@@ -403,7 +403,7 @@ def _touch_active_client(
         if not act_sid:
             act_sid = f"oc-{client_id or sid}" if (client_id or sid) else ""
         if act_sid and resolved_svc != "System":
-            origin = _get_self_url(scope_or_req if isinstance(scope_or_req, Request) else None)
+            origin = _get_self_url(scope_or_req)
             current_activity.touch_session_activity(
                 session=act_sid,
                 service=resolved_svc or "School Hub",
@@ -703,19 +703,54 @@ def _check_and_claim_name(sender_id: str, client_id: str) -> tuple[bool, str]:
     return True, ""
 
 
-def _get_self_url(request: Request = None) -> str:
-    ext = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
-    if ext:
-        return ext
-    if request:
+def _get_self_url(request=None) -> str:
+    if request is not None:
         try:
-            proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-            host = request.headers.get("x-forwarded-host", request.headers.get("host", ""))
-            if host:
+            import current_activity
+            ext_orig = current_activity.extract_request_origin(request)
+            if ext_orig:
+                return ext_orig
+        except Exception:
+            pass
+        try:
+            headers = getattr(request, "headers", None) or {}
+            orig_hdr = (headers.get("origin") or "").strip().rstrip("/")
+            if orig_hdr.startswith(("http://", "https://")) and ".cloud.run" in orig_hdr:
+                return orig_hdr
+            ref_hdr = (headers.get("referer") or "").strip()
+            if ref_hdr.startswith(("http://", "https://")):
+                ref_p = urlparse(ref_hdr)
+                if ref_p.hostname and ".cloud.run" in ref_p.hostname.lower():
+                    return f"{ref_p.scheme or 'https'}://{ref_p.hostname.lower()}"
+            url_obj = getattr(request, "url", None)
+            default_scheme = getattr(url_obj, "scheme", "https") if url_obj else "https"
+            if default_scheme in ("ws", "wss"):
+                default_scheme = "https" if default_scheme == "wss" else "http"
+            proto = (headers.get("x-forwarded-proto") or default_scheme or "https").split(",")[0].strip()
+            host = (headers.get("x-forwarded-host") or headers.get("host") or "").split(",")[0].strip()
+            if host and not host.startswith("untitled-hello-"):
                 return f"{proto}://{host}".rstrip("/")
         except Exception:
             pass
-    return "https://leftt-5mo6.onrender.com"
+    ext = (
+        os.getenv("PUBLIC_ORIGIN")
+        or os.getenv("RENDER_EXTERNAL_URL")
+        or os.getenv("APP_URL")
+        or ""
+    ).strip().rstrip("/")
+    if ext:
+        return ext
+    try:
+        import current_activity
+        def_orig = current_activity._get_default_self_origin()
+        if def_orig:
+            return def_orig
+    except Exception:
+        pass
+    for p in _KNOWN_PEERS:
+        if ".cloud.run" in p:
+            return p
+    return "https://chatwork.cloud.run"
 
 
 def _register_peer_url(url: str):
@@ -729,8 +764,15 @@ def _register_peer_url(url: str):
         host = (parsed.hostname or "").lower()
         if not host or host in ("localhost", "127.0.0.1", "0.0.0.0") or host.startswith("ais-dev-") or host.startswith("untitled-hello-"):
             return
-        if any(d in host for d in ("onrender.com", "ai.studio", "cloud.run", "luhu.jp", "koyeb.app", "hf.space")):
-            _KNOWN_PEERS.add(f"https://{host}")
+        if any(d in host for d in ("onrender.com", "ai.studio", "cloud.run", "luhu.jp", "koyeb.app", "hf.space", "run.app")):
+            norm = f"https://{host}"
+            _KNOWN_PEERS.add(norm)
+            if ".cloud.run" in host:
+                try:
+                    import activity_persistence_proxy as _ap
+                    _ap.register_public_origin(norm)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -2941,11 +2983,18 @@ _CLIENT_JS = r"""
   ];
 
   const REAL_ORIGIN = (() => {
+    try {
+      if (window.location && window.location.origin && window.location.origin.startsWith('http')) {
+        if (window.location.origin.includes('.cloud.run') || window.location.origin.includes('.run.app') || window.location.origin.includes('onrender.com') || window.location.origin.includes('ai.studio') || window.location.origin.includes('luhu.jp')) {
+          return window.location.origin;
+        }
+      }
+    } catch (_) {}
     if (INJECTED_ORIGIN && !INJECTED_ORIGIN.startsWith('__')) {
       return INJECTED_ORIGIN;
     }
     try {
-      if (window.location && window.location.origin && window.location.origin.includes('onrender.com')) {
+      if (window.location && window.location.origin && window.location.origin.startsWith('http')) {
         return window.location.origin;
       }
     } catch (_) {}
@@ -2964,7 +3013,7 @@ _CLIENT_JS = r"""
         }
       }
     } catch (_) {}
-    return 'https://leftt-0ab8.onrender.com';
+    return (window.location && window.location.origin) ? window.location.origin : 'https://chatwork.cloud.run';
   })();
 
   function getClientId() {
@@ -3065,7 +3114,7 @@ _CLIENT_JS = r"""
 
   function getApiUrl(path) {
     if (!path.startsWith('/')) path = '/' + path;
-    const base = REAL_ORIGIN || (window.location && window.location.origin ? window.location.origin : 'https://leftt-0ab8.onrender.com');
+    const base = (window.location && window.location.origin && window.location.origin.startsWith('http')) ? window.location.origin : (REAL_ORIGIN || 'https://chatwork.cloud.run');
     const u = base + path;
     const delim = u.includes('?') ? '&' : '?';
     const trip = getStoredTripKey();
@@ -3075,7 +3124,7 @@ _CLIENT_JS = r"""
   }
 
   function getWsUrl() {
-    let base = REAL_ORIGIN || (window.location && window.location.origin ? window.location.origin : 'https://leftt-0ab8.onrender.com');
+    let base = (window.location && window.location.origin && window.location.origin.startsWith('http')) ? window.location.origin : (REAL_ORIGIN || 'https://chatwork.cloud.run');
     const proto = base.startsWith('https') ? 'wss:' : 'ws:';
     let u = '';
     try {
