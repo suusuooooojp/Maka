@@ -93,7 +93,7 @@ def test_ccu_tab_tracking_and_global_service_ranking():
     # 1. Same-tab navigation switches active service immediately
     touch_session_activity(
         session="s-unit-u1",
-        service="トランプ (大富豪・ババ抜き)",
+        service="トランプ (大富豪・ポーカー)",
         path="/trump",
         state="active",
         source="visit",
@@ -102,7 +102,7 @@ def test_ccu_tab_tracking_and_global_service_ranking():
         client_fp="s-fpunit1",
     )
     snap1 = build_snapshot_payload()
-    assert snap1["stats"]["service_ccu"].get("トランプ (大富豪・ババ抜き)", 0) >= 1
+    assert snap1["stats"]["service_ccu"].get("トランプ (大富豪・ポーカー)", 0) >= 1
 
     touch_session_activity(
         session="s-unit-u1",
@@ -115,7 +115,7 @@ def test_ccu_tab_tracking_and_global_service_ranking():
         client_fp="s-fpunit1",
     )
     snap2 = build_snapshot_payload()
-    assert snap2["stats"]["service_ccu"].get("トランプ (大富豪・ババ抜き)", 0) == 0
+    assert snap2["stats"]["service_ccu"].get("トランプ (大富豪・ポーカー)", 0) == 0
 
     # 2. Second tab opening YouTube adds YouTube to service_ccu while keeping 1 user session
     touch_session_activity(

@@ -3150,7 +3150,7 @@ _CLIENT_JS = r"""
       p.startsWith('/ja/') ||
       h.includes('cloudmoon')
     ) return 'CloudMoon';
-    if (p.startsWith('/trump')) return 'トランプ (大富豪・ババ抜き)';
+    if (p.startsWith('/trump')) return 'トランプ (大富豪・ポーカー)';
     if (p.startsWith('/tiktok') || h.includes('tiktok')) return 'TikTok';
     if (p.startsWith('/kazwire')) return 'Kazwire';
     if (p.startsWith('/utopia')) return 'Utopia';

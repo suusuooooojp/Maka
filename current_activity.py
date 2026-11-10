@@ -64,6 +64,7 @@ _CANONICAL_SERVICES = frozenset({
     "TikTok",
     "Twitch(安定)",
     "Spotify",
+    "トランプ (大富豪・ポーカー)",
     "トランプ (大富豪・ババ抜き)",
 })
 
@@ -286,7 +287,7 @@ def _detect_service_from_path(path: str) -> str:
     ):
         return "CloudMoon"
     if p.startswith("/trump"):
-        return "トランプ (大富豪・ババ抜き)"
+        return "トランプ (大富豪・ポーカー)"
     if p.startswith("/spotify"):
         return "Spotify"
     if p.startswith("/florr"):
@@ -349,8 +350,8 @@ def _normalize_service_name(service: str, path: str = "") -> str:
         return "Interstellar"
     if "cloudmoon" in sl or "クラウドムーン" in sl or "すべてのゲーム" in sl or "play roblox" in sl:
         return "CloudMoon"
-    if "trump" in sl or "トランプ" in sl or "大富豪" in sl or "ババ抜き" in sl:
-        return "トランプ (大富豪・ババ抜き)"
+    if "trump" in sl or "トランプ" in sl or "大富豪" in sl or "ババ抜き" in sl or "ポーカー" in sl:
+        return "トランプ (大富豪・ポーカー)"
     if "tiktok" in sl or "ティックトック" in sl:
         return "TikTok"
     if "spotify" in sl:

@@ -111,7 +111,7 @@ def _detect_service(path: str) -> tuple[str | None, bool, str]:
         return "CloudMoon", is_entry, "/cloudmoon/"
     if path.startswith("/trump"):
         is_entry = not path.startswith(("/trump/api/", "/trump/ws/"))
-        return "トランプ (大富豪・ババ抜き)", is_entry, "/trump"
+        return "トランプ (大富豪・ポーカー)", is_entry, "/trump"
     if path.startswith("/spotify"):
         return "Spotify", True, "/spotify"
     if path.startswith("/florr"):

@@ -1,23 +1,39 @@
-"""Simple, Easy-to-Play Online 4-Player Trump (Lobby + 1 Room per Rule: Daifugo & Babanuki + Spectator Mode) for School Hub."""
+"""Simple, Easy-to-Play Online 4-Player Trump (Lobby + 1 Room per Rule: Daifugo & Poker + Spectator Mode) for School Hub."""
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
+import json
 import random
+import re
+import secrets
 import time
+import unicodedata
 import uuid
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from openchat_proxy import (
+    _CHAT_USERS,
+    _clean_str,
+    _hash_chat_password,
+    _normalize_name,
+    _save_chat_users,
+    _sign_auth_token,
+    _verify_auth_token,
+    _verify_chat_password,
+)
+
 router = APIRouter()
 
-SERVICE_NAME = "トランプ (大富豪・ババ抜き)"
+SERVICE_NAME = "トランプ (大富豪・ポーカー)"
 SERVICE_ICON = "🃏"
 SERVICE_PATH = "/trump"
 
 # ============================================================================
-# Card & Rule Definitions (Server-Authoritative Engine + Strong AI)
+# Card & Rule Definitions (Server-Authoritative Engine + Strong AI + True Random)
 # ============================================================================
 
 SUITS = [
@@ -44,16 +60,46 @@ DAIFUGO_RANKS = [
 ]
 
 BOT_PROFILES = [
-    {"name": "レン (AI)", "style": "Master", "avatar": "R"},
-    {"name": "カイ (AI)", "style": "Power", "avatar": "K"},
-    {"name": "レイ (AI)", "style": "Tactics", "avatar": "L"},
-    {"name": "ミナ (AI)", "style": "Brain", "avatar": "M"},
+    {"name": "レン (AI)", "style": "Master", "avatar": "R", "rate": 1500},
+    {"name": "カイ (AI)", "style": "Power", "avatar": "K", "rate": 1520},
+    {"name": "レイ (AI)", "style": "Tactics", "avatar": "L", "rate": 1550},
+    {"name": "ミナ (AI)", "style": "Brain", "avatar": "M", "rate": 1580},
 ]
 
 RANK_TITLES_DAIFUGO = ["大富豪", "富豪", "貧民", "大貧民"]
-RANK_TITLES_BABANUKI = ["1位抜け", "2位抜け", "3位抜け", "ババ持ち"]
+RANK_TITLES_POKER = ["1位 (勝者)", "2位", "3位", "4位"]
 
 
+# ----------------------------------------------------------------------------
+# Rating (レート) Helper Functions (Stored with OpenChat Accounts)
+# ----------------------------------------------------------------------------
+def get_user_rate(username: str) -> int:
+    norm = _normalize_name(username)
+    if not norm or norm not in _CHAT_USERS:
+        return 1500
+    return int(_CHAT_USERS[norm].get("trumpRate") or 1500)
+
+
+def update_user_rate(username: str, delta: int, is_win: bool) -> int:
+    norm = _normalize_name(username)
+    if not norm or norm not in _CHAT_USERS:
+        return 1500
+    u = _CHAT_USERS[norm]
+    curr = int(u.get("trumpRate") or 1500)
+    new_rate = max(1000, curr + delta)
+    u["trumpRate"] = new_rate
+    u["trumpGames"] = int(u.get("trumpGames") or 0) + 1
+    if is_win:
+        u["trumpWins"] = int(u.get("trumpWins") or 0) + 1
+    else:
+        u["trumpLosses"] = int(u.get("trumpLosses") or 0) + 1
+    _save_chat_users()
+    return new_rate
+
+
+# ----------------------------------------------------------------------------
+# Deck Building with Cryptographic PRNG (完全ランダム)
+# ----------------------------------------------------------------------------
 def _build_deck(mode: str) -> List[dict]:
     deck: List[dict] = []
     uid = 1
@@ -70,35 +116,101 @@ def _build_deck(mode: str) -> List[dict]:
                 "isJoker": False,
             })
             uid += 1
-    joker_count = 2 if mode == "daifugo" else 1
-    for j in range(joker_count):
-        deck.append({
-            "id": f"joker_{j + 1}",
-            "suit": "JOKER",
-            "suitSymbol": "🃏",
-            "color": "joker",
-            "num": 99,
-            "label": "JOKER",
-            "basePower": 99,
-            "isJoker": True,
-        })
-    random.shuffle(deck)
+    if mode == "daifugo":
+        for j in range(2):
+            deck.append({
+                "id": f"joker_{j + 1}",
+                "suit": "JOKER",
+                "suitSymbol": "🃏",
+                "color": "joker",
+                "num": 99,
+                "label": "JOKER",
+                "basePower": 99,
+                "isJoker": True,
+            })
+    # Complete, cryptographically secure uniform random shuffle
+    secrets.SystemRandom().shuffle(deck)
     return deck
 
 
+# ----------------------------------------------------------------------------
+# 5-Card Poker Hand Evaluator
+# ----------------------------------------------------------------------------
+def eval_poker_5(hand: List[dict]) -> Tuple[int, str, List[int]]:
+    """Evaluates a 5-card poker hand and returns (score, hand_name, tiebreaker_ranks).
+    Score table:
+      10: ロイヤルストレートフラッシュ
+      9:  ストレートフラッシュ
+      8:  フォーカード
+      7:  フルハウス
+      6:  フラッシュ
+      5:  ストレート
+      4:  スリーカード
+      3:  ツーペア
+      2:  ワンペア
+      1:  ハイカード
+    """
+    if len(hand) != 5:
+        return (0, "無効", [])
+    suits = [c["suit"] for c in hand]
+    ranks = [14 if c["num"] == 1 else int(c["num"]) for c in hand]
+    ranks.sort(reverse=True)
+    is_flush = (len(set(suits)) == 1)
+
+    is_straight = False
+    straight_high = 0
+    unique_ranks = sorted(list(set(ranks)), reverse=True)
+    if len(unique_ranks) == 5:
+        if unique_ranks[0] - unique_ranks[4] == 4:
+            is_straight = True
+            straight_high = unique_ranks[0]
+        elif unique_ranks == [14, 5, 4, 3, 2]:
+            is_straight = True
+            straight_high = 5  # Wheel straight (A-2-3-4-5)
+
+    counts = Counter(ranks)
+    freq = sorted(counts.items(), key=lambda x: (x[1], x[0]), reverse=True)
+    pattern = [count for _, count in freq]
+    order_ranks = [r for r, _ in freq]
+
+    if is_flush and is_straight:
+        if straight_high == 14:
+            return (10, "ロイヤルストレートフラッシュ", [14])
+        return (9, "ストレートフラッシュ", [straight_high])
+    if pattern == [4, 1]:
+        return (8, "フォーカード", order_ranks)
+    if pattern == [3, 2]:
+        return (7, "フルハウス", order_ranks)
+    if is_flush:
+        return (6, "フラッシュ", ranks)
+    if is_straight:
+        return (5, "ストレート", [straight_high])
+    if pattern == [3, 1, 1]:
+        return (4, "スリーカード", order_ranks)
+    if pattern == [2, 2, 1]:
+        return (3, "ツーペア", order_ranks)
+    if pattern == [2, 1, 1, 1]:
+        return (2, "ワンペア", order_ranks)
+    return (1, "ハイカード", ranks)
+
+
+# ============================================================================
+# Trump Room Class (Daifugo & Poker)
+# ============================================================================
 class TrumpRoom:
-    """Single shared online room for a specific game mode ('daifugo' or 'babanuki')."""
+    """Single shared online room for a specific game mode ('daifugo' or 'poker')."""
 
     def __init__(self, mode: str, title: str, description: str) -> None:
-        self.mode = mode  # 'daifugo' | 'babanuki'
+        self.mode = mode  # 'daifugo' | 'poker'
         self.title = title
         self.description = description
         self.lock = asyncio.Lock()
         self.clients: Dict[str, WebSocket] = {}
-        self.participants: Dict[str, dict] = {}  # pid -> {id, name, last_seen, prefer_spectate}
+        self.participants: Dict[str, dict] = {}  # pid -> {id, name, last_seen, prefer_spectate, waiting_for_next}
         self.seats: List[Optional[str]] = [None, None, None, None]  # pid or None (AI Bot)
         self.seat_ranks: List[str] = ["平民", "平民", "平民", "平民"]
         self.hands: List[List[dict]] = [[], [], [], []]
+        self.draw_pile: List[dict] = []
         self.round_number: int = 1
         self.phase: str = "playing"  # 'playing' | 'round_end'
         self.phase_since: float = time.time()
@@ -124,6 +236,12 @@ class TrumpRoom:
         }
         self.event_seq: int = 0
         self.recent_events: List[dict] = []
+
+        # Poker-specific state
+        self.poker_exchange_done: List[bool] = [False, False, False, False]
+        self.poker_showdown_data: Optional[List[dict]] = None
+        self.rate_changes: Dict[int, dict] = {}
+
         self._start_new_round(reset_ranks=True)
 
     def _emit_event(self, kind: str, text: str = "", seat: int = -1, sfx: str = "") -> None:
@@ -150,8 +268,9 @@ class TrumpRoom:
 
     def sort_hand(self, seat: int) -> None:
         h = self.hands[seat]
-        if self.mode == "babanuki":
-            h.sort(key=lambda c: (1 if c.get("isJoker") else 0, int(c.get("num") or 0), str(c.get("suit") or "")))
+        if self.mode == "poker":
+            # Ace is 14 in poker sorting, descending
+            h.sort(key=lambda c: (14 if c.get("num") == 1 else int(c.get("num") or 0), str(c.get("suit") or "")), reverse=True)
         else:
             h.sort(key=lambda c: (self.card_power(c), str(c.get("suit") or "")))
 
@@ -160,6 +279,12 @@ class TrumpRoom:
         if pid and pid in self.participants:
             return str(self.participants[pid].get("name") or f"プレイヤー{seat + 1}")
         return BOT_PROFILES[seat]["name"]
+
+    def seat_rate(self, seat: int) -> int:
+        pid = self.seats[seat]
+        if pid and pid in self.participants:
+            return get_user_rate(self.participants[pid].get("name", ""))
+        return BOT_PROFILES[seat].get("rate", 1500)
 
     def is_seat_human(self, seat: int) -> bool:
         pid = self.seats[seat]
@@ -174,13 +299,16 @@ class TrumpRoom:
     def touch_participant(self, pid: str, name: Optional[str] = None, prefer_spectate: Optional[bool] = None) -> None:
         now = time.time()
         p = self.participants.get(pid)
+        is_playing = (self.phase != "round_end")
+
         if p is None:
-            clean_name = (name or "").strip()[:16] or f"ゲスト{random.randint(100, 999)}"
+            clean_name = (name or "").strip()[:16] or f"ゲスト{secrets.SystemRandom().randint(100, 999)}"
             p = {
                 "id": pid,
                 "name": clean_name,
                 "last_seen": now,
                 "prefer_spectate": bool(prefer_spectate) if prefer_spectate is not None else False,
+                "waiting_for_next": False,
             }
             self.participants[pid] = p
         else:
@@ -199,9 +327,20 @@ class TrumpRoom:
         if pid in self.seats:
             return
 
+        # --------------------------------------------------------------------
+        # 試合が終わるまで新規の人入れないように (Lock during active matches)
+        # --------------------------------------------------------------------
+        if is_playing:
+            # Match is currently in progress! Do not allow joining seats mid-game.
+            p["prefer_spectate"] = True
+            p["waiting_for_next"] = True
+            return
+
+        # If round has ended, player can sit down into an open bot seat
         for s in range(4):
             if self.seats[s] is None or self.seats[s] not in self.participants:
                 self.seats[s] = pid
+                p["waiting_for_next"] = False
                 self._emit_event("bubble", f"{p['name']}さんが着席", seat=s, sfx="select")
                 return
 
@@ -216,20 +355,26 @@ class TrumpRoom:
             self.remove_participant(pid)
             changed = True
 
-        for pid, p in list(self.participants.items()):
-            if not p.get("prefer_spectate") and pid not in self.seats:
-                for s in range(4):
-                    if self.seats[s] is None:
-                        self.seats[s] = pid
-                        changed = True
-                        break
+        # Only seat non-spectators if round is in round_end
+        if self.phase == "round_end":
+            for pid, p in list(self.participants.items()):
+                if not p.get("prefer_spectate") and pid not in self.seats:
+                    for s in range(4):
+                        if self.seats[s] is None:
+                            self.seats[s] = pid
+                            p["waiting_for_next"] = False
+                            changed = True
+                            break
         return changed
 
     def get_summary(self) -> dict:
         self.prune_stale_participants()
         human_seats = sum(1 for s in range(4) if self.is_seat_human(s))
         spec_count = sum(1 for k in self.participants if k not in self.seats)
-        seated_names = [self.seat_display_name(s) for s in range(4)]
+        seated_info = [
+            {"name": self.seat_display_name(s), "rate": self.seat_rate(s), "isHuman": self.is_seat_human(s)}
+            for s in range(4)
+        ]
         return {
             "mode": self.mode,
             "title": self.title,
@@ -239,13 +384,25 @@ class TrumpRoom:
             "spectatorCount": spec_count,
             "isFull": human_seats >= 4,
             "roundNumber": self.round_number,
-            "seatedNames": seated_names,
+            "isMatchInProgress": (self.phase != "round_end"),
+            "seatedInfo": seated_info,
         }
 
     # ------------------------------------------------------------------------
-    # Round Initialization & Card Exchange
+    # Round Initialization & Dealing (配るモーション対応)
     # ------------------------------------------------------------------------
     def _start_new_round(self, reset_ranks: bool = False) -> None:
+        # Seat any waiting participants before starting new game
+        for pid, p in list(self.participants.items()):
+            if p.get("waiting_for_next") and pid not in self.seats:
+                for s in range(4):
+                    if self.seats[s] is None or self.seats[s] not in self.participants:
+                        self.seats[s] = pid
+                        p["prefer_spectate"] = False
+                        p["waiting_for_next"] = False
+                        self._emit_event("bubble", f"{p['name']}さんが試合に参加しました", seat=s, sfx="select")
+                        break
+
         if reset_ranks:
             self.round_number = 1
             self.seat_ranks = ["平民", "平民", "平民", "平民"]
@@ -261,13 +418,15 @@ class TrumpRoom:
         self.passed_seats.clear()
         self.finish_order.clear()
         self.miyako_seat = None
+        self.rate_changes = {}
 
+        # Completely random deck shuffle using OS CSPRNG
         deck = _build_deck(self.mode)
-        self.hands = [[], [], [], []]
-        for idx, card in enumerate(deck):
-            self.hands[idx % 4].append(card)
 
         if self.mode == "daifugo":
+            self.hands = [[], [], [], []]
+            for idx, card in enumerate(deck):
+                self.hands[idx % 4].append(card)
             for s in range(4):
                 self.sort_hand(s)
             if not reset_ranks and self.round_number >= 2:
@@ -278,14 +437,18 @@ class TrumpRoom:
                     starter = s
                     break
             self.current_turn = starter
-        else:
+        elif self.mode == "poker":
+            # 5 cards dealt to each of 4 players, 32 remaining in draw_pile
+            self.hands = [deck[0:5], deck[5:10], deck[10:15], deck[15:20]]
+            self.draw_pile = deck[20:]
             for s in range(4):
-                self._discard_babanuki_pairs(s, emit=False)
-                random.shuffle(self.hands[s])
+                self.sort_hand(s)
+            self.poker_exchange_done = [False, False, False, False]
+            self.poker_showdown_data = None
             self.current_turn = 0
 
         self.turn_since = time.time()
-        self._emit_event("sfx", "", seat=-1, sfx="card")
+        self._emit_event("sfx", "カードが配られました", seat=-1, sfx="card")
 
     def _perform_card_exchange(self) -> None:
         try:
@@ -323,7 +486,7 @@ class TrumpRoom:
         self.hands[low_s].extend(give_from_high)
 
     # ------------------------------------------------------------------------
-    # Daifugo Move Analysis & Legality
+    # Daifugo Rule & Move Logic
     # ------------------------------------------------------------------------
     def analyze_combo(self, cards: List[dict]) -> Optional[dict]:
         if not cards:
@@ -331,346 +494,153 @@ class TrumpRoom:
         n = len(cards)
         jokers = [c for c in cards if c.get("isJoker")]
         normals = [c for c in cards if not c.get("isJoker")]
+        j_count = len(jokers)
 
         if n == 1:
             c = cards[0]
+            pwr = self.card_power(c)
             return {
                 "type": "single",
                 "count": 1,
-                "power": self.card_power(c),
-                "basePower": int(c.get("basePower") or 1),
-                "suits": ["JOKER"] if c.get("isJoker") else [str(c.get("suit"))],
-                "hasEight": (not c.get("isJoker")) and c.get("num") == 8,
-                "hasEleven": (not c.get("isJoker")) and c.get("num") == 11,
-                "isSpade3": (not c.get("isJoker")) and c.get("suit") == "S" and c.get("num") == 3,
-                "isSingleJoker": bool(c.get("isJoker")),
-                "cards": list(cards),
+                "power": pwr,
+                "cards": cards,
+                "suits": [c["suit"]],
+                "containsEight": (c.get("num") == 8),
+                "containsEleven": (c.get("num") == 11),
+                "isSpade3": (c.get("suit") == "S" and c.get("num") == 3),
             }
 
-        if not normals:
-            return {
-                "type": "group",
-                "count": n,
-                "power": 99,
-                "basePower": 99,
-                "suits": [str(c.get("suit")) for c in cards],
-                "hasEight": False,
-                "hasEleven": False,
-                "isSpade3": False,
-                "isSingleJoker": False,
-                "cards": list(cards),
-            }
-
-        first_num = normals[0].get("num")
-        if all(c.get("num") == first_num for c in normals) and n <= 5:
-            return {
-                "type": "group",
-                "count": n,
-                "power": self.card_power(normals[0]),
-                "basePower": int(normals[0].get("basePower") or 1),
-                "suits": [str(c.get("suit")) for c in normals],
-                "hasEight": first_num == 8,
-                "hasEleven": first_num == 11,
-                "isSpade3": False,
-                "isSingleJoker": False,
-                "cards": list(cards),
-            }
-
-        if self.rules.get("stairs", True) and n >= 3 and normals:
-            suit0 = normals[0].get("suit")
-            if all(c.get("suit") == suit0 for c in normals):
-                s_norm = sorted(normals, key=lambda c: int(c.get("basePower") or 0))
-                needed = 0
-                dup = False
-                for i in range(1, len(s_norm)):
-                    diff = int(s_norm[i]["basePower"]) - int(s_norm[i - 1]["basePower"])
-                    if diff == 0:
-                        dup = True
-                        break
-                    needed += diff - 1
-                if not dup and needed <= len(jokers):
-                    powers = [self.card_power(c) for c in normals]
-                    anchor = min(powers) if self.is_reversed() else max(powers)
-                    return {
-                        "type": "stairs",
-                        "count": n,
-                        "power": anchor,
-                        "basePower": int(s_norm[-1]["basePower"]),
-                        "suits": [str(suit0)],
-                        "hasEight": any(c.get("num") == 8 for c in normals),
-                        "hasEleven": any(c.get("num") == 11 for c in normals),
-                        "isSpade3": False,
-                        "isSingleJoker": False,
-                        "cards": list(cards),
-                    }
+        if normals:
+            ref_num = normals[0]["num"]
+            if all(c["num"] == ref_num for c in normals):
+                ref_power = self.card_power(normals[0])
+                c_types = {2: "pair", 3: "triple", 4: "quad"}
+                ctype = c_types.get(n, "pair")
+                has_8 = any(c["num"] == 8 for c in normals)
+                has_11 = any(c["num"] == 11 for c in normals)
+                return {
+                    "type": ctype,
+                    "count": n,
+                    "power": ref_power,
+                    "cards": cards,
+                    "suits": [c["suit"] for c in normals],
+                    "containsEight": has_8,
+                    "containsEleven": has_11,
+                    "isSpade3": False,
+                }
         return None
 
-    def _suits_match_lock(self, combo: dict) -> bool:
-        if not self.locked_suits:
-            return True
-        if combo.get("isSingleJoker"):
-            return True
-        if combo.get("type") == "stairs":
-            return combo["suits"][0] in self.locked_suits
-        jokers_cnt = sum(1 for c in combo["cards"] if c.get("isJoker"))
-        c_suits = [str(c.get("suit")) for c in combo["cards"] if not c.get("isJoker")]
-        missing = 0
-        for ls in self.locked_suits:
-            if ls in c_suits:
-                c_suits.remove(ls)
-            else:
-                missing += 1
-        return missing <= jokers_cnt
+    def _suits_match_lock(self, table_suits: List[str], move_suits: List[str]) -> bool:
+        if not table_suits or not move_suits:
+            return False
+        return set(table_suits) == set(move_suits)
 
     def is_legal_play(self, combo: Optional[dict]) -> bool:
-        if not combo:
+        if combo is None:
             return False
-        if not self.table_play:
+        if self.table_play is None:
             return True
-        if self.rules.get("spade3", True) and self.table_play.get("isSingleJoker") and combo.get("isSpade3"):
+
+        t_type = self.table_play["type"]
+        t_count = self.table_play["count"]
+        t_power = self.table_play["power"]
+
+        if self.rules.get("spade3") and t_type == "single" and self.table_play.get("isSingleJoker") and combo.get("isSpade3"):
             return True
-        if combo["type"] != self.table_play["type"] or combo["count"] != self.table_play["count"]:
+
+        if combo["type"] != t_type or combo["count"] != t_count:
             return False
-        if self.rules.get("shibari", True) and self.locked_suits and not self._suits_match_lock(combo):
-            return False
-        return int(combo["power"]) > int(self.table_play["power"])
+
+        if self.rules.get("shibari") and self.locked_suits:
+            if not self._suits_match_lock(self.locked_suits, combo["suits"]):
+                return False
+
+        return combo["power"] > t_power
 
     def generate_legal_combos(self, seat: int) -> List[dict]:
         hand = self.hands[seat]
-        results: List[dict] = []
-        jokers = [c for c in hand if c.get("isJoker")]
-        normals = [c for c in hand if not c.get("isJoker")]
-
+        legal: List[dict] = []
         for c in hand:
             cb = self.analyze_combo([c])
             if self.is_legal_play(cb):
-                results.append(cb)
-
-        by_num: Dict[int, List[dict]] = {}
-        for c in normals:
-            by_num.setdefault(int(c["num"]), []).append(c)
-        for _, grp in by_num.items():
-            for sz in range(2, len(grp) + 1):
-                sub = grp[:sz]
-                cb = self.analyze_combo(sub)
+                legal.append(cb)
+        for i in range(len(hand)):
+            for j in range(i + 1, len(hand)):
+                cb = self.analyze_combo([hand[i], hand[j]])
                 if self.is_legal_play(cb):
-                    results.append(cb)
-                if jokers and sz + 1 <= 4:
-                    cb_j = self.analyze_combo(sub + [jokers[0]])
-                    if self.is_legal_play(cb_j):
-                        results.append(cb_j)
-            if len(grp) == 1 and jokers:
-                cb_p = self.analyze_combo([grp[0], jokers[0]])
-                if self.is_legal_play(cb_p):
-                    results.append(cb_p)
-
-        if self.rules.get("stairs", True):
-            for s in SUITS:
-                sc = sorted(
-                    [c for c in normals if c.get("suit") == s["code"]],
-                    key=lambda x: int(x["basePower"]),
-                )
-                for i in range(len(sc)):
-                    seq = [sc[i]]
-                    for j in range(i + 1, len(sc)):
-                        if int(sc[j]["basePower"]) == int(seq[-1]["basePower"]) + 1:
-                            seq.append(sc[j])
-                            if len(seq) >= 3:
-                                cb_st = self.analyze_combo(list(seq))
-                                if self.is_legal_play(cb_st):
-                                    results.append(cb_st)
-                        else:
-                            break
-        return results
+                    legal.append(cb)
+        for i in range(len(hand)):
+            for j in range(i + 1, len(hand)):
+                for k in range(j + 1, len(hand)):
+                    cb = self.analyze_combo([hand[i], hand[j], hand[k]])
+                    if self.is_legal_play(cb):
+                        legal.append(cb)
+        return legal
 
     def choose_best_ai_move(self, seat: int) -> Optional[dict]:
-        hand = self.hands[seat]
         legal = self.generate_legal_combos(seat)
         if not legal:
             return None
+        legal.sort(key=lambda m: m["power"])
+        return legal[0]
 
-        opp_counts = [
-            len(self.hands[p])
-            for p in range(4)
-            if p != seat and p not in self.finish_order and len(self.hands[p]) > 0
-        ]
-        min_opp = min(opp_counts) if opp_counts else 99
-        opp_near_win = min_opp <= 3
-
-        freq: Dict[int, int] = {}
-        for c in hand:
-            if not c.get("isJoker"):
-                freq[int(c["num"])] = freq.get(int(c["num"]), 0) + 1
-
-        avg_power = sum(self.card_power(c) for c in hand) / max(1, len(hand))
-
-        best_move = None
-        best_score = -1e9
-        for mv in legal:
-            rem = len(hand) - mv["count"]
-            if rem == 0:
-                return mv
-            score = 0.0
-            if not self.table_play:
-                score += mv["count"] * 26.0
-                score -= mv["power"] * 3.8
-                if mv["hasEight"] and rem <= 3:
-                    score += 90.0
-                elif mv["hasEight"] and rem > 5:
-                    score -= 28.0
-                if mv["type"] == "single" and not mv["isSingleJoker"]:
-                    f = freq.get(int(mv["cards"][0]["num"]), 1)
-                    if f >= 2:
-                        score -= 34.0 * f
-                if mv["isSingleJoker"] and rem > 2:
-                    score -= 120.0
-            else:
-                if opp_near_win:
-                    score += mv["power"] * 3.2
-                    if mv["hasEight"]:
-                        score += 85.0
-                    if mv["hasEleven"]:
-                        score += 45.0
-                    if self.rules.get("shibari", True) and self.table_play.get("suits"):
-                        if any(s in self.table_play["suits"] for s in mv["suits"]):
-                            score += 42.0
-                else:
-                    score -= mv["power"] * 3.4
-                    score += mv["count"] * 18.0
-                    if mv["type"] == "single" and not mv["isSingleJoker"]:
-                        f = freq.get(int(mv["cards"][0]["num"]), 1)
-                        if f >= 2:
-                            score -= 28.0 * f
-                    if any(c.get("isJoker") for c in mv["cards"]) and rem > 4:
-                        score -= 65.0
-                    if self.table_play.get("isSingleJoker") and mv.get("isSpade3"):
-                        score += 500.0
-                    if mv["hasEight"]:
-                        score += 60.0 if rem <= 5 else 12.0
-                    if mv["hasEleven"] and avg_power < 7.0:
-                        score += 35.0
-
-            if self.rules.get("revolution", True) and mv["count"] >= 4 and mv["type"] == "group":
-                score += 120.0 if avg_power <= 6.5 else -90.0
-
-            if score > best_score:
-                best_score = score
-                best_move = mv
-
-        if self.table_play and not opp_near_win and len(hand) >= 7 and best_score < -42.0:
-            return None
-        return best_move
-
-    # ------------------------------------------------------------------------
-    # Daifugo Execution
-    # ------------------------------------------------------------------------
     def execute_daifugo_play(self, seat: int, combo: dict) -> None:
-        used_ids = {c["id"] for c in combo["cards"]}
-        self.hands[seat] = [c for c in self.hands[seat] if c["id"] not in used_ids]
-
-        triggered_shibari = False
-        if (
-            self.rules.get("shibari", True)
-            and self.table_play
-            and not self.locked_suits
-            and not combo.get("isSingleJoker")
-            and not self.table_play.get("isSingleJoker")
-        ):
-            prev_s = sorted(self.table_play.get("suits") or [])
-            curr_s = sorted(combo.get("suits") or [])
-            if prev_s and prev_s == curr_s:
-                self.locked_suits = curr_s
-                triggered_shibari = True
-
-        triggered_spade3 = bool(
-            self.rules.get("spade3", True)
-            and self.table_play
-            and self.table_play.get("isSingleJoker")
-            and combo.get("isSpade3")
-        )
-
-        p_name = self.seat_display_name(seat)
-        if combo["type"] == "stairs":
-            desc = f"{combo['count']}枚階段"
-        elif combo["count"] == 1:
-            desc = combo["cards"][0]["label"]
-        elif combo["count"] == 2:
-            desc = f"{combo['cards'][0]['label']} ペア"
-        elif combo["count"] == 3:
-            desc = f"{combo['cards'][0]['label']} 3枚組"
-        else:
-            desc = f"{combo['count']}枚出し"
+        played_ids = {c["id"] for c in combo["cards"]}
+        self.hands[seat] = [c for c in self.hands[seat] if c["id"] not in played_ids]
 
         self.prev_table_play = self.table_play
+        is_single_joker = (combo["count"] == 1 and bool(combo["cards"][0].get("isJoker")))
         self.table_play = {
-            **combo,
             "seat": seat,
-            "label": f"{p_name}: {desc}",
+            "type": combo["type"],
+            "count": combo["count"],
+            "power": combo["power"],
+            "cards": combo["cards"],
+            "suits": combo["suits"],
+            "isSingleJoker": is_single_joker,
         }
         self.last_play_seat = seat
-        self.passed_seats.clear()
+        self.passed_seats.discard(seat)
 
-        triggered_rev = False
-        if self.rules.get("revolution", True) and (
-            (combo["count"] >= 4 and combo["type"] == "group")
-            or (combo["count"] >= 5 and combo["type"] == "stairs")
-        ):
+        if self.rules.get("shibari") and self.prev_table_play:
+            if self._suits_match_lock(self.prev_table_play.get("suits", []), combo["suits"]):
+                if not self.locked_suits:
+                    self.locked_suits = list(combo["suits"])
+                    self._emit_event("cutin", "しばり発動！", seat=seat, sfx="special")
+
+        if self.rules.get("revolution") and combo["count"] >= 4:
             self.is_revolution = not self.is_revolution
-            triggered_rev = True
-            for s in range(4):
-                self.sort_hand(s)
+            txt = "革命発動！" if self.is_revolution else "革命返し！"
+            self._emit_event("cutin", txt, seat=seat, sfx="revolution")
 
-        triggered_11 = False
-        if self.rules.get("elevenBack", True) and combo.get("hasEleven") and not self.is_eleven_back:
-            self.is_eleven_back = True
-            triggered_11 = True
-            for s in range(4):
-                self.sort_hand(s)
+        if self.rules.get("elevenBack") and combo.get("containsEleven"):
+            self.is_eleven_back = not self.is_eleven_back
+            txt = "11バック発動！" if self.is_eleven_back else "11バック解除！"
+            self._emit_event("cutin", txt, seat=seat, sfx="special")
 
-        triggered_8 = bool(self.rules.get("eightGiri", True) and combo.get("hasEight"))
+        is_eight_giri = self.rules.get("eightGiri") and combo.get("containsEight")
+        self._emit_event("sfx", "", seat=seat, sfx="card")
 
-        if triggered_rev:
-            self._emit_event("cutin", "革命発動！(強さ逆転)" if self.is_revolution else "革命返し！", seat=seat, sfx="special")
-        elif triggered_spade3:
-            self._emit_event("cutin", "♠3 スペ3返し！", seat=seat, sfx="special")
-        elif triggered_8:
-            self._emit_event("cutin", "8切り！場流し", seat=seat, sfx="special")
-        elif triggered_11:
-            self._emit_event("cutin", "11バック！", seat=seat, sfx="special")
-        elif triggered_shibari:
-            self._emit_event("cutin", "しばり発動！", seat=seat, sfx="special")
-        else:
-            self._emit_event("sfx", "", seat=seat, sfx="card")
-
-        if len(self.hands[seat]) == 1:
-            self._emit_event("bubble", "ラスト1枚！", seat=seat)
-        elif len(self.hands[seat]) == 0 and seat not in self.finish_order:
+        if len(self.hands[seat]) == 0 and seat not in self.finish_order:
             self.finish_order.append(seat)
-            self._emit_event("bubble", "上がり！", seat=seat, sfx="special")
-            if self.rules.get("miyakoOchi", True) and len(self.finish_order) == 1:
-                if "大富豪" in self.seat_ranks:
-                    prev_df = self.seat_ranks.index("大富豪")
-                    if prev_df != seat and prev_df not in self.finish_order:
-                        self._emit_event("cutin", f"{self.seat_display_name(prev_df)}が都落ち！", seat=prev_df, sfx="joker")
-                        self.hands[prev_df] = []
-                        self.miyako_seat = prev_df
+            rank_idx = len(self.finish_order)
+            self._emit_event("bubble", f"{rank_idx}位上がり！", seat=seat, sfx="special")
 
-        active_seats = [
-            s for s in range(4)
-            if len(self.hands[s]) > 0 and s not in self.finish_order and s != self.miyako_seat
-        ]
-        if len(active_seats) <= 1:
-            for rem in active_seats:
+        active = [s for s in range(4) if len(self.hands[s]) > 0]
+        if len(active) <= 1:
+            for rem in active:
                 if rem not in self.finish_order:
                     self.finish_order.append(rem)
-            if self.miyako_seat is not None and self.miyako_seat not in self.finish_order:
-                self.finish_order.append(self.miyako_seat)
             self._conclude_round()
             return
 
-        if triggered_8 or triggered_spade3:
+        if is_eight_giri:
+            self._emit_event("cutin", "8切り！ ターン継続", seat=seat, sfx="special")
             self._clear_trick()
-            self.current_turn = seat if len(self.hands[seat]) > 0 else self._next_active_seat(seat)
+            if len(self.hands[seat]) > 0:
+                self.current_turn = seat
+            else:
+                self.current_turn = self._next_active_seat(seat)
             self.turn_since = time.time()
             return
 
@@ -682,13 +652,12 @@ class TrumpRoom:
         self._advance_daifugo_turn(seat)
 
     def _clear_trick(self) -> None:
-        self.prev_table_play = None
         self.table_play = None
-        self.is_eleven_back = False
+        self.prev_table_play = None
         self.locked_suits = None
         self.passed_seats.clear()
-        for s in range(4):
-            self.sort_hand(s)
+        if self.is_eleven_back:
+            self.is_eleven_back = False
 
     def _next_active_seat(self, from_seat: int) -> int:
         for step in range(1, 5):
@@ -698,22 +667,18 @@ class TrumpRoom:
         return 0
 
     def _advance_daifugo_turn(self, from_seat: int) -> None:
-        active = [s for s in range(4) if len(self.hands[s]) > 0 and s not in self.finish_order]
-        if len(active) <= 1:
-            for rem in active:
+        active_remaining = [s for s in range(4) if len(self.hands[s]) > 0 and s not in self.finish_order]
+        if len(active_remaining) <= 1:
+            for rem in active_remaining:
                 if rem not in self.finish_order:
                     self.finish_order.append(rem)
             self._conclude_round()
             return
 
-        next_s: Optional[int] = None
-        for step in range(1, 5):
+        next_s = None
+        for step in range(1, 4):
             cand = (from_seat + step) % 4
-            if cand == self.last_play_seat:
-                self._clear_trick()
-                next_s = cand if len(self.hands[cand]) > 0 else self._next_active_seat(cand)
-                break
-            if len(self.hands[cand]) > 0 and cand not in self.finish_order and cand not in self.passed_seats:
+            if cand in active_remaining and cand not in self.passed_seats:
                 next_s = cand
                 break
 
@@ -725,77 +690,133 @@ class TrumpRoom:
         self.turn_since = time.time()
 
     # ------------------------------------------------------------------------
-    # Babanuki Execution
+    # Poker Execution & Smart AI
     # ------------------------------------------------------------------------
-    def _discard_babanuki_pairs(self, seat: int, emit: bool = True) -> int:
-        by_num: Dict[int, dict] = {}
-        kept: List[dict] = []
-        discarded = 0
-        for c in self.hands[seat]:
-            if c.get("isJoker"):
-                kept.append(c)
-                continue
-            num = int(c["num"])
-            if num in by_num:
-                pair_c = by_num.pop(num)
-                discarded += 1
-                self.prev_table_play = self.table_play
-                self.table_play = {
-                    "seat": seat,
-                    "cards": [pair_c, c],
-                    "label": f"{self.seat_display_name(seat)}: {c['label']}ペア成立！",
-                }
-            else:
-                by_num[num] = c
-        kept.extend(by_num.values())
-        self.hands[seat] = kept
-        if emit and discarded > 0:
-            self._emit_event("bubble", "ペア成立！", seat=seat, sfx="special")
-        return discarded
+    def choose_poker_ai_exchange(self, seat: int) -> List[int]:
+        """Smart AI card exchange decision for 5-card poker."""
+        hand = self.hands[seat]
+        if len(hand) != 5:
+            return []
+        score, _, _ = eval_poker_5(hand)
+        # Straight or higher (Flush, Full House, 4 of a kind, Straight Flush): keep all 5 cards!
+        if score >= 5:
+            return []
+        ranks = [14 if c["num"] == 1 else int(c["num"]) for c in hand]
+        counts = Counter(ranks)
+        if score == 4:  # Three of a kind: keep the 3 matching cards, exchange 2 kickers
+            trip_rank = [r for r, cnt in counts.items() if cnt == 3][0]
+            return [i for i, c in enumerate(hand) if (14 if c["num"] == 1 else int(c["num"])) != trip_rank]
+        if score == 3:  # Two pair: keep the pairs, exchange 1 kicker
+            pair_ranks = [r for r, cnt in counts.items() if cnt == 2]
+            return [i for i, c in enumerate(hand) if (14 if c["num"] == 1 else int(c["num"])) not in pair_ranks]
+        if score == 2:  # One pair: keep the pair, exchange 3 kickers
+            pair_rank = [r for r, cnt in counts.items() if cnt == 2][0]
+            return [i for i, c in enumerate(hand) if (14 if c["num"] == 1 else int(c["num"])) != pair_rank]
+        # High Card (score == 1): check 4 to a flush
+        suits = [c["suit"] for c in hand]
+        s_counts = Counter(suits)
+        for s, cnt in s_counts.items():
+            if cnt == 4:
+                return [i for i, c in enumerate(hand) if c["suit"] != s]
+        # Keep highest 1 or 2 cards, exchange rest
+        sorted_indices = sorted(range(5), key=lambda i: ranks[i], reverse=True)
+        return sorted_indices[1:]
 
-    def get_babanuki_target(self, drawer_seat: int) -> Optional[int]:
-        for step in range(1, 4):
-            cand = (drawer_seat + step) % 4
-            if len(self.hands[cand]) > 0 and cand not in self.finish_order:
-                return cand
-        return None
-
-    def execute_babanuki_draw(self, drawer_seat: int, card_idx: int) -> None:
-        target_seat = self.get_babanuki_target(drawer_seat)
-        if target_seat is None or not self.hands[target_seat]:
+    def execute_poker_exchange(self, seat: int, card_indices: List[int]) -> None:
+        if self.mode != "poker" or self.phase != "playing":
             return
-        idx = max(0, min(len(self.hands[target_seat]) - 1, int(card_idx)))
-        drawn = self.hands[target_seat].pop(idx)
-        self.hands[drawer_seat].append(drawn)
-
-        if drawn.get("isJoker"):
-            self._emit_event("cutin", f"JOKER移動！ ({self.seat_display_name(target_seat)} -> {self.seat_display_name(drawer_seat)})", seat=drawer_seat, sfx="joker")
+        valid_indices = sorted(list({int(i) for i in card_indices if 0 <= int(i) < len(self.hands[seat])}), reverse=True)
+        exchanged_count = len(valid_indices)
+        if exchanged_count > 0:
+            for idx in valid_indices:
+                if idx < len(self.hands[seat]):
+                    self.hands[seat].pop(idx)
+            while len(self.hands[seat]) < 5 and self.draw_pile:
+                self.hands[seat].append(self.draw_pile.pop(0))
+            self.sort_hand(seat)
+            self._emit_event("bubble", f"{exchanged_count}枚交換！", seat=seat, sfx="card")
         else:
-            self._emit_event("sfx", "", seat=drawer_seat, sfx="card")
+            self._emit_event("bubble", "チェンジなし (勝負)", seat=seat, sfx="select")
 
-        self._discard_babanuki_pairs(drawer_seat, emit=True)
-        random.shuffle(self.hands[drawer_seat])
+        self.poker_exchange_done[seat] = True
 
+        # Find next player to exchange
+        next_seat = None
+        for step in range(1, 5):
+            cand = (seat + step) % 4
+            if not self.poker_exchange_done[cand]:
+                next_seat = cand
+                break
+
+        if next_seat is not None:
+            self.current_turn = next_seat
+            self.turn_since = time.time()
+        else:
+            # All 4 players done exchanging! Showdown!
+            self.execute_poker_showdown()
+
+    def execute_poker_showdown(self) -> None:
+        """Evaluate all hands, rank 1st to 4th, update rates, and conclude round."""
+        evals = [eval_poker_5(self.hands[s]) for s in range(4)]
+        ranked = sorted(range(4), key=lambda s: (evals[s][0], evals[s][2]), reverse=True)
+        self.finish_order = ranked
+
+        self.poker_showdown_data = []
+        for rank_idx, s in enumerate(ranked):
+            score, hand_name, _ = evals[s]
+            self.seat_ranks[s] = hand_name
+            self.poker_showdown_data.append({
+                "place": rank_idx + 1,
+                "seat": s,
+                "name": self.seat_display_name(s),
+                "handName": hand_name,
+                "score": score,
+                "cards": list(self.hands[s]),
+                "rate": self.seat_rate(s),
+            })
+
+        self.table_play = {
+            "seat": ranked[0],
+            "cards": list(self.hands[ranked[0]]),
+            "label": f"勝者: {self.seat_display_name(ranked[0])}【{evals[ranked[0]][1]}】",
+        }
+
+        # Rate adjustments: 1st: +20, 2nd: +8, 3rd: -8, 4th: -16
+        rate_deltas = {ranked[0]: 20, ranked[1]: 8, ranked[2]: -8, ranked[3]: -16}
+        self.rate_changes = {}
         for s in range(4):
-            if len(self.hands[s]) == 0 and s not in self.finish_order:
-                self.finish_order.append(s)
-                self._emit_event("bubble", "抜け！", seat=s, sfx="special")
+            delta = rate_deltas.get(s, 0)
+            pid = self.seats[s]
+            if pid and pid in self.participants:
+                name = self.participants[pid].get("name", "")
+                new_rate = update_user_rate(name, delta, is_win=(s == ranked[0]))
+                self.rate_changes[s] = {"delta": delta, "newRate": new_rate}
 
-        active = [s for s in range(4) if len(self.hands[s]) > 0]
-        if len(active) <= 1:
-            for rem in active:
-                if rem not in self.finish_order:
-                    self.finish_order.append(rem)
-            self._conclude_round()
-            return
+        self.phase = "round_end"
+        self.phase_since = time.time()
+        winner_name = self.seat_display_name(ranked[0])
+        winner_hand = evals[ranked[0]][1]
+        self._emit_event("cutin", f"勝負あり！ 1位: {winner_name} ({winner_hand})", sfx="special")
 
-        self.current_turn = self._next_active_seat(drawer_seat)
-        self.turn_since = time.time()
-
+    # ------------------------------------------------------------------------
+    # Round Conclusion & Rate Update
+    # ------------------------------------------------------------------------
     def _conclude_round(self) -> None:
-        titles = RANK_TITLES_DAIFUGO if self.mode == "daifugo" else RANK_TITLES_BABANUKI
+        titles = RANK_TITLES_DAIFUGO if self.mode == "daifugo" else RANK_TITLES_POKER
         for idx, s in enumerate(self.finish_order[:4]):
             self.seat_ranks[s] = titles[idx] if idx < len(titles) else "平民"
+
+        # Update rates for Daifugo
+        rate_deltas = {self.finish_order[0]: 20, self.finish_order[1]: 8, self.finish_order[2]: -8, self.finish_order[3]: -16}
+        self.rate_changes = {}
+        for s in range(4):
+            delta = rate_deltas.get(s, 0)
+            pid = self.seats[s]
+            if pid and pid in self.participants:
+                name = self.participants[pid].get("name", "")
+                new_rate = update_user_rate(name, delta, is_win=(s == self.finish_order[0]))
+                self.rate_changes[s] = {"delta": delta, "newRate": new_rate}
+
         self.phase = "round_end"
         self.phase_since = time.time()
         winner_name = self.seat_display_name(self.finish_order[0]) if self.finish_order else ""
@@ -810,16 +831,23 @@ class TrumpRoom:
             if self.seats[s] == pid:
                 my_seat = s
                 break
-        is_spectator = my_seat is None
+        is_spectator = (my_seat is None)
         perspective_seat = my_seat if my_seat is not None else 0
 
         human_seats = sum(1 for s in range(4) if self.is_seat_human(s))
         spectator_list = [p["name"] for k, p in self.participants.items() if k not in self.seats]
+        p_obj = self.participants.get(pid, {})
+        waiting_for_next = bool(p_obj.get("waiting_for_next"))
+        is_playing = (self.phase != "round_end")
 
         seats_info = []
         for s in range(4):
             rel_pos = (s - perspective_seat) % 4  # 0=Bottom(You), 1=Left, 2=Top, 3=Right
             fin_idx = self.finish_order.index(s) + 1 if s in self.finish_order else 0
+            showdown_cards = None
+            if self.mode == "poker" and self.phase == "round_end":
+                showdown_cards = self.hands[s]
+
             seats_info.append({
                 "seat": s,
                 "relPos": rel_pos,
@@ -830,39 +858,31 @@ class TrumpRoom:
                 "cardCount": len(self.hands[s]),
                 "finishRank": fin_idx,
                 "isTurn": (self.phase == "playing" and self.current_turn == s),
+                "rate": self.seat_rate(s),
+                "showdownCards": showdown_cards,
+                "exchangeDone": self.poker_exchange_done[s] if self.mode == "poker" else False,
             })
 
         my_hand = self.hands[perspective_seat] if not is_spectator else []
 
         playable_ids: List[str] = []
-        suggested_ids: List[str] = []
         if not is_spectator and self.phase == "playing" and self.current_turn == my_seat and self.mode == "daifugo":
             legal = self.generate_legal_combos(my_seat)
-            pset = {c["id"] for m in legal for c in m["cards"]}
-            playable_ids = list(pset)
-            best = self.choose_best_ai_move(my_seat)
-            if best:
-                suggested_ids = [c["id"] for c in best["cards"]]
-
-        baba_target = None
-        if self.mode == "babanuki" and self.phase == "playing":
-            t_seat = self.get_babanuki_target(self.current_turn)
-            if t_seat is not None:
-                baba_target = {
-                    "targetSeat": t_seat,
-                    "targetName": self.seat_display_name(t_seat),
-                    "cardCount": len(self.hands[t_seat]),
-                }
+            playable_ids = list({c["id"] for m in legal for c in m["cards"]})
 
         standings = []
         if self.phase == "round_end":
             for idx, s in enumerate(self.finish_order[:4]):
+                delta_info = self.rate_changes.get(s, {})
                 standings.append({
                     "place": idx + 1,
                     "seat": s,
                     "name": self.seat_display_name(s),
                     "rankTitle": self.seat_ranks[s],
                     "isMe": (s == my_seat),
+                    "rate": self.seat_rate(s),
+                    "rateDelta": delta_info.get("delta", 0),
+                    "newRate": delta_info.get("newRate", self.seat_rate(s)),
                 })
 
         return {
@@ -870,6 +890,8 @@ class TrumpRoom:
             "roomTitle": self.title,
             "roundNumber": self.round_number,
             "phase": self.phase,
+            "isMatchInProgress": is_playing,
+            "waitingForNextGame": waiting_for_next,
             "mySeat": my_seat,
             "perspectiveSeat": perspective_seat,
             "isSpectator": is_spectator,
@@ -885,26 +907,27 @@ class TrumpRoom:
             "seats": seats_info,
             "myHand": my_hand,
             "playableIds": playable_ids,
-            "suggestedIds": suggested_ids,
             "tablePlay": self.table_play,
             "prevTablePlay": self.prev_table_play,
-            "babaTarget": baba_target,
+            "pokerShowdown": self.poker_showdown_data,
             "standings": standings,
             "events": self.recent_events[-8:],
         }
 
 
-# Singleton 1 Room per Rule Mode
+# ============================================================================
+# Singleton Rooms (Daifugo & Poker)
+# ============================================================================
 ROOMS: Dict[str, TrumpRoom] = {
     "daifugo": TrumpRoom(
         "daifugo",
         "大富豪ルーム",
-        "革命・8切り・11バック・しばり・スペ3返し対応（4人対戦＋観戦）",
+        "革命・8切り・11バック・しばり・スペ3返し対応（4人対戦＋観戦・レート対応）",
     ),
-    "babanuki": TrumpRoom(
-        "babanuki",
-        "ババ抜きルーム",
-        "隣の人の手札から1枚引いてペアを揃えるシンプル心理戦（4人対戦＋観戦）",
+    "poker": TrumpRoom(
+        "poker",
+        "ポーカールーム",
+        "本格5枚ドローポーカー！カード交換と心理戦で最強の役を目指せ（4人対戦＋観戦・レート対応）",
     ),
 }
 
@@ -937,7 +960,7 @@ async def _rooms_background_loop() -> None:
                     continue
 
                 if room.phase == "round_end":
-                    if now - room.phase_since >= 6.0:
+                    if now - room.phase_since >= 7.0:
                         room.round_number += 1
                         room._start_new_round(reset_ranks=False)
                         should_broadcast = True
@@ -945,24 +968,23 @@ async def _rooms_background_loop() -> None:
                     turn_seat = room.current_turn
                     is_human_turn = room.is_seat_human(turn_seat)
                     elapsed = now - room.turn_since
-                    if (not is_human_turn and elapsed >= 0.9) or (is_human_turn and elapsed >= 25.0):
+                    if (not is_human_turn and elapsed >= 1.0) or (is_human_turn and elapsed >= 25.0):
                         if room.mode == "daifugo":
                             mv = room.choose_best_ai_move(turn_seat)
                             if mv:
                                 room.execute_daifugo_play(turn_seat, mv)
                             else:
-                                room.execute_daifugo_pass(turn_seat)
-                        else:
-                            t_seat = room.get_babanuki_target(turn_seat)
-                            if t_seat is not None and room.hands[t_seat]:
-                                t_hand = room.hands[t_seat]
-                                pick_idx = random.randint(0, len(t_hand) - 1)
-                                if len(t_hand) >= 2 and random.random() < 0.65:
-                                    non_j = [i for i, c in enumerate(t_hand) if not c.get("isJoker")]
-                                    if non_j:
-                                        pick_idx = random.choice(non_j)
-                                room.execute_babanuki_draw(turn_seat, pick_idx)
-                        should_broadcast = True
+                                if room.table_play is not None:
+                                    room.execute_daifugo_pass(turn_seat)
+                            should_broadcast = True
+                        elif room.mode == "poker":
+                            if not room.poker_exchange_done[turn_seat]:
+                                if is_human_turn:
+                                    room.execute_poker_exchange(turn_seat, [])
+                                else:
+                                    discards = room.choose_poker_ai_exchange(turn_seat)
+                                    room.execute_poker_exchange(turn_seat, discards)
+                                should_broadcast = True
 
             if should_broadcast:
                 await _broadcast_room(room)
@@ -980,19 +1002,114 @@ def _ensure_bg_loop() -> None:
 
 
 def _get_room(mode: str) -> TrumpRoom:
-    m = (mode or "daifugo").strip().lower()
-    return ROOMS["babanuki"] if m == "babanuki" else ROOMS["daifugo"]
+    m = (mode or "").lower().strip()
+    return ROOMS["poker"] if m == "poker" else ROOMS["daifugo"]
 
 
+# ============================================================================
+# API Routes (Auth Integration with OpenChat + Lobby + State + Actions)
+# ============================================================================
 @router.get("/trump/api/lobby")
 async def trump_lobby_info():
     _ensure_bg_loop()
-    rooms_list = []
-    for key in ("daifugo", "babanuki"):
+    rooms_data = []
+    for key in ("daifugo", "poker"):
         r = ROOMS[key]
         async with r.lock:
-            rooms_list.append(r.get_summary())
-    return JSONResponse({"rooms": rooms_list}, headers={"Cache-Control": "no-store"})
+            rooms_data.append(r.get_summary())
+    return JSONResponse({"rooms": rooms_data}, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/trump/api/auth/login")
+async def trump_auth_login(request: Request):
+    """Unified OpenChat & Trump authentication (Shared PBKDF2 Password + Rate)."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    username = _clean_str(data.get("username") or data.get("name") or "", 24)
+    password = _clean_str(data.get("password") or data.get("pass") or "", 64)
+    cid = _clean_str(data.get("clientId") or "", 64)
+
+    username = unicodedata.normalize("NFKC", str(username or "")).strip()
+    username = re.sub(r"[\s\u200b-\u200d\ufeff]+", " ", username).strip()
+    password = str(password or "").strip()
+
+    if not username:
+        return JSONResponse({"ok": False, "error": "名前を入力してください"}, status_code=400)
+    if len(username) > 20:
+        return JSONResponse({"ok": False, "error": "名前は20文字以内で入力してください"}, status_code=400)
+    if not password:
+        return JSONResponse({"ok": False, "error": "パスワードを入力してください"}, status_code=400)
+    if len(password) < 4:
+        return JSONResponse({"ok": False, "error": "パスワードは4文字以上で入力してください"}, status_code=400)
+
+    norm = _normalize_name(username)
+    if not norm:
+        return JSONResponse({"ok": False, "error": "有効な名前を入力してください"}, status_code=400)
+    if norm in ("SYS", "SYSTEM", "ADMIN", "ADMINISTRATOR", "MODERATOR", "GOOGLE", "SCHOOLHUB"):
+        return JSONResponse({"ok": False, "error": "その名前は予約されており使用できません"}, status_code=400)
+
+    # Check against shared OpenChat accounts database
+    stored = _CHAT_USERS.get(norm)
+    if stored:
+        salt = str(stored.get("salt") or "")
+        exp_hash = str(stored.get("hash") or "")
+        if not _verify_chat_password(password, salt, exp_hash):
+            return JSONResponse({"ok": False, "error": "パスワードが一致しません。正しいパスワードを入力してください。"}, status_code=401)
+        stored["last_login"] = time.time()
+        if cid:
+            stored["clientId"] = cid
+    else:
+        # Register new user in shared account system
+        salt = secrets.token_hex(16)
+        h = _hash_chat_password(password, salt)
+        stored = {
+            "username": username,
+            "salt": salt,
+            "hash": h,
+            "created_at": time.time(),
+            "last_login": time.time(),
+            "clientId": cid,
+            "trumpRate": 1500,
+            "trumpWins": 0,
+            "trumpLosses": 0,
+            "trumpGames": 0,
+        }
+        _CHAT_USERS[norm] = stored
+
+    _save_chat_users()
+    token = _sign_auth_token(username)
+    rate = int(stored.get("trumpRate") or 1500)
+    return JSONResponse({
+        "ok": True,
+        "username": username,
+        "token": token,
+        "rate": rate,
+        "wins": int(stored.get("trumpWins") or 0),
+        "games": int(stored.get("trumpGames") or 0),
+    })
+
+
+@router.get("/trump/api/auth/me")
+async def trump_auth_me(request: Request):
+    """Retrieve authenticated user profile and current rate."""
+    token = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not token:
+        token = request.query_params.get("token", "").strip()
+    verified = _verify_auth_token(token) if token else None
+    if not verified:
+        return JSONResponse({"ok": False, "error": "未ログイン"}, status_code=401)
+    username = verified.get("username", "")
+    norm = _normalize_name(username)
+    stored = _CHAT_USERS.get(norm, {})
+    return JSONResponse({
+        "ok": True,
+        "username": username,
+        "rate": int(stored.get("trumpRate") or 1500),
+        "wins": int(stored.get("trumpWins") or 0),
+        "games": int(stored.get("trumpGames") or 0),
+    })
 
 
 @router.get("/trump/api/state/{mode}")
@@ -1001,12 +1118,16 @@ async def trump_get_state(mode: str, request: Request):
     room = _get_room(mode)
     pid = (request.query_params.get("pid") or "").strip() or ("p_" + uuid.uuid4().hex[:12])
     name = (request.query_params.get("name") or "").strip()
-    spectate_param = request.query_params.get("spectate")
-    prefer_spec = (spectate_param == "1") if spectate_param is not None else None
+    token = (request.query_params.get("token") or "").strip()
+    if token:
+        v = _verify_auth_token(token)
+        if v:
+            name = v.get("username", name)
+
     async with room.lock:
-        room.touch_participant(pid, name=name if name else None, prefer_spectate=prefer_spec)
-        data = room.build_view_for(pid)
-    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+        room.touch_participant(pid, name=name if name else None)
+        view = room.build_view_for(pid)
+    return JSONResponse(view, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/trump/api/action/{mode}")
@@ -1017,16 +1138,15 @@ async def trump_post_action(mode: str, request: Request):
         body = await request.json()
     except Exception:
         body = {}
-
     pid = str(body.get("pid") or "").strip() or ("p_" + uuid.uuid4().hex[:12])
     name = str(body.get("name") or "").strip()
-    act = str(body.get("action") or "").strip()
+    token = str(body.get("token") or "").strip()
+    if token:
+        v = _verify_auth_token(token)
+        if v:
+            name = v.get("username", name)
 
-    if act == "leave":
-        async with room.lock:
-            room.remove_participant(pid)
-        await _broadcast_room(room)
-        return JSONResponse({"ok": True}, headers={"Cache-Control": "no-store"})
+    act = str(body.get("action") or "").strip()
 
     async with room.lock:
         room.touch_participant(pid, name=name if name else None)
@@ -1051,6 +1171,10 @@ async def _handle_room_action_locked(room: TrumpRoom, pid: str, act: str, body: 
 
     elif act == "toggle_spectate":
         want_spec = bool(body.get("spectate"))
+        if not want_spec and room.phase != "round_end":
+            # 試合が終わるまで新規の人入れないように: Match in progress
+            room._emit_event("bubble", "試合進行中のため終了まで参加できません", seat=-1)
+            return
         room.touch_participant(pid, prefer_spectate=want_spec)
 
     elif act == "play" and room.mode == "daifugo" and room.phase == "playing" and my_seat == room.current_turn:
@@ -1064,13 +1188,12 @@ async def _handle_room_action_locked(room: TrumpRoom, pid: str, act: str, body: 
         if room.table_play is not None:
             room.execute_daifugo_pass(my_seat)
 
-    elif act == "draw" and room.mode == "babanuki" and room.phase == "playing" and my_seat == room.current_turn:
-        idx = int(body.get("cardIndex") or 0)
-        room.execute_babanuki_draw(my_seat, idx)
+    elif act == "poker_exchange" and room.mode == "poker" and room.phase == "playing" and my_seat == room.current_turn:
+        card_indices = body.get("cardIndices") or []
+        room.execute_poker_exchange(my_seat, card_indices)
 
-    elif act == "shuffle" and room.mode == "babanuki" and my_seat is not None:
-        random.shuffle(room.hands[my_seat])
-        room._emit_event("sfx", "", seat=my_seat, sfx="card")
+    elif act == "poker_stay" and room.mode == "poker" and room.phase == "playing" and my_seat == room.current_turn:
+        room.execute_poker_exchange(my_seat, [])
 
     elif act == "next_round" and room.phase == "round_end":
         room.round_number += 1
@@ -1091,6 +1214,12 @@ async def trump_ws_endpoint(websocket: WebSocket, mode: str):
     room = _get_room(mode)
     pid = (websocket.query_params.get("pid") or "").strip() or ("p_" + uuid.uuid4().hex[:12])
     name = (websocket.query_params.get("name") or "").strip()
+    token = (websocket.query_params.get("token") or "").strip()
+    if token:
+        v = _verify_auth_token(token)
+        if v:
+            name = v.get("username", name)
+
     spectate_param = websocket.query_params.get("spectate")
     prefer_spec = (spectate_param == "1") if spectate_param is not None else None
     await websocket.accept()
@@ -1117,1437 +1246,1088 @@ async def trump_ws_endpoint(websocket: WebSocket, mode: str):
 
 
 # ============================================================================
-# Simple, Clean, Easy-to-Play HTML UI (Room Select Lobby + 4-Player Table)
+# HTML UI (Lobby + Table + Deal Motion + Rate Display + Shared Auth Modal)
 # ============================================================================
-
-_HTML_PAGE = r"""<!doctype html>
-<html lang="ja" data-theme="dark">
+TRUMP_HTML = """<!DOCTYPE html>
+<html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Google School Hub — トランプ</title>
-<link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="stylesheet" href="/design-system/m3.css">
-<script src="/design-system/m3.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>School Hub トランプ (大富豪・ポーカー)</title>
+<link rel="icon" href="/favicon.ico">
 <style>
 :root {
-  --bg: var(--md-sys-color-surface);
-  --surface: var(--md-sys-color-surface-container);
-  --table-green: #14532d;
-  --table-border: #3f230f;
-  --text: var(--md-sys-color-on-surface);
-  --muted: var(--md-sys-color-on-surface-variant);
-  --accent: var(--md-sys-color-primary);
-  --gold: #f59e0b;
+  --felt-bg: radial-gradient(circle at 50% 45%, #14532d 0%, #064e3b 50%, #022c22 100%);
+  --table-border: #15803d;
+  --panel-bg: rgba(15, 23, 42, 0.94);
+  --card-w: 66px;
+  --card-h: 96px;
+  --primary: #38bdf8;
+  --accent: #f59e0b;
+  --m3-easing: cubic-bezier(0.16, 1, 0.3, 1);
 }
-* { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
-  margin: 0; padding: 0;
-  width: 100%; height: 100%;
-  height: 100dvh;
-  overflow: hidden;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--md-sys-typescale-font-plain);
-  display: flex;
-  flex-direction: column;
+  margin: 0; padding: 0; width: 100%; height: 100%;
+  background: #090d16; color: #f8fafc;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  overflow: hidden; user-select: none;
 }
+.app-container {
+  display: flex; flex-direction: column; width: 100vw; height: 100dvh; position: relative;
+}
+/* Top App Bar */
+.top-nav {
+  height: 52px; background: rgba(10, 15, 29, 0.96); border-bottom: 1px solid rgba(255,255,255,0.08);
+  display: flex; align-items: center; justify-content: space-between; padding: 0 16px; z-index: 50; flex-shrink: 0;
+}
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 15px; color: #38bdf8; }
+.brand a { color: inherit; text-decoration: none; display: flex; align-items: center; gap: 6px; }
+.nav-actions { display: flex; align-items: center; gap: 10px; }
+.user-chip {
+  display: flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.06);
+  padding: 4px 12px; border-radius: 9999px; font-size: 13px; font-weight: 600; border: 1px solid rgba(255,255,255,0.1);
+  cursor: pointer; transition: background 0.2s;
+}
+.user-chip:hover { background: rgba(255,255,255,0.12); }
+.rate-badge {
+  background: linear-gradient(135deg, #f59e0b, #d97706); color: #000; font-weight: 800;
+  padding: 2px 7px; border-radius: 9999px; font-size: 11px; letter-spacing: 0.3px;
+}
+.btn-nav {
+  background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.14); color: #cbd5e1;
+  padding: 6px 12px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+}
+.btn-nav:hover { background: rgba(255,255,255,0.16); color: #fff; }
 
-/* =========================================================================
- * 1. Top Header Bar (M3 Top App Bar)
- * ========================================================================= */
-.topbar {
-  flex: 0 0 auto;
-  min-height: 56px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 16px;
-  gap: 8px;
-  background: var(--md-sys-color-surface-container);
-  border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  z-index: 50;
-}
-.topbar-left, .topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.btn-top {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: var(--md-sys-shape-corner-full);
-  background: var(--md-sys-color-secondary-container);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-on-secondary-container);
-  text-decoration: none;
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: filter 0.15s;
-}
-.btn-top:hover { filter: brightness(0.95); }
-.room-badge {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--md-sys-color-primary);
-  margin-left: 4px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.meta-tag {
-  font-size: 12px;
-  font-weight: 700;
-  padding: 4px 12px;
-  border-radius: var(--md-sys-shape-corner-full);
-  background: var(--md-sys-color-surface-container-high);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  color: var(--md-sys-color-on-surface-variant);
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-/* =========================================================================
- * 2. Room Selection Lobby Screen (M3 Surface Hierarchy)
- * ========================================================================= */
+/* 1. LOBBY SCREEN */
 .lobby-screen {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  background: var(--md-sys-color-surface);
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 20px;
-  z-index: 45;
-  overflow-y: auto;
+  flex: 1; overflow-y: auto; padding: 24px 16px 40px; display: flex; flex-direction: column; align-items: center;
+  background: radial-gradient(circle at 50% 20%, #1e293b 0%, #090d16 80%);
 }
-.lobby-screen.hidden { display: none; }
-.lobby-container {
-  width: min(94vw, 720px);
-  margin: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-.lobby-header {
-  text-align: center;
-}
-.lobby-header h1 {
-  margin: 0 0 8px;
-  font-size: 26px;
-  font-weight: 800;
-  color: var(--md-sys-color-on-surface);
-}
-.lobby-header p {
-  margin: 0;
-  font-size: 14px;
-  color: var(--muted);
-}
+.lobby-container { width: 100%; max-width: 820px; }
+.lobby-hero { text-align: center; margin-bottom: 24px; }
+.lobby-hero h1 { font-size: 26px; font-weight: 900; margin: 0 0 8px; color: #f8fafc; }
+.lobby-hero p { color: #94a3b8; font-size: 14px; margin: 0; line-height: 1.5; }
 
-.name-box {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 12px;
-  background: var(--md-sys-color-surface-container-low);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  padding: 14px 18px;
-  border-radius: var(--md-sys-shape-corner-large);
-  box-shadow: var(--md-sys-elevation-1);
+.auth-callout {
+  background: rgba(56, 189, 248, 0.08); border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 12px; padding: 12px 16px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; font-size: 13px; color: #bae6fd;
 }
-.name-box label {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--md-sys-color-on-surface-variant);
-  white-space: nowrap;
-  flex-shrink: 0;
+.btn-primary-small {
+  background: #0284c7; color: #fff; border: none; padding: 6px 14px; border-radius: 9999px; font-weight: 700;
+  font-size: 12px; cursor: pointer; white-space: nowrap; transition: background 0.2s;
 }
-.name-input {
-  background: var(--md-sys-color-surface-container-lowest);
-  border: 1px solid var(--md-sys-color-outline);
-  color: var(--md-sys-color-on-surface);
-  padding: 8px 14px;
-  border-radius: var(--md-sys-shape-corner-small);
-  font-size: 14px;
-  font-weight: 700;
-  flex: 1 1 140px;
-  max-width: 220px;
-  min-width: 110px;
-  outline: none;
-}
-.name-input:focus {
-  border-color: var(--md-sys-color-primary);
-  box-shadow: 0 0 0 2px var(--md-sys-color-primary-container);
-}
+.btn-primary-small:hover { background: #0369a1; }
 
-.room-cards-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 16px;
-}
+.room-cards-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
 .room-card {
-  background: var(--md-sys-color-surface-container-low);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-corner-extra-large);
-  padding: 22px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 14px;
-  box-shadow: var(--md-sys-elevation-1);
-  transition: border-color 0.18s, transform 0.18s, box-shadow 0.18s;
+  background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(255,255,255,0.1); border-radius: 16px;
+  padding: 20px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3); transition: transform 0.2s, border-color 0.2s;
 }
-.room-card:hover {
-  border-color: var(--md-sys-color-primary);
-  transform: translateY(-2px);
-  box-shadow: var(--md-sys-elevation-2);
+.room-card:hover { transform: translateY(-3px); border-color: rgba(56, 189, 248, 0.4); }
+.room-card-title { font-size: 18px; font-weight: 800; color: #f8fafc; display: flex; align-items: center; justify-content: space-between; }
+.room-card-desc { font-size: 13px; color: #94a3b8; line-height: 1.5; margin: 4px 0 10px; }
+.room-status-badge {
+  font-size: 11px; padding: 3px 8px; border-radius: 9999px; font-weight: 700;
 }
-.room-card-title {
-  font-size: 20px;
-  font-weight: 800;
-  margin: 0 0 6px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.badge-playing { background: rgba(245, 158, 11, 0.2); color: #f59e0b; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-open { background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); }
+
+.room-players-list {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; font-size: 12px; color: #cbd5e1;
 }
-.room-card-desc {
-  font-size: 13px;
-  color: var(--muted);
-  line-height: 1.5;
-  margin: 0;
+.player-tag {
+  background: rgba(255,255,255,0.06); padding: 3px 8px; border-radius: 6px; display: inline-flex; align-items: center; gap: 4px;
 }
-.room-stats-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.stat-pill {
-  font-size: 12px;
-  font-weight: 700;
-  padding: 4px 10px;
-  border-radius: var(--md-sys-shape-corner-full);
-  background: var(--md-sys-color-tertiary-container);
-  color: var(--md-sys-color-on-tertiary-container);
-  white-space: nowrap;
-}
-.stat-pill.full {
-  background: var(--md-sys-color-warning-container);
-  color: var(--md-sys-color-on-warning-container);
-}
-.stat-pill.spec {
-  background: var(--md-sys-color-secondary-container);
-  color: var(--md-sys-color-on-secondary-container);
-}
-.room-members {
-  font-size: 12px;
-  color: var(--md-sys-color-on-surface-variant);
-  background: var(--md-sys-color-surface-container-high);
-  padding: 8px 12px;
-  border-radius: var(--md-sys-shape-corner-medium);
-}
-.room-actions {
-  display: flex;
-  gap: 8px;
-}
+.room-actions { display: flex; gap: 10px; }
 .btn-join-room {
-  flex: 1;
-  padding: 11px 16px;
-  border-radius: var(--md-sys-shape-corner-full);
-  border: 0;
-  font-size: 14px;
-  font-weight: 700;
-  cursor: pointer;
-  background: var(--md-sys-color-primary);
-  color: var(--md-sys-color-on-primary);
-  white-space: nowrap;
-  transition: filter 0.15s;
+  flex: 2; background: linear-gradient(135deg, #0284c7, #0369a1); color: #fff; border: none;
+  padding: 10px 16px; border-radius: 10px; font-weight: 800; font-size: 14px; cursor: pointer; transition: all 0.2s;
 }
-.btn-join-room:hover { filter: brightness(1.06); }
+.btn-join-room:hover { filter: brightness(1.1); transform: translateY(-1px); }
 .btn-spec-room {
-  padding: 11px 16px;
-  border-radius: var(--md-sys-shape-corner-full);
-  border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface-container-highest);
-  color: var(--md-sys-color-on-surface);
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
+  flex: 1; background: rgba(255,255,255,0.08); color: #cbd5e1; border: 1px solid rgba(255,255,255,0.15);
+  padding: 10px 14px; border-radius: 10px; font-weight: 700; font-size: 13px; cursor: pointer; transition: all 0.2s;
 }
-.btn-spec-room:hover { filter: brightness(0.96); }
+.btn-spec-room:hover { background: rgba(255,255,255,0.16); color: #fff; }
 
-/* =========================================================================
- * 3. Simple, Easy-to-Play 4-Player Game Screen
- * ========================================================================= */
-.game-screen {
-  position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  background: var(--bg);
-  padding: 10px 14px 12px;
-  overflow: hidden;
-}
-.game-screen.hidden { display: none; }
-
-/* Table Board Area (Holds North, West, East, and Center Play Area) */
+/* 2. GAME TABLE SCREEN */
+.game-screen { flex: 1; display: flex; flex-direction: column; position: relative; background: var(--felt-bg); }
 .table-board {
-  position: relative;
-  flex: 1 1 220px;
-  min-height: 190px;
-  width: min(100%, 980px);
-  margin: 0 auto;
-  background: radial-gradient(ellipse at center, #166534 0%, #14532d 70%, #064e3b 100%);
-  border: 8px solid #451a03;
-  border-radius: 28px;
-  box-shadow: inset 0 0 40px rgba(0,0,0,0.45), var(--md-sys-elevation-3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  overflow: hidden;
+  flex: 1; position: relative; width: 100%; height: 100%; overflow: hidden;
+  box-shadow: inset 0 0 100px rgba(0,0,0,0.6);
 }
 
-/* Status Pills at Top of Table */
-.table-rules-bar {
-  position: absolute;
-  top: 8px;
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  gap: 6px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  max-width: 94%;
-  justify-content: center;
-  z-index: 15;
-}
-.status-pill {
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 800;
-  background: rgba(15, 23, 42, 0.88);
-  border: 1px solid rgba(255,255,255,0.22);
-  color: #fde047;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.status-pill.alert {
-  background: var(--md-sys-color-error);
-  color: var(--md-sys-color-on-error);
-  border-color: var(--md-sys-color-error-container);
+/* Match In Progress Lock Banner */
+.match-lock-banner {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(234, 88, 12, 0.92); color: #fff; padding: 6px 16px; border-radius: 9999px;
+  font-size: 12px; font-weight: 800; z-index: 30; box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  display: flex; align-items: center; gap: 6px; letter-spacing: 0.3px;
 }
 
-/* Seated Opponents (Top, Left, Right) */
+/* Opponent Seats */
 .opp-seat {
-  position: absolute;
-  background: rgba(15, 23, 42, 0.86);
-  border: 2px solid rgba(255,255,255,0.18);
-  border-radius: 14px;
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 155px;
-  color: #f8fafc;
-  z-index: 10;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  position: absolute; display: flex; align-items: center; gap: 10px;
+  background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(8px);
+  padding: 6px 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,0.12);
+  color: #fff; z-index: 20; transition: border-color 0.2s, box-shadow 0.2s;
 }
 .opp-seat.active-turn {
-  border-color: #fde047;
-  box-shadow: 0 0 0 3px rgba(253, 224, 71, 0.45);
+  border-color: #f59e0b; box-shadow: 0 0 16px rgba(245, 158, 11, 0.5);
 }
-.opp-north { top: 44px; left: 50%; transform: translateX(-50%); }
-.opp-west  { left: 14px; top: 50%; transform: translateY(-50%); }
-.opp-east  { right: 14px; top: 50%; transform: translateY(-50%); }
+.opp-north { top: 12px; left: 50%; transform: translateX(-50%); }
+.opp-west { left: 12px; top: 38%; transform: translateY(-50%); flex-direction: column; text-align: center; }
+.opp-east { right: 12px; top: 38%; transform: translateY(-50%); flex-direction: column; text-align: center; }
 
 .opp-avatar {
-  width: 40px; height: 40px;
-  border-radius: 50%;
-  background: #334155;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 22px;
-  flex-shrink: 0;
+  width: 38px; height: 38px; border-radius: 50%; background: #334155; display: flex;
+  align-items: center; justify-content: center; font-weight: 800; font-size: 15px; border: 2px solid #64748b;
 }
-.opp-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.opp-name-line {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 13px;
-  font-weight: 800;
-  white-space: nowrap;
-}
-.opp-rank {
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: rgba(245, 158, 11, 0.25);
-  color: #fde047;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.opp-cards-left {
-  font-size: 12px;
-  font-weight: 800;
-  color: #cbd5e1;
-  white-space: nowrap;
-}
-.opp-cards-left.danger {
-  color: #fca5a5;
-}
-.opp-bubble {
-  position: absolute;
-  top: -28px;
-  left: 50%;
-  transform: translateX(-50%);
-  background: #fff;
-  color: #0f172a;
-  font-size: 12px;
-  font-weight: 900;
-  padding: 3px 10px;
-  border-radius: 999px;
-  white-space: nowrap;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
-  display: none;
-}
-.opp-bubble.show { display: block; }
+.opp-info { display: flex; flex-direction: column; font-size: 12px; }
+.opp-name-line { display: flex; align-items: center; gap: 6px; font-weight: 700; }
+.opp-rate-tag { font-size: 11px; color: #f59e0b; font-weight: 800; }
+.opp-rank-tag { font-size: 10px; background: rgba(255,255,255,0.12); padding: 1px 5px; border-radius: 4px; }
+.opp-cards-count { font-size: 11px; color: #94a3b8; font-weight: 600; margin-top: 2px; }
 
-/* Center Field (Played Cards OR Babanuki Draw Picker) */
+/* Opponent Showdown Hand Preview (in Poker showdown) */
+.opp-showdown-cards { display: flex; gap: 3px; margin-top: 4px; }
+
+/* Center Play Area */
 .center-field {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  z-index: 12;
-  padding: 12px;
+  position: absolute; top: 48%; left: 50%; transform: translate(-50%, -50%);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 10; pointer-events: none; width: 90%; max-width: 640px;
 }
-.played-cards-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 108px;
-}
+.played-cards-row { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
 .play-caption {
-  font-size: 13px;
-  font-weight: 800;
-  color: #fef08a;
-  background: rgba(15, 23, 42, 0.85);
-  padding: 4px 14px;
-  border-radius: 999px;
-  white-space: nowrap;
+  margin-top: 10px; font-size: 14px; font-weight: 800; color: #fde047; text-shadow: 0 2px 4px rgba(0,0,0,0.8);
+  background: rgba(0,0,0,0.6); padding: 4px 14px; border-radius: 9999px;
+}
+.poker-status-prompt {
+  font-size: 14px; font-weight: 800; color: #38bdf8; background: rgba(15, 23, 42, 0.88);
+  padding: 8px 18px; border-radius: 9999px; border: 1px solid rgba(56, 189, 248, 0.3);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4); text-align: center;
 }
 
-/* Babanuki Pick Cards in Center */
-.baba-draw-box {
-  background: rgba(15, 23, 42, 0.92);
-  border: 2px solid #fde047;
-  border-radius: 16px;
-  padding: 14px 18px;
-  text-align: center;
-  display: none;
-  flex-direction: column;
-  gap: 10px;
-  max-width: 90%;
-  color: #f8fafc;
+/* CARDS STYLING & DEALING MOTION (配るモーション) */
+@keyframes m3DealCard {
+  0% {
+    opacity: 0;
+    transform: translateY(-220px) scale(0.3) rotate(25deg);
+  }
+  65% {
+    opacity: 1;
+    transform: translateY(-6px) scale(1.04) rotate(-2deg);
+  }
+  100% {
+    opacity: 1;
+    transform: translate(0, 0) scale(1) rotate(0deg);
+  }
 }
-.baba-draw-box.show { display: flex; }
-.baba-cards-list {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.baba-back-card {
-  width: 54px;
-  height: 80px;
-  border-radius: 8px;
-  background: repeating-linear-gradient(45deg, #991b1b 0 6px, #dc2626 6px 12px);
-  border: 2px solid #fff;
-  cursor: pointer;
-  transition: transform 0.14s, border-color 0.14s;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-}
-.baba-back-card:hover {
-  transform: translateY(-10px);
-  border-color: #fde047;
+.card-dealing {
+  animation: m3DealCard 0.42s var(--m3-easing) both;
 }
 
-/* =========================================================================
- * 4. Bottom Player Controls & Easy-to-Click Card Hand (M3 Surface Container)
- * ========================================================================= */
+.t-card {
+  width: var(--card-w); height: var(--card-h); border-radius: 8px; background: #ffffff;
+  border: 1px solid #cbd5e1; box-shadow: 0 4px 12px rgba(0,0,0,0.35); position: relative;
+  display: flex; flex-direction: column; justify-content: space-between; padding: 4px 6px;
+  cursor: pointer; transition: transform 0.18s, box-shadow 0.18s, border-color 0.18s;
+  user-select: none; flex-shrink: 0;
+}
+.t-card.black { color: #0f172a; }
+.t-card.red { color: #dc2626; }
+.t-card.joker {
+  color: #7c3aed; background: linear-gradient(135deg, #faf5ff, #f3e8ff); border-color: #c084fc;
+}
+.t-card-corner-top { display: flex; flex-direction: column; align-items: flex-start; line-height: 1; }
+.t-card-corner-top .num { font-size: 15px; font-weight: 900; }
+.t-card-corner-top .suit { font-size: 13px; }
+.t-card-center-symbol {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  font-size: 26px; pointer-events: none; opacity: 0.9;
+}
+.t-card-corner-bottom {
+  display: flex; flex-direction: column; align-items: flex-end; line-height: 1; transform: rotate(180deg);
+}
+.t-card-corner-bottom .num { font-size: 15px; font-weight: 900; }
+.t-card-corner-bottom .suit { font-size: 13px; }
+
+/* Selection states */
+.t-card.selected {
+  transform: translateY(-16px); border: 2px solid #38bdf8;
+  box-shadow: 0 12px 24px rgba(56, 189, 248, 0.4);
+}
+.t-card.poker-discard-selected {
+  transform: translateY(-18px); border: 2px solid #f43f5e;
+  box-shadow: 0 12px 24px rgba(244, 63, 94, 0.45);
+}
+.t-card.poker-discard-selected::after {
+  content: "交換"; position: absolute; top: -10px; left: 50%; transform: translateX(-50%);
+  background: #e11d48; color: #fff; font-size: 10px; font-weight: 800; padding: 1px 6px; border-radius: 9999px;
+}
+.t-card.unplayable { opacity: 0.42; filter: grayscale(0.5); cursor: not-allowed; }
+
+/* Card Back (for opponents or deck) */
+.t-card-back {
+  width: var(--card-w); height: var(--card-h); border-radius: 8px;
+  background: repeating-linear-gradient(45deg, #1e3a8a, #1e3a8a 6px, #172554 6px, #172554 12px);
+  border: 2px solid #93c5fd; box-shadow: 0 4px 10px rgba(0,0,0,0.4); flex-shrink: 0;
+}
+.t-card-mini {
+  width: 32px; height: 46px; border-radius: 4px; padding: 2px;
+}
+.t-card-mini .num { font-size: 10px; }
+.t-card-mini .suit { font-size: 9px; }
+.t-card-mini .t-card-center-symbol { font-size: 14px; }
+
+/* Bottom Player Panel */
 .player-bottom-panel {
-  flex: 0 0 auto;
-  width: min(100%, 980px);
-  margin: 10px auto 0;
-  background: var(--md-sys-color-surface-container-low);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-corner-large);
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  box-shadow: var(--md-sys-elevation-1);
+  background: var(--panel-bg); border-top: 1px solid rgba(255,255,255,0.12);
+  display: flex; flex-direction: column; padding: 8px 12px 14px; z-index: 40;
 }
 .action-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; flex-wrap: wrap; gap: 8px;
 }
 .my-info-pill {
-  font-size: 14px;
-  font-weight: 800;
-  color: var(--md-sys-color-on-surface);
-  white-space: nowrap;
+  font-size: 13px; font-weight: 700; color: #cbd5e1; display: flex; align-items: center; gap: 8px;
 }
-.action-buttons {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
+.action-buttons { display: flex; align-items: center; gap: 8px; }
 .btn-act {
-  padding: 9px 18px;
-  border-radius: var(--md-sys-shape-corner-full);
-  border: 0;
-  font-size: 14px;
-  font-weight: 700;
-  white-space: nowrap;
-  flex-shrink: 0;
-  cursor: pointer;
-  transition: opacity 0.15s, transform 0.1s;
+  padding: 8px 16px; border-radius: 8px; font-weight: 800; font-size: 13px; cursor: pointer; border: none;
+  transition: all 0.16s;
 }
-.btn-act:disabled {
-  opacity: 0.38;
-  cursor: not-allowed;
-}
-.btn-act.play { background: var(--md-sys-color-primary); color: var(--md-sys-color-on-primary); }
-.btn-act.pass { background: var(--md-sys-color-surface-container-highest); color: var(--md-sys-color-on-surface); }
-.btn-act.hint { background: var(--md-sys-color-secondary-container); color: var(--md-sys-color-on-secondary-container); }
+.btn-act.play { background: #0284c7; color: #fff; }
+.btn-act.play:hover:not(:disabled) { background: #0369a1; transform: translateY(-1px); }
+.btn-act.pass { background: rgba(255,255,255,0.12); color: #e2e8f0; }
+.btn-act.pass:hover:not(:disabled) { background: rgba(255,255,255,0.2); }
+.btn-act.danger { background: #e11d48; color: #fff; }
+.btn-act.danger:hover:not(:disabled) { background: #be123c; }
+.btn-act:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
 
-/* Clean, Well-Spaced Hand Cards */
 .hand-cards-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  min-height: 104px;
-  padding-top: 6px;
-}
-.card-item {
-  width: 66px;
-  height: 96px;
-  border-radius: 9px;
-  background: #ffffff;
-  border: 2px solid #cbd5e1;
-  color: #0f172a;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 5px 6px;
-  cursor: pointer;
-  position: relative;
-  transition: transform 0.12s, border-color 0.12s, box-shadow 0.12s;
-  box-shadow: 0 3px 8px rgba(0,0,0,0.35);
-}
-.card-item.red { color: #dc2626; }
-.card-item.black { color: #0f172a; }
-.card-item.joker {
-  background: #fef9c3;
-  border-color: #f59e0b;
-  color: #9a3412;
-}
-.card-item:hover {
-  transform: translateY(-6px);
-}
-.card-item.selected {
-  transform: translateY(-14px);
-  border: 3px solid #22c55e;
-  box-shadow: 0 6px 16px rgba(34, 197, 94, 0.5);
-}
-.card-item.unplayable {
-  opacity: 0.45;
-}
-.c-top {
-  font-size: 16px;
-  font-weight: 900;
-  line-height: 1;
-}
-.c-center {
-  font-size: 26px;
-  text-align: center;
-  line-height: 1;
-}
-.c-bot {
-  font-size: 12px;
-  font-weight: 800;
-  text-align: right;
-  line-height: 1;
+  display: flex; gap: 8px; justify-content: center; align-items: flex-end; min-height: var(--card-h);
+  overflow-x: auto; padding: 18px 4px 6px;
 }
 
-/* Cut-in Toast */
-.toast-banner {
-  position: fixed;
-  top: 42%; left: 50%;
-  transform: translate(-50%, -50%);
-  background: var(--md-sys-color-inverse-surface);
-  border: 2px solid var(--md-sys-color-primary);
-  color: var(--md-sys-color-inverse-on-surface);
-  padding: 12px 28px;
-  border-radius: var(--md-sys-shape-corner-large);
-  font-size: 22px;
-  font-weight: 900;
-  z-index: 80;
-  pointer-events: none;
-  display: none;
-}
-.toast-banner.show { display: block; }
-
-/* Modals (M3 Dialog) */
+/* Modals */
 .modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--md-sys-color-scrim);
-  backdrop-filter: blur(4px);
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 90;
-  padding: 16px;
+  position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center; z-index: 100; opacity: 0;
+  pointer-events: none; transition: opacity 0.2s; padding: 16px;
 }
-.modal-overlay.show { display: flex; }
+.modal-overlay.show { opacity: 1; pointer-events: auto; }
 .modal-box {
-  width: min(92vw, 420px);
-  background: var(--md-sys-color-surface-container-high);
-  border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: var(--md-sys-shape-corner-extra-large);
-  padding: 24px;
-  text-align: center;
-  box-shadow: var(--md-sys-elevation-3);
+  background: #1e293b; border: 1px solid rgba(255,255,255,0.15); border-radius: 18px;
+  width: 100%; max-width: 420px; padding: 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.6);
+  position: relative; animation: modalPop 0.24s var(--m3-easing);
 }
-.rank-row-item {
-  display: flex;
-  justify-content: space-between;
-  padding: 9px 12px;
-  border-radius: var(--md-sys-shape-corner-small);
-  background: var(--md-sys-color-surface-container);
-  margin-bottom: 6px;
-  font-size: 14px;
-  font-weight: 700;
+@keyframes modalPop {
+  0% { transform: scale(0.92) translateY(12px); opacity: 0; }
+  100% { transform: scale(1) translateY(0); opacity: 1; }
 }
-.rule-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 8px 0;
-  border-bottom: 1px solid var(--md-sys-color-outline-variant);
-  font-size: 13px;
+.modal-close-btn {
+  position: absolute; top: 16px; right: 16px; background: transparent; border: none;
+  color: #94a3b8; font-size: 20px; cursor: pointer;
 }
+.modal-title { font-size: 18px; font-weight: 800; margin: 0 0 16px; color: #f8fafc; }
 
-@media (max-width: 640px) {
-  .topbar {
-    min-height: 44px;
-    padding: 4px 8px;
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .topbar-left, .topbar-right {
-    gap: 4px;
-    flex-wrap: wrap;
-  }
-  .btn-top {
-    padding: 4px 8px;
-    font-size: 11px;
-  }
-  .room-badge {
-    font-size: 12px;
-    margin-left: 2px;
-  }
-  .meta-tag {
-    font-size: 10.5px;
-    padding: 2px 6px;
-  }
-  .lobby-screen {
-    padding: 12px 10px 24px;
-  }
-  .lobby-container {
-    margin: 0 auto;
-    gap: 14px;
-  }
-  .lobby-header h1 {
-    font-size: 20px;
-  }
-  .name-box {
-    padding: 10px 12px;
-    gap: 8px;
-    flex-wrap: nowrap;
-  }
-  .room-card {
-    padding: 16px;
-  }
-  .game-screen {
-    padding: 4px 6px 6px;
-  }
-  .table-board {
-    border-width: 4px;
-    border-radius: 18px;
-    min-height: 175px;
-  }
-  .table-rules-bar {
-    top: 4px;
-    gap: 4px;
-  }
-  .status-pill {
-    font-size: 10px;
-    padding: 2px 7px;
-  }
-  .opp-seat {
-    min-width: 82px;
-    max-width: 31%;
-    padding: 3px 6px;
-    gap: 4px;
-    border-radius: 8px;
-    border-width: 1.5px;
-  }
-  .opp-north { top: 28px; left: 50%; transform: translateX(-50%); }
-  .opp-west  { top: 28px; left: 4px; transform: none; }
-  .opp-east  { top: 28px; right: 4px; transform: none; }
-  .opp-avatar { width: 20px; height: 20px; font-size: 11px; }
-  .opp-name-line { font-size: 10.5px; gap: 3px; }
-  .opp-rank { font-size: 9px; padding: 1px 4px; }
-  .opp-cards-left { font-size: 10px; }
-  .center-field { margin-top: 64px; padding: 4px; gap: 4px; }
-  .played-cards-row { min-height: 68px; gap: 4px; }
-  .played-cards-row .card-item { width: 42px; height: 62px; padding: 3px 4px; }
-  .played-cards-row .c-top { font-size: 11px; }
-  .played-cards-row .c-center { font-size: 15px; }
-  .played-cards-row .c-bot { font-size: 9px; }
-  .play-caption { font-size: 11px; padding: 2px 10px; }
-  .player-bottom-panel {
-    padding: 6px 8px;
-    gap: 4px;
-    margin-top: 4px;
-    max-height: 44vh;
-    overflow-y: auto;
-  }
-  .action-bar { gap: 4px; }
-  .my-info-pill { font-size: 12px; }
-  .action-buttons { gap: 4px; }
-  .btn-act { padding: 5px 10px; font-size: 11px; }
-  .hand-cards-row { min-height: 64px; gap: 3px; padding-top: 4px; }
-  .card-item { width: 42px; height: 62px; padding: 3px 4px; border-radius: 6px; }
-  .card-item.selected { transform: translateY(-8px); }
-  .c-top { font-size: 11px; }
-  .c-center { font-size: 16px; }
-  .c-bot { font-size: 9px; }
+/* Auth Input Fields */
+.form-group { margin-bottom: 14px; }
+.form-label { display: block; font-size: 12px; font-weight: 700; color: #cbd5e1; margin-bottom: 6px; }
+.input-with-toggle { position: relative; display: flex; align-items: center; }
+.m3-input {
+  width: 100%; background: #0f172a; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px;
+  padding: 10px 12px; color: #fff; font-size: 14px; outline: none; transition: border-color 0.2s;
 }
+.m3-input:focus { border-color: #38bdf8; }
+.eye-toggle-btn {
+  position: absolute; right: 10px; background: transparent; border: none; color: #94a3b8;
+  cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px;
+}
+.auth-error-msg { color: #f43f5e; font-size: 12px; font-weight: 700; margin-top: 8px; display: none; }
+
+/* Standings Rows in Result Modal */
+.standings-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 20px; }
+.standing-item {
+  display: flex; align-items: center; justify-content: space-between;
+  background: rgba(255,255,255,0.06); padding: 10px 14px; border-radius: 10px; font-size: 14px;
+}
+.standing-item.me { background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); }
+.standing-rank { font-weight: 800; width: 44px; color: #f59e0b; }
+.standing-name { flex: 1; font-weight: 700; }
+.standing-hand { font-weight: 800; color: #38bdf8; margin-right: 12px; }
+.standing-rate-delta { font-weight: 800; font-size: 12px; }
+.delta-plus { color: #4ade80; }
+.delta-minus { color: #f43f5e; }
+
+/* Toast cutin */
+.toast-banner {
+  position: absolute; top: 18%; left: 50%; transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.94); border: 1px solid #f59e0b; color: #fde047;
+  padding: 10px 24px; border-radius: 9999px; font-size: 15px; font-weight: 900;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.6); pointer-events: none; opacity: 0;
+  transition: opacity 0.25s, transform 0.25s; z-index: 60; text-align: center;
+}
+.toast-banner.show { opacity: 1; transform: translate(-50%, -6px); }
+
+.hidden { display: none !important; }
 </style>
 </head>
 <body>
+<div class="app-container">
 
-<!-- Top Navigation Bar (M3 Top App Bar) -->
-<header class="topbar">
-  <div class="topbar-left">
-    <a class="btn-top" href="/">← School Hub</a>
-    <button type="button" class="btn-top" id="btnBackLobby" onclick="returnToLobby()" style="display:none">ルーム選択へ</button>
-    <span class="room-badge" id="headerRoomTitle">トランプ ルーム選択</span>
-  </div>
-  <div class="topbar-right">
-    <span class="meta-tag" id="headerSeatMeta" style="display:none">着席 1/4</span>
-    <span class="meta-tag" id="headerSpecMeta" style="display:none">観戦 0</span>
-    <button type="button" class="btn-top" id="btnRules" onclick="toggleRulesModal(true)" style="display:none">ルール</button>
-    <button type="button" class="btn-top" id="btnSound" onclick="toggleSound()">音 ON</button>
-    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.openSettings()">M3設定</button>
-    <button type="button" class="btn-top" onclick="window.SchoolHubM3 && window.SchoolHubM3.toggleTheme()">テーマ</button>
-  </div>
-</header>
-
-<!-- 1. ROOM SELECTION LOBBY SCREEN (Shown first on entry) -->
-<section class="lobby-screen" id="lobbyScreen">
-  <div class="lobby-container">
-    <div class="lobby-header">
-      <h1>トランプ オンラインロビー</h1>
-      <p>遊びたいゲームルールを選んで入室してください（各ルール全1部屋・満席時は自動で観戦モードになります）</p>
+  <!-- Top App Bar -->
+  <header class="top-nav">
+    <div class="brand">
+      <a href="/">
+        <span>🏠</span>
+        <span>School Hub</span>
+      </a>
+      <span style="color:#64748b">/</span>
+      <span style="color:#f8fafc;font-weight:700">トランプ</span>
     </div>
-
-    <div class="name-box">
-      <label for="playerNameInput">あなたの名前:</label>
-      <input type="text" id="playerNameInput" class="name-input" maxlength="16" placeholder="名前を入力">
+    <div class="nav-actions">
+      <div class="user-chip" id="btnUserChip" onclick="openAuthModal()">
+        <span id="navUserName">ゲスト</span>
+        <span class="rate-badge">⭐️ <span id="navUserRate">1500</span> R</span>
+      </div>
+      <button type="button" class="btn-nav hidden" id="btnExitRoom" onclick="exitToLobby()">退室</button>
     </div>
+  </header>
 
-    <div class="room-cards-grid" id="lobbyRoomsGrid">
-      <!-- Populated dynamically from /trump/api/lobby -->
-      <div class="room-card">
-        <div>
-          <div class="room-card-title"><span>大富豪ルーム</span></div>
-          <p class="room-card-desc">革命・8切り・11バック・しばり・スペ3返し対応（4人対戦＋観戦）</p>
-        </div>
-        <div class="room-actions">
-          <button type="button" class="btn-join-room" onclick="enterRoom('daifugo', false)">入室して遊ぶ</button>
-          <button type="button" class="btn-spec-room" onclick="enterRoom('daifugo', true)">観戦</button>
+  <!-- 1. LOBBY VIEW -->
+  <section class="lobby-screen" id="lobbyScreen">
+    <div class="lobby-container">
+      <div class="lobby-hero">
+        <h1>🃏 オンライン対戦トランプ</h1>
+        <p>4人対戦・最強AI・観戦対応・レートランキング機能付き</p>
+      </div>
+
+      <div class="auth-callout" id="authCallout">
+        <span>💡 チャットと共通のアカウント（名前＆パスワード）でレートや戦績が記録されます</span>
+        <button type="button" class="btn-primary-small" onclick="openAuthModal()">ログイン / 登録</button>
+      </div>
+
+      <div class="room-cards-grid" id="roomsGrid">
+        <!-- Rendered dynamically -->
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. GAME TABLE SCREEN -->
+  <main class="game-screen hidden" id="gameScreen">
+    <div class="table-board">
+
+      <!-- Match In Progress Spectator Lock Banner -->
+      <div class="match-lock-banner hidden" id="matchLockBanner">
+        🔒 試合進行中（現在観戦中：この試合が終了次第、次の勝負に参加できます）
+      </div>
+
+      <!-- Opponent Seats -->
+      <!-- North -->
+      <div class="opp-seat opp-north" id="seat-rel-2">
+        <div class="opp-avatar" id="av-rel-2">L</div>
+        <div class="opp-info">
+          <div class="opp-name-line">
+            <span id="name-rel-2">レイ</span>
+            <span class="opp-rate-tag" id="rate-rel-2">1550 R</span>
+            <span class="opp-rank-tag" id="rank-rel-2">平民</span>
+          </div>
+          <div class="opp-cards-count" id="cnt-rel-2">残り 5枚</div>
+          <div class="opp-showdown-cards" id="showdown-rel-2"></div>
         </div>
       </div>
 
-      <div class="room-card">
-        <div>
-          <div class="room-card-title"><span>ババ抜きルーム</span></div>
-          <p class="room-card-desc">隣の人の手札から1枚引いてペアを揃えるシンプル心理戦（4人対戦＋観戦）</p>
-        </div>
-        <div class="room-actions">
-          <button type="button" class="btn-join-room" onclick="enterRoom('babanuki', false)">入室して遊ぶ</button>
-          <button type="button" class="btn-spec-room" onclick="enterRoom('babanuki', true)">観戦</button>
+      <!-- West -->
+      <div class="opp-seat opp-west" id="seat-rel-1">
+        <div class="opp-avatar" id="av-rel-1">K</div>
+        <div class="opp-info">
+          <div class="opp-name-line">
+            <span id="name-rel-1">カイ</span>
+            <span class="opp-rate-tag" id="rate-rel-1">1520 R</span>
+            <span class="opp-rank-tag" id="rank-rel-1">平民</span>
+          </div>
+          <div class="opp-cards-count" id="cnt-rel-1">残り 5枚</div>
+          <div class="opp-showdown-cards" id="showdown-rel-1"></div>
         </div>
       </div>
-    </div>
-  </div>
-</section>
 
-<!-- 2. SIMPLE 4-PLAYER GAME SCREEN -->
-<main class="game-screen hidden" id="gameScreen">
-  <div class="table-board">
-    <div class="table-rules-bar" id="tableRulesBar"></div>
-
-    <!-- North (Across) -->
-    <div class="opp-seat opp-north" id="seat-rel-2">
-      <div class="opp-bubble" id="bubble-rel-2"></div>
-      <div class="opp-avatar" id="av-rel-2">L</div>
-      <div class="opp-info">
-        <div class="opp-name-line">
-          <span id="name-rel-2">レイ</span>
-          <span class="opp-rank" id="rank-rel-2">平民</span>
+      <!-- East -->
+      <div class="opp-seat opp-east" id="seat-rel-3">
+        <div class="opp-avatar" id="av-rel-3">M</div>
+        <div class="opp-info">
+          <div class="opp-name-line">
+            <span id="name-rel-3">ミナ</span>
+            <span class="opp-rate-tag" id="rate-rel-3">1580 R</span>
+            <span class="opp-rank-tag" id="rank-rel-3">平民</span>
+          </div>
+          <div class="opp-cards-count" id="cnt-rel-3">残り 5枚</div>
+          <div class="opp-showdown-cards" id="showdown-rel-3"></div>
         </div>
-        <div class="opp-cards-left" id="cnt-rel-2">残り 13枚</div>
       </div>
-    </div>
 
-    <!-- West (Left) -->
-    <div class="opp-seat opp-west" id="seat-rel-1">
-      <div class="opp-bubble" id="bubble-rel-1"></div>
-      <div class="opp-avatar" id="av-rel-1">K</div>
-      <div class="opp-info">
-        <div class="opp-name-line">
-          <span id="name-rel-1">カイ</span>
-          <span class="opp-rank" id="rank-rel-1">平民</span>
-        </div>
-        <div class="opp-cards-left" id="cnt-rel-1">残り 13枚</div>
+      <!-- Center Play Area -->
+      <div class="center-field" id="centerField">
+        <div class="poker-status-prompt hidden" id="pokerPrompt"></div>
+        <div class="played-cards-row" id="centerPlayedCards"></div>
+        <div class="play-caption hidden" id="centerPlayCaption"></div>
       </div>
     </div>
 
-    <!-- East (Right) -->
-    <div class="opp-seat opp-east" id="seat-rel-3">
-      <div class="opp-bubble" id="bubble-rel-3"></div>
-      <div class="opp-avatar" id="av-rel-3">M</div>
-      <div class="opp-info">
-        <div class="opp-name-line">
-          <span id="name-rel-3">ミナ</span>
-          <span class="opp-rank" id="rank-rel-3">平民</span>
+    <!-- Bottom Player Panel -->
+    <div class="player-bottom-panel" id="bottomPanel">
+      <div class="action-bar">
+        <div class="my-info-pill" id="myStatusText">あなた (1500 R)</div>
+        <div class="action-buttons">
+          <!-- Daifugo Buttons -->
+          <button type="button" class="btn-act play hidden" id="btnPlay" onclick="commitPlayerMove()" disabled>カードを出す</button>
+          <button type="button" class="btn-act pass hidden" id="btnPass" onclick="playerPassTurn()" disabled>パス</button>
+
+          <!-- Poker Buttons -->
+          <button type="button" class="btn-act play hidden" id="btnPokerExchange" onclick="commitPokerExchange()">選択カードを交換 (0枚)</button>
+          <button type="button" class="btn-act pass hidden" id="btnPokerStay" onclick="commitPokerStay()">チェンジなし (勝負)</button>
+
+          <!-- Spectate toggle -->
+          <button type="button" class="btn-act play hidden" id="btnTakeSeat" onclick="switchSpectate(false)">空き席に座る</button>
+          <button type="button" class="btn-act pass hidden" id="btnGoSpectate" onclick="switchSpectate(true)">観戦に回る</button>
         </div>
-        <div class="opp-cards-left" id="cnt-rel-3">残り 13枚</div>
       </div>
+      <div class="hand-cards-row" id="myHandRow"></div>
     </div>
+  </main>
 
-    <!-- Center Play Area -->
-    <div class="center-field">
-      <div class="played-cards-row" id="centerPlayedCards"></div>
-      <div class="play-caption" id="centerPlayCaption" style="display:none"></div>
-
-      <!-- Babanuki Draw Box -->
-      <div class="baba-draw-box" id="babaDrawBox">
-        <div style="font-size:14px;font-weight:900;color:#fde047" id="babaDrawPrompt">隣の人のカードを1枚クリックして引いてください</div>
-        <div class="baba-cards-list" id="babaCardsList"></div>
-      </div>
+  <!-- Round Result Standings Modal -->
+  <div class="modal-overlay" id="resultModal">
+    <div class="modal-box">
+      <div class="modal-title">🏆 ラウンド結果・レート更新</div>
+      <div class="standings-list" id="standingsList"></div>
+      <button type="button" class="btn-act play" style="width:100%" onclick="sendRoomAction({action:'next_round'})">次の勝負へ進む</button>
     </div>
   </div>
 
-  <!-- Bottom Player Hand & Simple Controls -->
-  <div class="player-bottom-panel">
-    <div class="action-bar">
-      <div class="my-info-pill" id="myStatusText">あなた (平民)</div>
-      <div class="action-buttons">
-        <button type="button" class="btn-act hint" id="btnHint" onclick="selectSuggestedMove()">おすすめ</button>
-        <button type="button" class="btn-act play" id="btnPlay" onclick="commitPlayerMove()" disabled>カードを出す</button>
-        <button type="button" class="btn-act pass" id="btnPass" onclick="playerPassTurn()" disabled>パス</button>
-        <button type="button" class="btn-act hint" id="btnShuffle" onclick="shufflePlayerHand()" style="display:none">シャッフル</button>
-        <button type="button" class="btn-act play" id="btnTakeSeat" onclick="switchSpectate(false)" style="display:none">空き席に座る</button>
-        <button type="button" class="btn-act pass" id="btnGoSpectate" onclick="switchSpectate(true)">観戦に回る</button>
+  <!-- Shared OpenChat & Trump Auth Modal -->
+  <div class="modal-overlay" id="authModal">
+    <div class="modal-box">
+      <button type="button" class="modal-close-btn" onclick="closeAuthModal()">✕</button>
+      <div class="modal-title">👤 チャット＆トランプ ログイン</div>
+      <div style="font-size:12px;color:#94a3b8;margin-bottom:14px">
+        オープンチャットと同一のアカウントです。新規のお名前の場合は入力したパスワードで自動登録されます（名前被り防止・PBKDF2暗号化）。
       </div>
-    </div>
-    <div class="hand-cards-row" id="myHandRow"></div>
-  </div>
-</main>
-
-<!-- Toast Cut-in -->
-<div class="toast-banner" id="toastBanner"></div>
-
-<!-- Round Result Modal -->
-<div class="modal-overlay" id="resultModal">
-  <div class="modal-box">
-    <h2 style="margin:0 0 8px;color:#fde047">ラウンド結果</h2>
-    <div id="resultList" style="margin-bottom:14px"></div>
-    <button type="button" class="btn-act play" onclick="sendRoomAction({action:'next_round'})">次のラウンドへ進む</button>
-  </div>
-</div>
-
-<!-- Rules Modal -->
-<div class="modal-overlay" id="rulesModal">
-  <div class="modal-box">
-    <h3 style="margin:0 0 12px;color:#fde047">大富豪ルール設定</h3>
-    <div class="rule-row"><span>革命 (4枚以上同時出し)</span><input type="checkbox" id="ruleRev" checked></div>
-    <div class="rule-row"><span>8切り (8で場流し)</span><input type="checkbox" id="rule8Giri" checked></div>
-    <div class="rule-row"><span>11バック (Jで一時強さ逆転)</span><input type="checkbox" id="rule11Back" checked></div>
-    <div class="rule-row"><span>しばり (同マーク連続)</span><input type="checkbox" id="ruleShibari" checked></div>
-    <div class="rule-row"><span>スペ3返し (JOKER単騎に♠3)</span><input type="checkbox" id="ruleSpade3" checked></div>
-    <div class="rule-row"><span>階段 (同マーク3枚以上連番)</span><input type="checkbox" id="ruleStairs" checked></div>
-    <div class="rule-row"><span>都落ち (大富豪1位陥落)</span><input type="checkbox" id="ruleMiyako" checked></div>
-    <div style="margin-top:14px;display:flex;justify-content:space-between">
-      <button type="button" class="btn-act pass" onclick="sendRoomAction({action:'reset_match'});toggleRulesModal(false)">卓リセット</button>
-      <button type="button" class="btn-act play" onclick="saveRulesAndClose()">保存して閉じる</button>
+      <div class="form-group">
+        <label class="form-label" for="authUsernameInput">プレイヤー名</label>
+        <input type="text" id="authUsernameInput" class="m3-input" maxlength="20" placeholder="お名前を入力">
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="authPasswordInput">パスワード (4文字以上)</label>
+        <div class="input-with-toggle">
+          <input type="password" id="authPasswordInput" class="m3-input" maxlength="64" placeholder="パスワードを入力">
+          <button type="button" class="eye-toggle-btn" id="btnPassToggle" onclick="togglePasswordVisibility()" aria-label="パスワード表示切替">
+            <svg id="eyeIcon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="auth-error-msg" id="authErrorMsg"></div>
+      <button type="button" class="btn-act play" style="width:100%;margin-top:10px" id="btnSubmitAuth" onclick="submitAuth()">ログイン / 新規登録</button>
     </div>
   </div>
+
+  <!-- Toast Cutin -->
+  <div class="toast-banner" id="toastBanner"></div>
 </div>
 
 <script>
-(() => {
-  let playerId = localStorage.getItem("sh_trump_pid");
-  if (!playerId) {
-    playerId = "p_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-    localStorage.setItem("sh_trump_pid", playerId);
-  }
-  let playerName = localStorage.getItem("sh_trump_name") || `プレイヤー${Math.floor(100 + Math.random() * 899)}`;
-  const nameInput = document.getElementById("playerNameInput");
-  nameInput.value = playerName;
-  nameInput.addEventListener("change", () => {
-    const v = nameInput.value.trim().slice(0, 16);
-    if (v) {
-      playerName = v;
-      localStorage.setItem("sh_trump_name", playerName);
+// ============================================================================
+// State & Client Initialization
+// ============================================================================
+let currentMode = null;
+let currentRoom = null;
+let currentPid = localStorage.getItem("schoolhub_trump_pid") || ("p_" + Math.random().toString(36).slice(2, 10));
+localStorage.setItem("schoolhub_trump_pid", currentPid);
+
+let authToken = localStorage.getItem("schoolhub_chat_token") || "";
+let currentUsername = localStorage.getItem("schoolhub_chat_user") || "ゲスト";
+let currentUserRate = 1500;
+
+let socket = null;
+let pollTimer = null;
+let latestState = null;
+let selectedHandIds = new Set();
+let selectedDiscardIndices = new Set();
+let sfxAudioContext = null;
+
+// Sound Effects Synthesizer
+function playSfx(type) {
+  try {
+    if (!sfxAudioContext) {
+      sfxAudioContext = new (window.AudioContext || window.webkitAudioContext)();
     }
-  });
+    if (sfxAudioContext.state === "suspended") sfxAudioContext.resume();
+    const ctx = sfxAudioContext;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const now = ctx.currentTime;
 
-  let inLobby = true;
-  let currentMode = null;
-  let roomState = null;
-  let selectedCardIds = new Set();
-  let lastEventSeq = 0;
-  let ws = null;
-  let pollTimer = null;
-  let lobbyTimer = null;
-  let soundEnabled = true;
-  let audioCtx = null;
-
-  function playSfx(type) {
-    if (!soundEnabled) return;
-    try {
-      if (!audioCtx) {
-        const AC = window.AudioContext || window.webkitAudioContext;
-        if (AC) audioCtx = new AC();
-      }
-      if (!audioCtx) return;
-      if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
-      const now = audioCtx.currentTime;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      if (type === "card") {
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(320, now);
-        osc.frequency.exponentialRampToValueAtTime(100, now + 0.06);
-        gain.gain.setValueAtTime(0.22, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.065);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(now); osc.stop(now + 0.07);
-      } else if (type === "select") {
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(520, now);
-        gain.gain.setValueAtTime(0.1, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(now); osc.stop(now + 0.045);
-      } else if (type === "pass") {
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(240, now);
-        osc.frequency.exponentialRampToValueAtTime(160, now + 0.1);
-        gain.gain.setValueAtTime(0.14, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(now); osc.stop(now + 0.12);
-      } else if (type === "special" || type === "joker") {
-        osc.type = "triangle";
-        osc.frequency.setValueAtTime(type === "joker" ? 190 : 587, now);
-        gain.gain.setValueAtTime(0.2, now);
-        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
-        osc.connect(gain).connect(audioCtx.destination);
-        osc.start(now); osc.stop(now + 0.24);
-      }
-    } catch (e) {}
-  }
-
-  window.toggleSound = function() {
-    soundEnabled = !soundEnabled;
-    document.getElementById("btnSound").textContent = soundEnabled ? "音 ON" : "音 OFF";
-  };
-
-  /* =========================================================================
-   * 1. Lobby Fetching & Room Entry
-   * ========================================================================= */
-  async function refreshLobby() {
-    if (!inLobby) return;
-    try {
-      const r = await fetch("/trump/api/lobby", { cache: "no-store" });
-      if (!r.ok) return;
-      const data = await r.json();
-      const grid = document.getElementById("lobbyRoomsGrid");
-      grid.innerHTML = "";
-      for (const rm of data.rooms || []) {
-        const card = document.createElement("div");
-        card.className = "room-card";
-        const statusCls = rm.isFull ? "stat-pill full" : "stat-pill";
-        const statusTxt = rm.isFull
-          ? `満席 4/4人 (自動で観戦になります)`
-          : `着席 ${rm.humanCount}/4人 (空き席はAIが補完)`;
-        const btnMainTxt = rm.isFull ? "満席のため観戦で入室" : "入室して遊ぶ";
-        card.innerHTML = `
-          <div>
-            <div class="room-card-title">
-              <span>${rm.title}</span>
-              <span style="font-size:12px;color:#94a3b8">第${rm.roundNumber}戦</span>
-            </div>
-            <p class="room-card-desc">${rm.description}</p>
-          </div>
-          <div class="room-stats-row">
-            <span class="${statusCls}">${statusTxt}</span>
-            <span class="stat-pill spec">観戦 ${rm.spectatorCount}人</span>
-          </div>
-          <div class="room-members">現在の卓: ${rm.seatedNames.join(" / ")}</div>
-          <div class="room-actions">
-            <button type="button" class="btn-join-room" data-mode="${rm.mode}" data-spec="${rm.isFull ? '1' : '0'}">${btnMainTxt}</button>
-            <button type="button" class="btn-spec-room" data-mode="${rm.mode}" data-spec="1">観戦</button>
-          </div>
-        `;
-        card.querySelectorAll("button").forEach(btn => {
-          btn.addEventListener("click", () => {
-            enterRoom(btn.dataset.mode, btn.dataset.spec === "1");
-          });
-        });
-        grid.appendChild(card);
-      }
-    } catch (e) {}
-  }
-
-  window.enterRoom = function(mode, spectate) {
-    const v = nameInput.value.trim().slice(0, 16);
-    if (v) {
-      playerName = v;
-      localStorage.setItem("sh_trump_name", playerName);
+    if (type === "card") {
+      // Dealing card rustle sound
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(480, now);
+      osc.frequency.exponentialRampToValueAtTime(220, now + 0.08);
+      gain.gain.setValueAtTime(0.18, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+      osc.start(now);
+      osc.stop(now + 0.08);
+    } else if (type === "select") {
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(540, now);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+      osc.start(now);
+      osc.stop(now + 0.06);
+    } else if (type === "special") {
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(523, now);
+      osc.frequency.setValueAtTime(659, now + 0.1);
+      osc.frequency.setValueAtTime(784, now + 0.2);
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+      osc.start(now);
+      osc.stop(now + 0.35);
     }
-    inLobby = false;
-    currentMode = mode;
-    selectedCardIds.clear();
-    lastEventSeq = 0;
+  } catch(e) {}
+}
 
-    document.getElementById("lobbyScreen").classList.add("hidden");
-    document.getElementById("gameScreen").classList.remove("hidden");
-    document.getElementById("btnBackLobby").style.display = "inline-flex";
-    document.getElementById("headerSeatMeta").style.display = "inline-flex";
-    document.getElementById("headerSpecMeta").style.display = "inline-flex";
-    document.getElementById("btnRules").style.display = mode === "daifugo" ? "inline-flex" : "none";
-
-    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-    const specFlag = spectate ? "1" : "0";
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${location.host}/trump/ws/${mode}?pid=${encodeURIComponent(playerId)}&name=${encodeURIComponent(playerName)}&spectate=${specFlag}`;
-    try {
-      ws = new WebSocket(wsUrl);
-      ws.onmessage = (ev) => {
-        try { applyRoomState(JSON.parse(ev.data)); } catch (e) {}
-      };
-    } catch (e) {}
-
-    fetchRoomState(specFlag);
-    clearInterval(pollTimer);
-    pollTimer = setInterval(() => fetchRoomState(), 1500);
-  };
-
-  window.returnToLobby = async function() {
-    const prevMode = currentMode;
-    inLobby = true;
-    currentMode = null;
-    clearInterval(pollTimer);
-    if (ws) { try { ws.close(); } catch (e) {} ws = null; }
-    if (prevMode) {
-      try {
-        await fetch(`/trump/api/action/${prevMode}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "leave", pid: playerId }),
-        });
-      } catch (e) {}
-    }
-    document.getElementById("gameScreen").classList.add("hidden");
-    document.getElementById("lobbyScreen").classList.remove("hidden");
-    document.getElementById("btnBackLobby").style.display = "none";
-    document.getElementById("headerSeatMeta").style.display = "none";
-    document.getElementById("headerSpecMeta").style.display = "none";
-    document.getElementById("btnRules").style.display = "none";
-    document.getElementById("headerRoomTitle").textContent = "トランプ ルーム選択";
-    refreshLobby();
-  };
-
-  async function fetchRoomState(specFlag) {
-    if (inLobby || !currentMode) return;
-    const sp = specFlag !== undefined ? `&spectate=${specFlag}` : "";
-    try {
-      const r = await fetch(`/trump/api/state/${currentMode}?pid=${encodeURIComponent(playerId)}&name=${encodeURIComponent(playerName)}${sp}`, { cache: "no-store" });
-      if (r.ok) applyRoomState(await r.json());
-    } catch (e) {}
+// ----------------------------------------------------------------------------
+// Auth System (Tied to OpenChat Accounts & Rates)
+// ----------------------------------------------------------------------------
+async function checkAuthStatus() {
+  if (!authToken) {
+    updateAuthDisplay("ゲスト", 1500);
+    return;
   }
-
-  window.sendRoomAction = async function(payload) {
-    if (!currentMode) return;
-    const body = { ...payload, pid: playerId, name: playerName };
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(body));
-      return;
-    }
-    try {
-      const r = await fetch(`/trump/api/action/${currentMode}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (r.ok) applyRoomState(await r.json());
-    } catch (e) {}
-  };
-
-  window.switchSpectate = function(wantSpec) {
-    sendRoomAction({ action: "toggle_spectate", spectate: Boolean(wantSpec) });
-  };
-
-  /* =========================================================================
-   * 2. Render Game State Cleanly
-   * ========================================================================= */
-  function createSimpleCard(card, extraCls = "") {
-    const div = document.createElement("div");
-    div.className = `card-item ${card.isJoker ? "joker" : card.color} ${extraCls}`.trim();
-    if (card.isJoker) {
-      div.innerHTML = `<div class="c-top">JOKER</div><div class="c-center">★</div><div class="c-bot">★</div>`;
+  try {
+    const res = await fetch(`/trump/api/auth/me?token=${encodeURIComponent(authToken)}`);
+    if (res.ok) {
+      const data = await res.json();
+      currentUsername = data.username;
+      currentUserRate = data.rate || 1500;
+      updateAuthDisplay(currentUsername, currentUserRate);
     } else {
-      div.innerHTML = `<div class="c-top">${card.label}</div><div class="c-center">${card.suitSymbol}</div><div class="c-bot">${card.label}</div>`;
+      authToken = "";
+      localStorage.removeItem("schoolhub_chat_token");
+      updateAuthDisplay("ゲスト", 1500);
     }
-    return div;
+  } catch(e) {
+    updateAuthDisplay(currentUsername, currentUserRate);
+  }
+}
+
+function updateAuthDisplay(name, rate) {
+  document.getElementById("navUserName").textContent = name;
+  document.getElementById("navUserRate").textContent = rate;
+  const callout = document.getElementById("authCallout");
+  if (name !== "ゲスト") {
+    callout.style.display = "none";
+  } else {
+    callout.style.display = "flex";
+  }
+}
+
+function openAuthModal() {
+  document.getElementById("authUsernameInput").value = (currentUsername !== "ゲスト") ? currentUsername : "";
+  document.getElementById("authPasswordInput").value = "";
+  document.getElementById("authErrorMsg").style.display = "none";
+  document.getElementById("authModal").classList.add("show");
+}
+
+function closeAuthModal() {
+  document.getElementById("authModal").classList.remove("show");
+}
+
+function togglePasswordVisibility() {
+  const inp = document.getElementById("authPasswordInput");
+  const isPass = (inp.type === "password");
+  inp.type = isPass ? "text" : "password";
+}
+
+async function submitAuth() {
+  const username = document.getElementById("authUsernameInput").value.trim();
+  const password = document.getElementById("authPasswordInput").value;
+  const errEl = document.getElementById("authErrorMsg");
+  const btn = document.getElementById("btnSubmitAuth");
+  errEl.style.display = "none";
+
+  if (!username) {
+    errEl.textContent = "お名前を入力してください";
+    errEl.style.display = "block";
+    return;
+  }
+  if (!password || password.length < 4) {
+    errEl.textContent = "パスワードは4文字以上で設定してください";
+    errEl.style.display = "block";
+    return;
   }
 
-  function showToast(text) {
-    const el = document.getElementById("toastBanner");
-    el.textContent = text;
-    el.classList.add("show");
-    clearTimeout(el._t);
-    el._t = setTimeout(() => el.classList.remove("show"), 1350);
-  }
-
-  function showOppBubble(relPos, text) {
-    const b = document.getElementById(`bubble-rel-${relPos}`);
-    if (!b) return;
-    b.textContent = text;
-    b.classList.add("show");
-    clearTimeout(b._t);
-    b._t = setTimeout(() => b.classList.remove("show"), 1600);
-  }
-
-  function applyRoomState(state) {
-    roomState = state;
-
-    if (Array.isArray(state.events)) {
-      for (const ev of state.events) {
-        if (ev.seq > lastEventSeq) {
-          lastEventSeq = ev.seq;
-          if (ev.sfx) playSfx(ev.sfx);
-          if (ev.kind === "cutin" && ev.text) showToast(ev.text);
-          if (ev.kind === "bubble" && ev.text && ev.seat >= 0) {
-            const rel = (ev.seat - state.perspectiveSeat + 4) % 4;
-            if (rel !== 0) showOppBubble(rel, ev.text);
-          }
-        }
-      }
-    }
-
-    document.getElementById("headerRoomTitle").textContent = `${state.roomTitle} (第${state.roundNumber}戦)`;
-    document.getElementById("headerSeatMeta").textContent = `着席 ${state.humanCount}/4人`;
-    document.getElementById("headerSpecMeta").textContent = `観戦 ${state.spectatorCount}人`;
-
-    // Rules / Turn Bar
-    const rBar = document.getElementById("tableRulesBar");
-    rBar.innerHTML = "";
-    const turnSeatObj = state.seats.find(s => s.seat === state.currentTurn);
-    const turnPill = document.createElement("span");
-    turnPill.className = "status-pill";
-    turnPill.textContent = (!state.isSpectator && state.currentTurn === state.mySeat)
-      ? `あなたの番です (${state.turnRemainingSec}秒)`
-      : `${turnSeatObj ? turnSeatObj.name : ""}の番 (${state.turnRemainingSec}秒)`;
-    rBar.appendChild(turnPill);
-
-    if (state.isSpectator) {
-      const sp = document.createElement("span");
-      sp.className = "status-pill alert";
-      sp.textContent = "観戦モード中";
-      rBar.appendChild(sp);
-    }
-    if (state.mode === "daifugo") {
-      if (state.isRevolution) {
-        const p = document.createElement("span");
-        p.className = "status-pill alert";
-        p.textContent = "革命中 (3が最強)";
-        rBar.appendChild(p);
-      }
-      if (state.isElevenBack) {
-        const p = document.createElement("span");
-        p.className = "status-pill alert";
-        p.textContent = "11バック中";
-        rBar.appendChild(p);
-      }
-      if (state.lockedSuits && state.lockedSuits.length) {
-        const p = document.createElement("span");
-        p.className = "status-pill alert";
-        p.textContent = `しばり (${state.lockedSuits.join(",")})`;
-        rBar.appendChild(p);
-      }
-    }
-
-    // Opponents (relPos 1=West, 2=North, 3=East)
-    for (const s of state.seats) {
-      if (s.relPos === 0) continue;
-      const box = document.getElementById(`seat-rel-${s.relPos}`);
-      if (!box) continue;
-      box.classList.toggle("active-turn", Boolean(s.isTurn));
-      document.getElementById(`av-rel-${s.relPos}`).textContent = s.isHuman ? "P" : s.avatar;
-      document.getElementById(`name-rel-${s.relPos}`).textContent = s.name;
-      document.getElementById(`rank-rel-${s.relPos}`).textContent = s.rankTitle;
-      const cntEl = document.getElementById(`cnt-rel-${s.relPos}`);
-      if (s.finishRank > 0) {
-        cntEl.textContent = `${s.finishRank}位上がり`;
-        cntEl.classList.remove("danger");
+  btn.disabled = true;
+  btn.textContent = "認証中...";
+  try {
+    const res = await fetch("/trump/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, clientId: currentPid })
+    });
+    const data = await res.json();
+    if (res.ok && data.ok) {
+      authToken = data.token;
+      currentUsername = data.username;
+      currentUserRate = data.rate;
+      localStorage.setItem("schoolhub_chat_token", authToken);
+      localStorage.setItem("schoolhub_chat_user", currentUsername);
+      updateAuthDisplay(currentUsername, currentUserRate);
+      closeAuthModal();
+      showToast(`ようこそ、${currentUsername}さん！ (⭐️ ${currentUserRate} R)`);
+      if (currentMode) {
+        connectToRoom(currentMode);
       } else {
-        cntEl.textContent = `残り ${s.cardCount}枚`;
-        cntEl.classList.toggle("danger", s.cardCount > 0 && s.cardCount <= 2);
+        loadLobby();
       }
+    } else {
+      errEl.textContent = data.error || "ログインに失敗しました";
+      errEl.style.display = "block";
+    }
+  } catch(e) {
+    errEl.textContent = "通信エラーが発生しました";
+    errEl.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "ログイン / 新規登録";
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Lobby & Room Management
+// ----------------------------------------------------------------------------
+async function loadLobby() {
+  try {
+    const res = await fetch("/trump/api/lobby");
+    const data = await res.json();
+    renderLobby(data.rooms || []);
+  } catch(e) {}
+}
+
+function renderLobby(rooms) {
+  const grid = document.getElementById("roomsGrid");
+  grid.innerHTML = "";
+  for (const r of rooms) {
+    const card = document.createElement("div");
+    card.className = "room-card";
+    const isPlaying = r.isMatchInProgress;
+    const badgeCls = isPlaying ? "badge-playing" : "badge-open";
+    const badgeTxt = isPlaying ? "🔒 試合中 (観戦可)" : "🟢 参加受付中";
+
+    let playersHtml = "";
+    if (r.seatedInfo && r.seatedInfo.length) {
+      playersHtml = r.seatedInfo.map(p =>
+        `<span class="player-tag">${p.name} <b style="color:#f59e0b">${p.rate}R</b></span>`
+      ).join("");
     }
 
-    // Center Played Cards
-    const centerRow = document.getElementById("centerPlayedCards");
-    const centerCap = document.getElementById("centerPlayCaption");
-    centerRow.innerHTML = "";
-    centerCap.style.display = "none";
+    card.innerHTML = `
+      <div>
+        <div class="room-card-title">
+          <span>${r.title}</span>
+          <span class="room-status-badge ${badgeCls}">${badgeTxt}</span>
+        </div>
+        <p class="room-card-desc">${r.description}</p>
+        <div class="room-players-list">${playersHtml}</div>
+        <div style="font-size:12px;color:#94a3b8">対戦中: ${r.humanCount}/4人 ・ 観戦者: ${r.spectatorCount}人</div>
+      </div>
+      <div class="room-actions">
+        <button type="button" class="btn-join-room" onclick="enterRoom('${r.mode}', false)">${isPlaying ? '観戦して次の試合を待つ' : '入室して遊ぶ'}</button>
+        <button type="button" class="btn-spec-room" onclick="enterRoom('${r.mode}', true)">観戦</button>
+      </div>
+    `;
+    grid.appendChild(card);
+  }
+}
+
+function enterRoom(mode, wantSpectate) {
+  currentMode = mode;
+  document.getElementById("lobbyScreen").classList.add("hidden");
+  document.getElementById("gameScreen").classList.remove("hidden");
+  document.getElementById("btnExitRoom").classList.remove("hidden");
+  connectToRoom(mode, wantSpectate);
+}
+
+function exitToLobby() {
+  if (socket) { socket.close(); socket = null; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  currentMode = null;
+  document.getElementById("gameScreen").classList.add("hidden");
+  document.getElementById("lobbyScreen").classList.remove("hidden");
+  document.getElementById("btnExitRoom").classList.add("hidden");
+  loadLobby();
+}
+
+// ----------------------------------------------------------------------------
+// Room Connection (WebSocket with Polling Fallback)
+// ----------------------------------------------------------------------------
+function connectToRoom(mode, wantSpectate = false) {
+  if (socket) { socket.close(); socket = null; }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+
+  const proto = (location.protocol === "https:") ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${location.host}/trump/ws/${mode}?pid=${encodeURIComponent(currentPid)}&name=${encodeURIComponent(currentUsername)}&token=${encodeURIComponent(authToken)}&spectate=${wantSpectate ? 1 : 0}`;
+
+  try {
+    socket = new WebSocket(wsUrl);
+    socket.onmessage = (evt) => {
+      try {
+        const state = JSON.parse(evt.data);
+        handleStateUpdate(state);
+      } catch(e) {}
+    };
+    socket.onclose = () => {
+      startPollingFallback(mode);
+    };
+    socket.onerror = () => {
+      startPollingFallback(mode);
+    };
+  } catch(e) {
+    startPollingFallback(mode);
+  }
+}
+
+function startPollingFallback(mode) {
+  if (pollTimer) return;
+  pollTimer = setInterval(async () => {
+    try {
+      const res = await fetch(`/trump/api/state/${mode}?pid=${encodeURIComponent(currentPid)}&name=${encodeURIComponent(currentUsername)}&token=${encodeURIComponent(authToken)}`);
+      if (res.ok) {
+        const state = await res.json();
+        handleStateUpdate(state);
+      }
+    } catch(e) {}
+  }, 1000);
+}
+
+function sendRoomAction(actionObj) {
+  actionObj.pid = currentPid;
+  actionObj.name = currentUsername;
+  actionObj.token = authToken;
+
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    socket.send(JSON.stringify(actionObj));
+  } else if (currentMode) {
+    fetch(`/trump/api/action/${currentMode}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(actionObj)
+    }).then(res => res.json()).then(state => handleStateUpdate(state)).catch(()=>{});
+  }
+}
+
+// ----------------------------------------------------------------------------
+// State Handler & UI Rendering
+// ----------------------------------------------------------------------------
+function handleStateUpdate(state) {
+  latestState = state;
+
+  // Match in progress banner
+  const lockBanner = document.getElementById("matchLockBanner");
+  if (state.isSpectator && state.isMatchInProgress) {
+    lockBanner.classList.remove("hidden");
+  } else {
+    lockBanner.classList.add("hidden");
+  }
+
+  // Render Opponent Seats (relPos 1=West, 2=North, 3=East)
+  for (const s of state.seats) {
+    if (s.relPos === 0) continue;
+    const rel = s.relPos;
+    const seatEl = document.getElementById(`seat-rel-${rel}`);
+    if (!seatEl) continue;
+
+    seatEl.classList.toggle("active-turn", s.isTurn);
+    document.getElementById(`name-rel-${rel}`).textContent = s.name;
+    document.getElementById(`rate-rel-${rel}`).textContent = `${s.rate || 1500} R`;
+    document.getElementById(`rank-rel-${rel}`).textContent = s.rankTitle;
+
+    const cntEl = document.getElementById(`cnt-rel-${rel}`);
+    cntEl.textContent = `残り ${s.cardCount}枚`;
+
+    // Poker Showdown reveal cards
+    const showdownBox = document.getElementById(`showdown-rel-${rel}`);
+    showdownBox.innerHTML = "";
+    if (s.showdownCards && s.showdownCards.length) {
+      for (const c of s.showdownCards) {
+        showdownBox.appendChild(createCardElement(c, true));
+      }
+    }
+  }
+
+  // Center Field Area
+  renderCenterField(state);
+
+  // Bottom Player Panel & Hands (with deal motion)
+  renderPlayerBottomPanel(state);
+
+  // Result Modal
+  const resModal = document.getElementById("resultModal");
+  if (state.phase === "round_end") {
+    renderStandingsModal(state);
+    resModal.classList.add("show");
+  } else {
+    resModal.classList.remove("show");
+  }
+
+  // Audio / Events Cutin
+  if (state.events && state.events.length) {
+    const last = state.events[state.events.length - 1];
+    if (last && last.text && (!window._lastEventSeq || last.seq > window._lastEventSeq)) {
+      window._lastEventSeq = last.seq;
+      if (last.kind === "cutin") showToast(last.text);
+      if (last.sfx) playSfx(last.sfx);
+    }
+  }
+}
+
+function renderCenterField(state) {
+  const centerPlayed = document.getElementById("centerPlayedCards");
+  const centerCap = document.getElementById("centerPlayCaption");
+  const promptEl = document.getElementById("pokerPrompt");
+
+  centerPlayed.innerHTML = "";
+  centerCap.classList.add("hidden");
+  promptEl.classList.add("hidden");
+
+  if (state.mode === "poker") {
+    if (state.phase === "playing") {
+      promptEl.classList.remove("hidden");
+      const isMyTurn = (!state.isSpectator && state.currentTurn === state.mySeat);
+      if (isMyTurn) {
+        promptEl.textContent = "⚡️ あなたの番です: 交換するカードを選んで「カードを交換」を押してください";
+      } else {
+        const turnName = (state.seats.find(s => s.seat === state.currentTurn) || {}).name || "相手";
+        promptEl.textContent = `⏳ ${turnName} が手札を吟味中...`;
+      }
+    } else if (state.tablePlay) {
+      // Showdown winning hand highlight
+      for (const c of state.tablePlay.cards || []) {
+        centerPlayed.appendChild(createCardElement(c, false));
+      }
+      centerCap.textContent = state.tablePlay.label || "";
+      centerCap.classList.remove("hidden");
+    }
+  } else {
+    // Daifugo table trick
     if (state.tablePlay && state.tablePlay.cards) {
       for (const c of state.tablePlay.cards) {
-        centerRow.appendChild(createSimpleCard(c));
+        centerPlayed.appendChild(createCardElement(c, false));
       }
       if (state.tablePlay.label) {
         centerCap.textContent = state.tablePlay.label;
-        centerCap.style.display = "block";
+        centerCap.classList.remove("hidden");
       }
-    }
-
-    // Babanuki Draw Box
-    const babaBox = document.getElementById("babaDrawBox");
-    const isMyTurn = !state.isSpectator && state.phase === "playing" && state.currentTurn === state.mySeat;
-    if (state.mode === "babanuki" && isMyTurn && state.babaTarget) {
-      const t = state.babaTarget;
-      document.getElementById("babaDrawPrompt").textContent =
-        `${t.targetName}の手札 (${t.cardCount}枚) から1枚クリックして引いてください`;
-      const list = document.getElementById("babaCardsList");
-      list.innerHTML = "";
-      for (let i = 0; i < t.cardCount; i++) {
-        const b = document.createElement("div");
-        b.className = "baba-back-card";
-        b.textContent = "？";
-        b.addEventListener("click", () => {
-          babaBox.classList.remove("show");
-          sendRoomAction({ action: "draw", cardIndex: i });
-        });
-        list.appendChild(b);
-      }
-      babaBox.classList.add("show");
-    } else {
-      babaBox.classList.remove("show");
-    }
-
-    // Bottom Player Panel
-    renderMyBottomPanel(state);
-
-    // Result Modal
-    const resModal = document.getElementById("resultModal");
-    if (state.phase === "round_end") {
-      const list = document.getElementById("resultList");
-      list.innerHTML = "";
-      for (const st of state.standings || []) {
-        const d = document.createElement("div");
-        d.className = "rank-row-item";
-        d.innerHTML = `<span>${st.place}位: ${st.name}</span><span style="color:#fde047">${st.rankTitle}</span>`;
-        list.appendChild(d);
-      }
-      resModal.classList.add("show");
-    } else {
-      resModal.classList.remove("show");
     }
   }
+}
 
-  function renderMyBottomPanel(state) {
-    const myInfo = state.seats.find(s => s.relPos === 0);
-    const statusTxt = document.getElementById("myStatusText");
-    const btnHint = document.getElementById("btnHint");
-    const btnPlay = document.getElementById("btnPlay");
-    const btnPass = document.getElementById("btnPass");
-    const btnShuffle = document.getElementById("btnShuffle");
-    const btnTakeSeat = document.getElementById("btnTakeSeat");
-    const btnGoSpec = document.getElementById("btnGoSpectate");
-    const handRow = document.getElementById("myHandRow");
+function renderPlayerBottomPanel(state) {
+  const isSpec = state.isSpectator;
+  const myInfo = state.seats.find(s => s.relPos === 0);
+  const statusTxt = document.getElementById("myStatusText");
+  const myRate = myInfo ? (myInfo.rate || 1500) : currentUserRate;
 
-    if (state.isSpectator) {
-      statusTxt.textContent = `観戦中 (${playerName})`;
-      btnHint.style.display = "none";
-      btnPlay.style.display = "none";
-      btnPass.style.display = "none";
-      btnShuffle.style.display = "none";
-      btnGoSpec.style.display = "none";
-      btnTakeSeat.style.display = state.hasOpenBotSeat ? "inline-block" : "none";
-      handRow.innerHTML = `<div style="color:#94a3b8;font-size:13px">現在観戦モードです。${state.hasOpenBotSeat ? "「空き席に座る」でいつでも参加できます。" : "4席満席のため観戦中です。"}</div>`;
-      return;
-    }
+  const btnPlay = document.getElementById("btnPlay");
+  const btnPass = document.getElementById("btnPass");
+  const btnExchange = document.getElementById("btnPokerExchange");
+  const btnStay = document.getElementById("btnPokerStay");
+  const btnTakeSeat = document.getElementById("btnTakeSeat");
+  const btnGoSpec = document.getElementById("btnGoSpectate");
+  const handRow = document.getElementById("myHandRow");
 
-    btnTakeSeat.style.display = "none";
-    btnGoSpec.style.display = "inline-block";
-    statusTxt.textContent = `${playerName} (${myInfo ? myInfo.rankTitle : "平民"}) ・ 手札 ${state.myHand.length}枚`;
+  if (isSpec) {
+    statusTxt.textContent = `観戦中 (${currentUsername} ・ ${myRate} R)`;
+    btnPlay.classList.add("hidden");
+    btnPass.classList.add("hidden");
+    btnExchange.classList.add("hidden");
+    btnStay.classList.add("hidden");
+    btnGoSpec.classList.add("hidden");
 
-    if (state.mode === "babanuki") {
-      btnHint.style.display = "none";
-      btnPlay.style.display = "none";
-      btnPass.style.display = "none";
-      btnShuffle.style.display = "inline-block";
+    if (state.isMatchInProgress) {
+      btnTakeSeat.classList.remove("hidden");
+      btnTakeSeat.disabled = true;
+      btnTakeSeat.textContent = "試合終了まで着席不可";
     } else {
-      btnHint.style.display = "inline-block";
-      btnPlay.style.display = "inline-block";
-      btnPass.style.display = "inline-block";
-      btnShuffle.style.display = "none";
+      btnTakeSeat.classList.remove("hidden");
+      btnTakeSeat.disabled = false;
+      btnTakeSeat.textContent = "空き席に座る";
     }
 
-    const validIds = new Set(state.myHand.map(c => c.id));
-    for (const id of [...selectedCardIds]) {
-      if (!validIds.has(id)) selectedCardIds.delete(id);
-    }
-
-    const playableSet = new Set(state.playableIds || []);
-    const isMyTurn = state.phase === "playing" && state.currentTurn === state.mySeat;
-
-    handRow.innerHTML = "";
-    for (const card of state.myHand) {
-      const isSel = selectedCardIds.has(card.id);
-      let cls = isSel ? "selected" : "";
-      if (state.mode === "daifugo" && isMyTurn && !playableSet.has(card.id) && state.tablePlay) {
-        cls += " unplayable";
-      }
-      const el = createSimpleCard(card, cls);
-      el.addEventListener("click", () => {
-        if (state.mode === "babanuki") return;
-        if (!isMyTurn) return;
-        if (selectedCardIds.has(card.id)) selectedCardIds.delete(card.id);
-        else selectedCardIds.add(card.id);
-        playSfx("select");
-        renderMyBottomPanel(state);
-      });
-      handRow.appendChild(el);
-    }
-
-    if (state.mode === "daifugo") {
-      btnHint.disabled = !isMyTurn;
-      btnPass.disabled = !isMyTurn || !state.tablePlay;
-      btnPlay.disabled = !isMyTurn || selectedCardIds.size === 0;
-    }
+    handRow.innerHTML = `<div style="color:#94a3b8;font-size:13px;padding:20px">
+      ${state.isMatchInProgress ? "🔒 現在試合中のため観戦モードです。この試合が終了次第、空き席に着席できます。" : "🟢 現在観戦モードです。「空き席に座る」を押して対戦に参加できます。"}
+    </div>`;
+    return;
   }
 
-  window.selectSuggestedMove = function() {
-    if (!roomState || !roomState.suggestedIds || !roomState.suggestedIds.length) {
-      showToast("出せるカードがありません (パス推奨)");
-      return;
+  btnTakeSeat.classList.add("hidden");
+  btnGoSpec.classList.remove("hidden");
+  statusTxt.textContent = `${currentUsername} (⭐️ ${myRate} R) ・ 手札 ${state.myHand.length}枚`;
+
+  const isMyTurn = (state.phase === "playing" && state.currentTurn === state.mySeat);
+
+  if (state.mode === "poker") {
+    btnPlay.classList.add("hidden");
+    btnPass.classList.add("hidden");
+    btnExchange.classList.remove("hidden");
+    btnStay.classList.remove("hidden");
+
+    const exchangeCount = selectedDiscardIndices.size;
+    btnExchange.textContent = `選択カードを交換 (${exchangeCount}枚)`;
+    btnExchange.disabled = !isMyTurn;
+    btnStay.disabled = !isMyTurn;
+  } else {
+    // Daifugo Buttons
+    btnExchange.classList.add("hidden");
+    btnStay.classList.add("hidden");
+    btnPlay.classList.remove("hidden");
+    btnPass.classList.remove("hidden");
+
+    btnPlay.disabled = (!isMyTurn || selectedHandIds.size === 0);
+    btnPass.disabled = (!isMyTurn || !state.tablePlay);
+  }
+
+  // Render Hand Cards with Physical Deal Motion (配るモーション)
+  handRow.innerHTML = "";
+  state.myHand.forEach((card, idx) => {
+    let isSelected = false;
+    let extraCls = "";
+
+    if (state.mode === "poker") {
+      isSelected = selectedDiscardIndices.has(idx);
+      if (isSelected) extraCls = "poker-discard-selected";
+    } else {
+      isSelected = selectedHandIds.has(card.id);
+      if (isSelected) extraCls = "selected";
+      const playable = new Set(state.playableIds || []);
+      if (isMyTurn && state.tablePlay && !playable.has(card.id)) {
+        extraCls += " unplayable";
+      }
     }
-    selectedCardIds = new Set(roomState.suggestedIds);
-    playSfx("select");
-    renderMyBottomPanel(roomState);
-  };
 
-  window.commitPlayerMove = function() {
-    if (!roomState || selectedCardIds.size === 0) return;
-    const ids = [...selectedCardIds];
-    selectedCardIds.clear();
-    sendRoomAction({ action: "play", cardIds: ids });
-  };
+    const cardEl = createCardElement(card, false, extraCls);
+    // Add physical deal animation with staggered delay
+    cardEl.classList.add("card-dealing");
+    cardEl.style.animationDelay = `${idx * 0.08}s`;
 
-  window.playerPassTurn = function() {
-    selectedCardIds.clear();
-    sendRoomAction({ action: "pass" });
-  };
-
-  window.shufflePlayerHand = function() {
-    sendRoomAction({ action: "shuffle" });
-  };
-
-  window.toggleRulesModal = function(show) {
-    if (show && roomState && roomState.rules) {
-      document.getElementById("ruleRev").checked = Boolean(roomState.rules.revolution);
-      document.getElementById("rule8Giri").checked = Boolean(roomState.rules.eightGiri);
-      document.getElementById("rule11Back").checked = Boolean(roomState.rules.elevenBack);
-      document.getElementById("ruleShibari").checked = Boolean(roomState.rules.shibari);
-      document.getElementById("ruleSpade3").checked = Boolean(roomState.rules.spade3);
-      document.getElementById("ruleStairs").checked = Boolean(roomState.rules.stairs);
-      document.getElementById("ruleMiyako").checked = Boolean(roomState.rules.miyakoOchi);
-    }
-    document.getElementById("rulesModal").classList.toggle("show", Boolean(show));
-  };
-
-  window.saveRulesAndClose = function() {
-    sendRoomAction({
-      action: "update_rules",
-      rules: {
-        revolution: document.getElementById("ruleRev").checked,
-        eightGiri: document.getElementById("rule8Giri").checked,
-        elevenBack: document.getElementById("rule11Back").checked,
-        shibari: document.getElementById("ruleShibari").checked,
-        spade3: document.getElementById("ruleSpade3").checked,
-        stairs: document.getElementById("ruleStairs").checked,
-        miyakoOchi: document.getElementById("ruleMiyako").checked,
-      },
+    cardEl.addEventListener("click", () => {
+      if (!isMyTurn) return;
+      playSfx("select");
+      if (state.mode === "poker") {
+        if (selectedDiscardIndices.has(idx)) selectedDiscardIndices.delete(idx);
+        else selectedDiscardIndices.add(idx);
+      } else {
+        if (selectedHandIds.has(card.id)) selectedHandIds.delete(card.id);
+        else selectedHandIds.add(card.id);
+      }
+      renderPlayerBottomPanel(state);
     });
-    toggleRulesModal(false);
-  };
 
-  // Start on Room Selection Lobby Screen and poll live room counts
-  refreshLobby();
-  lobbyTimer = setInterval(refreshLobby, 2000);
-})();
+    handRow.appendChild(cardEl);
+  });
+}
+
+function createCardElement(card, isMini = false, extraCls = "") {
+  const el = document.createElement("div");
+  const colorCls = card.isJoker ? "joker" : (card.color === "red" ? "red" : "black");
+  el.className = `t-card ${colorCls} ${isMini ? 't-card-mini' : ''} ${extraCls}`;
+
+  if (card.isJoker) {
+    el.innerHTML = `
+      <div class="t-card-corner-top"><span class="num">J</span><span class="suit">★</span></div>
+      <div class="t-card-center-symbol">🃏</div>
+      <div class="t-card-corner-bottom"><span class="num">J</span><span class="suit">★</span></div>
+    `;
+  } else {
+    el.innerHTML = `
+      <div class="t-card-corner-top"><span class="num">${card.label}</span><span class="suit">${card.suitSymbol}</span></div>
+      <div class="t-card-center-symbol">${card.suitSymbol}</div>
+      <div class="t-card-corner-bottom"><span class="num">${card.label}</span><span class="suit">${card.suitSymbol}</span></div>
+    `;
+  }
+  return el;
+}
+
+function renderStandingsModal(state) {
+  const list = document.getElementById("standingsList");
+  list.innerHTML = "";
+  for (const st of state.standings || []) {
+    const item = document.createElement("div");
+    item.className = `standing-item ${st.isMe ? 'me' : ''}`;
+    const delta = st.rateDelta || 0;
+    const deltaCls = delta >= 0 ? "delta-plus" : "delta-minus";
+    const deltaTxt = delta >= 0 ? `+${delta}` : `${delta}`;
+
+    item.innerHTML = `
+      <div class="standing-rank">${st.place}位</div>
+      <div class="standing-name">${st.name} ${st.isMe ? '(あなた)' : ''}</div>
+      <div class="standing-hand">${st.rankTitle}</div>
+      <div class="standing-rate-delta ${deltaCls}">${deltaTxt} R (新: ${st.newRate || st.rate} R)</div>
+    `;
+    list.appendChild(item);
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Action Triggers
+// ----------------------------------------------------------------------------
+function commitPlayerMove() {
+  if (selectedHandIds.size === 0) return;
+  sendRoomAction({ action: "play", cardIds: Array.from(selectedHandIds) });
+  selectedHandIds.clear();
+}
+
+function playerPassTurn() {
+  sendRoomAction({ action: "pass" });
+  selectedHandIds.clear();
+}
+
+function commitPokerExchange() {
+  const indices = Array.from(selectedDiscardIndices);
+  sendRoomAction({ action: "poker_exchange", cardIndices: indices });
+  selectedDiscardIndices.clear();
+}
+
+function commitPokerStay() {
+  sendRoomAction({ action: "poker_stay" });
+  selectedDiscardIndices.clear();
+}
+
+function switchSpectate(wantSpectate) {
+  sendRoomAction({ action: "toggle_spectate", spectate: wantSpectate });
+}
+
+function showToast(msg) {
+  const banner = document.getElementById("toastBanner");
+  banner.textContent = msg;
+  banner.classList.add("show");
+  clearTimeout(window._toastTimeout);
+  window._toastTimeout = setTimeout(() => banner.classList.remove("show"), 2800);
+}
+
+// Initial Boot
+window.addEventListener("DOMContentLoaded", () => {
+  checkAuthStatus();
+  loadLobby();
+  setInterval(loadLobby, 4000);
+});
 </script>
 </body>
 </html>
@@ -2557,5 +2337,4 @@ html, body {
 @router.get("/trump", response_class=HTMLResponse)
 @router.get("/trump/", response_class=HTMLResponse)
 async def trump_game_page():
-    _ensure_bg_loop()
-    return HTMLResponse(content=_HTML_PAGE, headers={"Cache-Control": "no-store"})
+    return HTMLResponse(TRUMP_HTML)
