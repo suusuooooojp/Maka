@@ -350,19 +350,23 @@ def _qr_login_worker(login_id: str) -> None:
     max_polls: int = int(state.get("maxPolls") or 35)
 
     try:
-        # Phase 1: Wait for QR Code scan on smartphone
+        # Phase 1: Wait for QR Code scan on smartphone (poll in 25s windows up to ~4 minutes)
         scanned = False
-        for _ in range(max_polls):
+        poll_attempts = max(max_polls, 12)
+        for _ in range(poll_attempts):
             with _LOCK:
                 if login_id not in _QR_LOGINS or _QR_LOGINS[login_id].get("cancelled"):
                     return
             try:
-                api.auth.qr_check_verified(auth_session_id, timeout_ms=max(interval * 1000, 3000))
+                api.auth.qr_check_verified(auth_session_id, timeout_ms=25000)
                 scanned = True
                 break
             except LineApiError as exc:
-                if exc.http_status in (408, 410):
-                    time.sleep(min(interval, 2))
+                if getattr(exc, "status", None) in (408, 410) or getattr(exc, "code", None) in (408, 410, 10052):
+                    continue
+                raise
+            except Exception as exc:
+                if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
                     continue
                 raise
 
@@ -373,14 +377,14 @@ def _qr_login_worker(login_id: str) -> None:
                     _QR_LOGINS[login_id]["error"] = "QRコードの有効期限が切れました。「QRコードを更新」を押してください。"
             return
 
-        # Phase 2: Certificate verify or 6-digit PIN verification
+        # Phase 2: Certificate verify (REQUIRED by LINE state machine even when cert is empty) -> 6-digit PIN verification
+        cert_str = certificate if certificate is not None else (api.transport.tokens.certificate or "")
         need_pin = True
-        if certificate:
-            try:
-                api.auth.qr_verify_certificate(auth_session_id, certificate)
-                need_pin = False
-            except LineApiError:
-                need_pin = True
+        try:
+            api.auth.qr_verify_certificate(auth_session_id, cert_str)
+            need_pin = False
+        except LineApiError:
+            need_pin = True
 
         if need_pin:
             pin = api.auth.qr_create_pincode(auth_session_id)
@@ -390,17 +394,20 @@ def _qr_login_worker(login_id: str) -> None:
                     _QR_LOGINS[login_id]["pinCode"] = str(pin)
 
             pin_verified = False
-            for _ in range(max_polls):
+            for _ in range(poll_attempts):
                 with _LOCK:
                     if login_id not in _QR_LOGINS or _QR_LOGINS[login_id].get("cancelled"):
                         return
                 try:
-                    api.auth.qr_check_pincode_verified(auth_session_id, timeout_ms=max(interval * 1000, 3000))
+                    api.auth.qr_check_pincode_verified(auth_session_id, timeout_ms=25000)
                     pin_verified = True
                     break
                 except LineApiError as exc:
-                    if exc.http_status in (408, 410):
-                        time.sleep(min(interval, 2))
+                    if getattr(exc, "status", None) in (408, 410) or getattr(exc, "code", None) in (408, 410, 10052):
+                        continue
+                    raise
+                except Exception as exc:
+                    if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
                         continue
                     raise
 

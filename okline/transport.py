@@ -700,7 +700,16 @@ class Transport:
 
     # -- internals -----------------------------------------------------------
     def _send(self, method: str, url: str, **kw: Any) -> requests.Response:
-        kw.setdefault("timeout", self.config.timeout)
+        if "timeout" not in kw or kw["timeout"] is None:
+            hdrs = kw.get("headers") or {}
+            lst = hdrs.get("X-LST") or hdrs.get("x-lst")
+            if lst:
+                try:
+                    kw["timeout"] = max(self.config.timeout, float(lst) / 1000.0 + 15.0)
+                except (ValueError, TypeError):
+                    kw["timeout"] = self.config.timeout
+            else:
+                kw["timeout"] = self.config.timeout
         kw.setdefault("verify", self.config.verify_tls)
         if self.rate_limiter is not None and not kw.get("stream"):
             self.rate_limiter.acquire()
