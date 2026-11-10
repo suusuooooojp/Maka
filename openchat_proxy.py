@@ -13,6 +13,7 @@ import re
 import time
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
+import unicodedata
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 import httpx
@@ -644,14 +645,21 @@ def _seed_names_from_messages():
 
 
 def _hash_chat_password(password: str, salt: str) -> str:
-    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    """Cryptographically secure PBKDF2 HMAC-SHA256 password hash (100,000 iterations)."""
+    return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 100000).hex()
 
 
 def _verify_chat_password(password: str, salt: str, expected_hash: str) -> bool:
+    """Timing-safe verification with backward compatibility for legacy single-round sha256."""
     if not password or not salt or not expected_hash:
         return False
-    computed = _hash_chat_password(password, salt)
-    return hmac.compare_digest(computed, expected_hash)
+    computed_pbkdf2 = _hash_chat_password(password, salt)
+    if hmac.compare_digest(computed_pbkdf2, expected_hash):
+        return True
+    legacy_sha256 = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    if hmac.compare_digest(legacy_sha256, expected_hash):
+        return True
+    return False
 
 
 def _save_chat_users():
@@ -1902,17 +1910,36 @@ async def login_openchat(request: Request):
         parts = username.split("#", 1)
         username = parts[0].strip()
         password = parts[1].strip()
-    username = re.sub(r"[\r\n\t]", "", username).strip()
-    password = password.strip().lstrip("#").lstrip("◆").strip()
+    username = unicodedata.normalize("NFKC", str(username or "")).strip()
+    username = re.sub(r"[\u200b-\u200d\ufeff\r\n\t]", "", username).strip()
+    password = str(password or "").strip().lstrip("#").lstrip("◆").strip()
     if not username:
         return JSONResponse(
             {"ok": False, "error": "名前を入力してください"},
             status_code=400,
             headers=_CORS_HEADERS,
         )
+    if len(username) > 20:
+        return JSONResponse(
+            {"ok": False, "error": "名前は20文字以内で入力してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
     if not password:
         return JSONResponse(
             {"ok": False, "error": "パスワードを入力してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+    if len(password) < 4:
+        return JSONResponse(
+            {"ok": False, "error": "パスワードは4文字以上で設定してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+    if len(password) > 64:
+        return JSONResponse(
+            {"ok": False, "error": "パスワードは64文字以内で入力してください"},
             status_code=400,
             headers=_CORS_HEADERS,
         )
@@ -1924,7 +1951,7 @@ async def login_openchat(request: Request):
             status_code=400,
             headers=_CORS_HEADERS,
         )
-    if norm in ("SYS", "SYSTEM", "ADMIN", "ADMINISTRATOR"):
+    if norm in ("SYS", "SYSTEM", "ADMIN", "ADMINISTRATOR", "MODERATOR", "GOOGLE", "SCHOOLHUB"):
         return JSONResponse(
             {"ok": False, "error": "その名前は予約されており使用できません"},
             status_code=400,
@@ -1942,6 +1969,9 @@ async def login_openchat(request: Request):
                 status_code=401,
                 headers=_CORS_HEADERS,
             )
+        # Automatic security upgrade: update legacy hash to PBKDF2
+        if len(expected_hash) == 64:
+            stored_user["hash"] = _hash_chat_password(password, salt)
         stored_user["last_login"] = time.time()
         if cid:
             stored_user["clientId"] = cid
@@ -4448,43 +4478,108 @@ _CLIENT_JS = r"""
     .sh-google-input {
       width: 100%;
       box-sizing: border-box;
-      padding: 10px 14px;
+      padding: 11px 14px;
       font-size: 14px;
       color: var(--sh-m3-on-surface);
       background: var(--sh-m3-surface-lowest);
       border: 1px solid var(--sh-m3-outline);
-      border-radius: 10px;
+      border-radius: 12px;
       outline: none;
+      transition: border-color 200ms cubic-bezier(0.2, 0, 0, 1), box-shadow 200ms cubic-bezier(0.2, 0, 0, 1), background-color 200ms ease;
     }
     .sh-google-input:focus {
       border-color: var(--sh-m3-primary);
-      box-shadow: 0 0 0 2px var(--sh-m3-primary-container);
+      box-shadow: 0 0 0 3px rgba(11, 87, 208, 0.2);
+    }
+    .sh-pass-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      width: 100%;
+    }
+    .sh-pass-wrap .sh-google-input {
+      padding-right: 44px;
+    }
+    .sh-pass-toggle-btn {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: transparent;
+      border: none;
+      color: var(--sh-m3-on-surface-variant);
+      padding: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      transition: background-color 150ms ease, color 150ms ease;
+    }
+    .sh-pass-toggle-btn:hover {
+      background: var(--sh-m3-surface-container);
+      color: var(--sh-m3-on-surface);
+    }
+    .sh-pass-hint {
+      font-size: 11.5px;
+      color: var(--sh-m3-on-surface-variant);
+      margin-top: 5px;
+      line-height: 1.4;
+      opacity: 0.9;
+    }
+    #sh-login-error {
+      background: #fce8e6;
+      color: #c5221f;
+      border: 1px solid #f5c6cb;
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 12.5px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      animation: shShake 350ms cubic-bezier(0.2, 0, 0, 1);
+    }
+    @keyframes shShake {
+      0%, 100% { transform: translateX(0); }
+      20%, 60% { transform: translateX(-6px); }
+      40%, 80% { transform: translateX(6px); }
     }
     .sh-google-login-actions {
       display: flex;
       justify-content: flex-end;
-      gap: 8px;
-      margin-top: 16px;
+      gap: 10px;
+      margin-top: 18px;
     }
     .sh-google-btn-cancel {
       background: transparent;
       color: var(--sh-m3-primary);
       border: none;
       border-radius: 999px;
-      padding: 8px 16px;
-      font-size: 13px;
+      padding: 9px 18px;
+      font-size: 13.5px;
       font-weight: 600;
       cursor: pointer;
+      transition: background-color 150ms ease;
+    }
+    .sh-google-btn-cancel:hover {
+      background: var(--sh-m3-surface-container);
     }
     .sh-google-btn-submit {
       background: var(--sh-m3-primary);
       color: var(--sh-m3-on-primary);
       border: none;
       border-radius: 999px;
-      padding: 8px 22px;
-      font-size: 13px;
+      padding: 9px 24px;
+      font-size: 13.5px;
       font-weight: 600;
       cursor: pointer;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+      transition: background-color 150ms ease, box-shadow 150ms ease, transform 100ms ease;
+    }
+    .sh-google-btn-submit:hover {
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    }
+    .sh-google-btn-submit:active {
+      transform: scale(0.97);
     }
     #sh-img-lightbox {
       position: fixed;
@@ -4705,8 +4800,14 @@ _CLIENT_JS = r"""
             <input type="text" id="sh-login-username" class="sh-google-input" placeholder="名前を入力 (名前被り禁止)" maxlength="24" required autocomplete="username" />
           </div>
           <div class="sh-google-field">
-            <label for="sh-login-password">パスワード (必須)</label>
-            <input type="password" id="sh-login-password" class="sh-google-input" placeholder="パスワードを入力 (初回は登録されます)" maxlength="32" required autocomplete="current-password" />
+            <label for="sh-login-password">パスワード (必須・4文字以上)</label>
+            <div class="sh-pass-wrap">
+              <input type="password" id="sh-login-password" class="sh-google-input" placeholder="パスワードを入力 (初回は自動登録)" minlength="4" maxlength="64" required autocomplete="current-password" />
+              <button type="button" class="sh-pass-toggle-btn" id="sh-login-pass-toggle" title="パスワードの表示/非表示" aria-label="パスワードの表示/非表示">
+                <svg id="sh-pass-eye-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
+            <div class="sh-pass-hint">※設定したパスワードで名前が保護されます（名前被り防止）</div>
           </div>
           <div id="sh-login-error" style="display:none;color:#d93025;font-size:12px;margin-bottom:8px;font-weight:600;"></div>
           <div class="sh-google-login-actions">
@@ -5026,6 +5127,22 @@ _CLIENT_JS = r"""
     });
   }
   if (loginForm) {
+    const passToggleBtn = document.getElementById('sh-login-pass-toggle');
+    const passEyeIcon = document.getElementById('sh-pass-eye-icon');
+    if (passToggleBtn && loginPasswordInput) {
+      passToggleBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const isPass = loginPasswordInput.type === 'password';
+        loginPasswordInput.type = isPass ? 'text' : 'password';
+        if (passEyeIcon) {
+          passEyeIcon.innerHTML = isPass
+            ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/>'
+            : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+        }
+      });
+    }
+
     loginForm.addEventListener('submit', async (e) => {
       e.preventDefault();
       e.stopPropagation();
@@ -5038,12 +5155,32 @@ _CLIENT_JS = r"""
         }
         return;
       }
+      if (uname.length > 20) {
+        if (loginErrorEl) {
+          loginErrorEl.textContent = '名前は20文字以内で入力してください';
+          loginErrorEl.style.display = 'block';
+        }
+        return;
+      }
       if (!upass) {
         if (loginErrorEl) {
           loginErrorEl.textContent = 'パスワードを入力してください';
           loginErrorEl.style.display = 'block';
         }
         return;
+      }
+      if (upass.length < 4) {
+        if (loginErrorEl) {
+          loginErrorEl.textContent = 'パスワードは4文字以上で設定してください';
+          loginErrorEl.style.display = 'block';
+        }
+        return;
+      }
+      const submitBtn = document.getElementById('sh-login-submit-btn');
+      const prevBtnText = submitBtn ? submitBtn.textContent : '';
+      if (submitBtn) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = '認証中...';
       }
       try {
         const res = await fetch(getApiUrl('/openchat/login'), {
@@ -5085,6 +5222,11 @@ _CLIENT_JS = r"""
         if (loginErrorEl) {
           loginErrorEl.textContent = '通信エラーが発生しました';
           loginErrorEl.style.display = 'block';
+        }
+      } finally {
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = prevBtnText || 'ログイン / 登録';
         }
       }
     });

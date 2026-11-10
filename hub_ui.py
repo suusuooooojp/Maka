@@ -306,6 +306,30 @@ html, body {{
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+  transition: background-color 320ms cubic-bezier(0.2, 0, 0, 1), color 320ms cubic-bezier(0.2, 0, 0, 1);
+}}
+.m3-top-app-bar,
+.m3-sidebar,
+.card.service,
+.search-surface,
+.m3-category-tabs,
+.tab-btn,
+.bottom-nav,
+.bottom-nav-item,
+.recent-service-card,
+.peer-ranking-card,
+.status-banner {{
+  transition: background-color 320ms cubic-bezier(0.2, 0, 0, 1),
+              border-color 320ms cubic-bezier(0.2, 0, 0, 1),
+              color 320ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 320ms cubic-bezier(0.2, 0, 0, 1);
+}}
+#themeToggleIcon {{
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 320ms cubic-bezier(0.2, 0, 0, 1), opacity 180ms ease;
+  will-change: transform, opacity;
 }}
 a {{
   color: inherit;
@@ -759,26 +783,38 @@ button, input, textarea, select {{
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
+  height: 38px;
   padding: 0 16px;
-  border-radius: 8px;
+  border-radius: 9999px;
   border: 1px solid var(--md-sys-color-outline-variant);
   background-color: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface-variant);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+  transition: all 220ms cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform, background-color, box-shadow;
 }}
 .tab-btn:hover {{
-  background-color: var(--md-sys-color-surface-container-low);
+  background-color: var(--md-sys-color-surface-container-high);
   color: var(--md-sys-color-on-surface);
+  transform: translateY(-1px);
+}}
+.tab-btn:active {{
+  transform: translateY(0) scale(0.96);
+  transition-duration: 80ms;
 }}
 .tab-btn.active {{
-  background-color: var(--md-sys-color-primary-container);
-  color: var(--md-sys-color-on-primary-container);
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
   border-color: transparent;
   font-weight: 600;
+  box-shadow: 0 2px 8px rgba(11, 87, 208, 0.28);
+}}
+[data-theme="dark"] .tab-btn.active {{
+  background-color: var(--md-sys-color-primary-container);
+  color: var(--md-sys-color-on-primary-container);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
 }}
 .tab-count {{
   font-size: 11.5px;
@@ -898,18 +934,42 @@ button, input, textarea, select {{
 .card.service {{
   background-color: var(--md-sys-color-surface-container-lowest);
   border: 1px solid var(--md-sys-color-outline-variant);
-  border-radius: 14px;
+  border-radius: 16px;
   padding: 16px;
   min-height: 152px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 10px;
-  transition: background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+  transition: transform 240ms cubic-bezier(0.2, 0, 0, 1),
+              box-shadow 240ms cubic-bezier(0.2, 0, 0, 1),
+              background-color 320ms cubic-bezier(0.2, 0, 0, 1),
+              border-color 320ms cubic-bezier(0.2, 0, 0, 1),
+              opacity 200ms ease;
+  will-change: transform, box-shadow;
 }}
 .card.service:hover {{
+  transform: translateY(-4px);
   background-color: var(--md-sys-color-surface-container-low);
-  border-color: var(--md-sys-color-outline);
+  border-color: var(--md-sys-color-primary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+}}
+[data-theme="dark"] .card.service:hover {{
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25);
+}}
+.card.service:active {{
+  transform: translateY(-1px) scale(0.99);
+  transition-duration: 80ms;
+}}
+@keyframes m3CardEnter {{
+  0% {{
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }}
+  100% {{
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }}
 }}
 .card-head {{
   display: flex;
@@ -2240,7 +2300,15 @@ button, input, textarea, select {{
     const labelEl = $("themeToggleLabel");
     const iconEl = $("themeToggleIcon");
     if (labelEl) labelEl.textContent = theme === "dark" ? "ライト" : "ダーク";
-    if (iconEl) iconEl.innerHTML = theme === "dark" ? ICON_SUN : ICON_MOON;
+    if (iconEl) {{
+      iconEl.style.transform = "rotate(180deg) scale(0.6)";
+      iconEl.style.opacity = "0.2";
+      setTimeout(() => {{
+        iconEl.innerHTML = theme === "dark" ? ICON_SUN : ICON_MOON;
+        iconEl.style.transform = "rotate(0deg) scale(1)";
+        iconEl.style.opacity = "1";
+      }}, 130);
+    }}
   }}
   const savedTheme = (() => {{
     try {{
@@ -2326,7 +2394,7 @@ button, input, textarea, select {{
       b.classList.toggle("active", (b.dataset.navFilter || "") === activeFilter);
     }});
     document.querySelectorAll("[data-nav-target]").forEach(b => b.classList.remove("active"));
-    filterCards();
+    filterCards(true);
   }}
 
   document.querySelectorAll("[data-nav-filter]").forEach(btn => {{
@@ -2533,11 +2601,12 @@ button, input, textarea, select {{
     }});
   }}
 
-  function filterCards() {{
+  function filterCards(animate = false) {{
     const q = (searchInput?.value || "").trim().toLowerCase();
     if (searchClear) searchClear.style.display = q ? "inline-flex" : "none";
     const favs = getFavs();
     let visible = 0;
+    let animIdx = 0;
     cards.forEach(card => {{
       const name = (card.dataset.name || "").toLowerCase();
       const cat = card.dataset.category || "";
@@ -2549,7 +2618,15 @@ button, input, textarea, select {{
       const matchQuery = !q || name.includes(q) || kw.includes(q) || text.includes(q);
       const show = matchCat && matchQuery;
       card.style.display = show ? "flex" : "none";
-      if (show) visible++;
+      if (show) {{
+        visible++;
+        if (animate) {{
+          card.style.animation = "none";
+          void card.offsetHeight;
+          card.style.animation = `m3CardEnter 280ms cubic-bezier(0.05, 0.7, 0.1, 1) ${{animIdx * 20}}ms both`;
+          animIdx++;
+        }}
+      }}
     }});
     if (emptySearch) emptySearch.style.display = visible === 0 ? "block" : "none";
     updateSearchSuggestions(q);
