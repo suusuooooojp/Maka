@@ -117,7 +117,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261109-ig-v6"
+RUNTIME_REV = "20261109-ig-v7"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -1073,9 +1073,9 @@ _IMAGE_CACHE_TTL = 3600.0
 _IMAGE_CACHE_MAX_ITEMS = 512
 _IMAGE_CACHE_MAX_BYTES = 2 * 1024 * 1024
 _STATIC_ASSET_CACHE: dict[str, tuple[float, int, str, list[list[str]], bytes]] = {}
-_STATIC_ASSET_TTL = 1800.0
-_STATIC_ASSET_MAX_ITEMS = 1024
-_STATIC_ASSET_MAX_BYTES = 6 * 1024 * 1024
+_STATIC_ASSET_TTL = 3600.0 * 6
+_STATIC_ASSET_MAX_ITEMS = 2048
+_STATIC_ASSET_MAX_BYTES = 16 * 1024 * 1024
 
 _RELAY_STRIP_REQ_HEADERS = {
     "host",
@@ -2455,7 +2455,7 @@ async def ig_http_relay(request: Request):
                 b"" if method == "HEAD" else c_body,
             )
 
-    cacheable = (not has_sensitive_auth) and _is_cacheable_static_asset(method, url)
+    cacheable = _is_cacheable_static_asset(method, url)
     if cacheable:
         cached = _STATIC_ASSET_CACHE.get(url)
         if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
@@ -2466,7 +2466,12 @@ async def ig_http_relay(request: Request):
     extra_set_cookies: list[tuple[str, str]] = []
     try:
         if StatelessCurlSession is not None:
-            if has_sensitive_auth:
+            is_credential_login = (
+                method == "POST"
+                and host in ("www.instagram.com", "instagram.com")
+                and req_path.startswith(("/accounts/login", "/api/v1/web/accounts/login"))
+            )
+            if is_credential_login:
                 ephemeral_session = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
@@ -3179,8 +3184,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         }} catch (_) {{}}
       }}
 
-      const hasCookie = list.some(([k]) => k.toLowerCase() === "cookie");
-      const canClientCache = !hasCookie && isClientCacheableAsset(m, urlStr);
+      const canClientCache = isClientCacheableAsset(m, urlStr);
       if (canClientCache && typeof caches !== "undefined") {{
         try {{
           const cache = await caches.open(STATIC_CACHE_NAME);

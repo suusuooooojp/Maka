@@ -97,10 +97,14 @@ def render_home(proxies, request=None):
         ccu_num = int(svc_ccu_map.get(name_raw) or 0)
         acc_num = int(svc_counts.get(name_raw) or 0)
         status_cls = "service-status active" if ccu_num > 0 else "service-status"
+        is_def_fav = (name.lower() == "youtube")
+        fav_cls = "fav-btn pinned" if is_def_fav else "fav-btn"
+        aria_pr = "true" if is_def_fav else "false"
         cards_html.append(
             f'''<a class="card service" href="{path_esc}" data-service="{name_esc}" data-name="{name_esc}" '''
             f'''data-path="{path_esc}" data-category="{cat_esc}" data-cat-label="{cat_label_esc}" '''
-            f'''data-desc="{desc_esc}" data-icon-key="{escape(icon_key)}" data-keywords="{kw_esc}">'''
+            f'''data-desc="{desc_esc}" data-icon-key="{escape(icon_key)}" data-keywords="{kw_esc}" '''
+            f'''style="{'order:-1;' if is_def_fav else ''}">'''
             f'''<div class="card-head">'''
             f'''<div class="card-title-group">'''
             f'''<span class="card-icon-box" data-cat="{cat_esc}">{svc_svg}</span>'''
@@ -109,7 +113,7 @@ def render_home(proxies, request=None):
             f'''<span class="cat-tag">{cat_label_esc}</span>'''
             f'''</div>'''
             f'''</div>'''
-            f'''<button type="button" class="fav-btn" data-fav="{name_esc}" title="ピン留め固定" aria-label="ピン留め固定">{star_svg}</button>'''
+            f'''<button type="button" class="{fav_cls}" data-fav="{name_esc}" aria-pressed="{aria_pr}" title="ピン留め固定" aria-label="ピン留め固定">{star_svg}</button>'''
             f'''</div>'''
             f'''<div class="card-sub"><span class="card-desc">{desc_esc}</span><span class="card-path">{path_esc}</span></div>'''
             f'''<div class="card-foot">'''
@@ -2369,8 +2373,23 @@ button, input, textarea, select {{
 
   // --- Favorites (Pin) & Recently Used Services ---
   function getFavs() {{
-    try {{ return new Set(JSON.parse(localStorage.getItem(FAV_KEY) || "[]")); }}
-    catch (_) {{ return new Set(); }}
+    try {{
+      const stored = localStorage.getItem(FAV_KEY);
+      let s;
+      if (stored === null) {{
+        s = new Set(["youtube"]);
+        saveFavs(s);
+      }} else {{
+        s = new Set(JSON.parse(stored || "[]"));
+      }}
+      if (!localStorage.getItem(FAV_KEY + "_yt_auto_v1")) {{
+        s.add("youtube");
+        try {{ localStorage.setItem(FAV_KEY + "_yt_auto_v1", "1"); }} catch (_) {{}}
+        saveFavs(s);
+      }}
+      return s;
+    }}
+    catch (_) {{ return new Set(["youtube"]); }}
   }}
   function saveFavs(set) {{
     try {{ localStorage.setItem(FAV_KEY, JSON.stringify([...set])); }} catch (_) {{}}

@@ -26,17 +26,22 @@ for _np_var in ("NO_PROXY", "no_proxy"):
 router = APIRouter()
 SERVICE_NAME = None
 
+import secrets
+
 JST = ZoneInfo("Asia/Tokyo")
 _HISTORY_FILE = "/tmp/openchat_history.json"
 _PERSISTENT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openchat_history.json")
 _NAMES_FILE = "/tmp/openchat_names.json"
 _PERSISTENT_NAMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openchat_names.json")
+_USERS_FILE = "/tmp/openchat_users.json"
+_PERSISTENT_USERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openchat_users.json")
 _EPOCH_FILE = "/tmp/openchat_epoch.json"
 _PERSISTENT_EPOCH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "openchat_epoch.json")
 _MAX_MESSAGES = 1000
 
 _MESSAGES: list[dict] = []
 _NAME_OWNERS: dict[str, str] = {}
+_CHAT_USERS: dict[str, dict] = {}
 _WS_CLIENTS: set[WebSocket] = set()
 _RESET_EPOCH_TS: float = 0.0
 
@@ -638,14 +643,53 @@ def _seed_names_from_messages():
         _save_names()
 
 
+def _hash_chat_password(password: str, salt: str) -> str:
+    return hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+
+
+def _verify_chat_password(password: str, salt: str, expected_hash: str) -> bool:
+    if not password or not salt or not expected_hash:
+        return False
+    computed = _hash_chat_password(password, salt)
+    return hmac.compare_digest(computed, expected_hash)
+
+
+def _save_chat_users():
+    for fpath in (_PERSISTENT_USERS_FILE, _USERS_FILE):
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(_CHAT_USERS, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+def _load_chat_users():
+    global _CHAT_USERS
+    for fpath in (_PERSISTENT_USERS_FILE, _USERS_FILE):
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        _CHAT_USERS = data
+                        break
+            except Exception:
+                pass
+
+
 def _check_and_claim_name(sender_id: str, client_id: str) -> tuple[bool, str]:
     """Return (allowed, owner_client_id). Enforces unique names across different clients."""
     norm = _normalize_name(sender_id)
     if not norm:
         return False, "empty"
-    if norm in ("SYS", "SYSTEM", "ADMIN"):
+    if norm in ("SYS", "SYSTEM", "ADMIN", "ADMINISTRATOR"):
         return False, "__system__"
     cid = _clean_str(client_id, 64)
+    if norm in _CHAT_USERS:
+        u = _CHAT_USERS[norm]
+        if cid and u.get("clientId") == cid:
+            return True, cid
+        return False, "registered_user"
     existing_owner = _NAME_OWNERS.get(norm)
     if existing_owner:
         if cid and existing_owner == cid:
@@ -1245,6 +1289,7 @@ def _load_history():
     global _MESSAGES
     _load_epoch()
     _load_names()
+    _load_chat_users()
     _load_cid_map()
     for fpath in (_PERSISTENT_FILE, _HISTORY_FILE):
         if os.path.exists(fpath):
@@ -1861,10 +1906,70 @@ async def login_openchat(request: Request):
     password = password.strip().lstrip("#").lstrip("◆").strip()
     if not username:
         return JSONResponse(
-            {"ok": False, "error": "ユーザー名を入力してください"},
+            {"ok": False, "error": "名前を入力してください"},
             status_code=400,
             headers=_CORS_HEADERS,
         )
+    if not password:
+        return JSONResponse(
+            {"ok": False, "error": "パスワードを入力してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+
+    norm = _normalize_name(username)
+    if not norm:
+        return JSONResponse(
+            {"ok": False, "error": "有効な名前を入力してください"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+    if norm in ("SYS", "SYSTEM", "ADMIN", "ADMINISTRATOR"):
+        return JSONResponse(
+            {"ok": False, "error": "その名前は予約されており使用できません"},
+            status_code=400,
+            headers=_CORS_HEADERS,
+        )
+
+    # Enforce password + name system with no duplicate names (名前被り禁止)
+    stored_user = _CHAT_USERS.get(norm)
+    if stored_user:
+        salt = str(stored_user.get("salt") or "")
+        expected_hash = str(stored_user.get("hash") or "")
+        if not _verify_chat_password(password, salt, expected_hash):
+            return JSONResponse(
+                {"ok": False, "error": "この名前は既に登録されています。正しいパスワードを入力してください。"},
+                status_code=401,
+                headers=_CORS_HEADERS,
+            )
+        stored_user["last_login"] = time.time()
+        if cid:
+            stored_user["clientId"] = cid
+            _NAME_OWNERS[norm] = cid
+        _save_chat_users()
+        _save_names()
+    else:
+        existing_owner = _NAME_OWNERS.get(norm)
+        if existing_owner and existing_owner not in (cid, f"legacy:{norm}") and not existing_owner.startswith("legacy:"):
+            return JSONResponse(
+                {"ok": False, "error": "この名前は既に使用されています（名前被り禁止）"},
+                status_code=400,
+                headers=_CORS_HEADERS,
+            )
+        salt = secrets.token_hex(16)
+        pwd_hash = _hash_chat_password(password, salt)
+        _CHAT_USERS[norm] = {
+            "name": username,
+            "norm": norm,
+            "salt": salt,
+            "hash": pwd_hash,
+            "clientId": cid,
+            "created_at": time.time(),
+            "last_login": time.time(),
+        }
+        _NAME_OWNERS[norm] = cid or "registered"
+        _save_chat_users()
+        _save_names()
     auth_token = _sign_auth_token(username, password)
     my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=password, custom_name=username)
     trip_code = _calculate_tripcode(password) if password else ""
@@ -4593,20 +4698,20 @@ _CLIENT_JS = r"""
           <span style="color:#4285F4">G</span><span style="color:#EA4335">o</span><span style="color:#FBBC05">o</span><span style="color:#4285F4">g</span><span style="color:#34A853">l</span><span style="color:#EA4335">e</span>
         </div>
         <div class="sh-google-login-title">オープンチャットにログイン</div>
-        <div class="sh-google-login-sub">見るだけならログイン不要です。<br>チャットや動画を投稿するにはログインしてください。</div>
+        <div class="sh-google-login-sub">見るだけならログイン不要です。<br>チャットや動画を投稿するには名前とパスワードを入力してください（名前被り禁止・初回入力で自動登録）。</div>
         <form id="sh-login-form">
           <div class="sh-google-field">
-            <label for="sh-login-username">ニックネーム / ユーザー名 (必須)</label>
-            <input type="text" id="sh-login-username" class="sh-google-input" placeholder="例: たろう" maxlength="24" required autocomplete="username" />
+            <label for="sh-login-username">名前 (必須・重複不可)</label>
+            <input type="text" id="sh-login-username" class="sh-google-input" placeholder="名前を入力 (名前被り禁止)" maxlength="24" required autocomplete="username" />
           </div>
           <div class="sh-google-field">
-            <label for="sh-login-password">パスワード / トリップキー (任意)</label>
-            <input type="password" id="sh-login-password" class="sh-google-input" placeholder="設定すると◆トリップが付きます" maxlength="24" autocomplete="current-password" />
+            <label for="sh-login-password">パスワード (必須)</label>
+            <input type="password" id="sh-login-password" class="sh-google-input" placeholder="パスワードを入力 (初回は登録されます)" maxlength="32" required autocomplete="current-password" />
           </div>
           <div id="sh-login-error" style="display:none;color:#d93025;font-size:12px;margin-bottom:8px;font-weight:600;"></div>
           <div class="sh-google-login-actions">
             <button type="button" class="sh-google-btn-cancel" id="sh-login-cancel-btn">見るだけにする</button>
-            <button type="submit" class="sh-google-btn-submit" id="sh-login-submit-btn">ログイン</button>
+            <button type="submit" class="sh-google-btn-submit" id="sh-login-submit-btn">ログイン / 登録</button>
           </div>
         </form>
       </div>
@@ -4928,7 +5033,14 @@ _CLIENT_JS = r"""
       const upass = loginPasswordInput ? loginPasswordInput.value.trim() : '';
       if (!uname) {
         if (loginErrorEl) {
-          loginErrorEl.textContent = 'ニックネームを入力してください';
+          loginErrorEl.textContent = '名前を入力してください';
+          loginErrorEl.style.display = 'block';
+        }
+        return;
+      }
+      if (!upass) {
+        if (loginErrorEl) {
+          loginErrorEl.textContent = 'パスワードを入力してください';
           loginErrorEl.style.display = 'block';
         }
         return;
