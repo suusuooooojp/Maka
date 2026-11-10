@@ -117,7 +117,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261020-ig-v5"
+RUNTIME_REV = "20261109-ig-v6"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -175,9 +175,9 @@ def _patch_controller_api(source: bytes) -> bytes:
         'try{indexedDB.deleteDatabase("__scramjet_controller")}catch(_){}'
         'const _shVaultKey="__sh_cookie_vault_instagram";'
         "function g(){return Promise.resolve(null)}"
-        "async function w(){try{let r=sessionStorage.getItem(_shVaultKey);return r?u(JSON.parse(r)):null}catch(e){return null}}"
-        "async function k(e,t){try{let s=await w(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1);"
-        "return sessionStorage.setItem(_shVaultKey,JSON.stringify({updatedAt:i,cookies:e})),i}catch(e){return t}}"
+        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};res={updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}return res}"
+        "async function w(){return _readVaultRaw()}"
+        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0){merged=s.cookies}else{merged=JSON.stringify({...prev,...curr})}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
     )
     text = text.replace(old_idb, new_idb, 1)
     text = text.replace(
@@ -352,12 +352,12 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:e.cookies});",
-        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{return window.top?.__schoolhub_controller?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
+        "if(i.pX in globalThis)return void globalThis[i.pX].syncDocumentInit({initHeaders:e.initHeaders,history:e.history,cookies:(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar?void 0:e.cookies}catch(_){return e.cookies}})()});",
         1,
     )
     text = text.replace(
         "this.cookieJar=new i.cP,this.cookieJar.load(this.init.cookies),",
-        "this.cookieJar=(()=>{try{return window.top?.__schoolhub_controller?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{if(this.cookieJar!==window.top?.__schoolhub_controller?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
+        "this.cookieJar=(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;return _c?.cookieJar}catch(_){return null}})()||(new i.cP),(()=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;if(this.cookieJar!==_c?.cookieJar)this.cookieJar.load(this.init.cookies)}catch(_){this.cookieJar.load(this.init.cookies)}})(),",
         1,
     )
     text = text.replace(
@@ -367,7 +367,7 @@ def _patch_controller_inject(source: bytes) -> bytes:
     )
     text = text.replace(
         "sendSetCookie:async(e,t)=>{await this.transport.sendSetCookie(e,t)}",
-        "sendSetCookie:async(e,t)=>{try{await window.top?.__schoolhub_controller?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
+        "sendSetCookie:async(e,t)=>{try{const _c=window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller;await _c?.persistCookies?.()}catch(_){}await this.transport.sendSetCookie(e,t)}",
         1,
     )
     old_req = (
@@ -384,8 +384,8 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "c?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])"
     )
     new_post = (
-        "(()=>{try{if('undefined'!=typeof window&&window.top&&window.top.__schoolhub_controller?.methods?.initRemoteTransport)"
-        "{window.top.__schoolhub_controller.methods.initRemoteTransport(o.port2);return}}catch(_){}"
+        "(()=>{try{const _c='undefined'!=typeof window&&(window.top?.__schoolhub_controller||window.opener?.top?.__schoolhub_controller||window.opener?.__schoolhub_controller);if(_c?.methods?.initRemoteTransport)"
+        "{_c.methods.initRemoteTransport(o.port2);return}}catch(_){}"
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
@@ -403,6 +403,10 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     4. Keep data:image/*, data:font/*, data:audio/*, data:video/* native.
     5. Unrewrite blob: URLs directly on <img>/<video>/<audio>/<source>.
     6. Ensure navigator.userAgent and navigator.webdriver match HTTP relay headers.
+    7. Support EventListener handleEvent in addEventListener/removeEventListener.
+    8. Window.postMessage pollutant constructor and origin safety.
+    9. Error.prepareStackTrace masking for proxy traces.
+    10. Scoped LocalStorage and SessionStorage with ig: prefix.
     """
     text = source.decode("utf-8")
     text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
@@ -410,6 +414,157 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     new_code = "let r=e.box.histories.get(t.this),s=null!=t.args[2]?(0,n.Qf)(t.args[2]):null;"
     if old_code in text:
         text = text.replace(old_code, new_code, 1)
+
+    old_storage_mod = (
+        'function n(e,t){let r={get(t,r){switch(r){'
+        'case"getItem":return r=>t.getItem(e.url.host+"@"+r);'
+        'case"setItem":return(r,i)=>t.setItem(e.url.host+"@"+r,i);'
+        'case"removeItem":return r=>t.removeItem(e.url.host+"@"+r);'
+        'case"clear":return()=>{for(let r in(0,i.BR)(t))r.startsWith(e.url.host)&&t.removeItem(r)};'
+        'case"key":return r=>{let n=(0,i.BR)(t).filter(t=>t.startsWith(e.url.host));return t.getItem(n[r])};'
+        'case"length":return(0,i.BR)(t).filter(t=>t.startsWith(e.url.host)).length;'
+        'default:if(r in Object.prototype||"symbol"==typeof r)return(0,i.rF)(t,r);return t.getItem(e.url.host+"@"+r)}},'
+        'set:(t,r,i)=>(t.setItem(e.url.host+"@"+r,i),!0),'
+        'has:(t,r)=>null!==t.getItem(e.url.host+"@"+r),'
+        'ownKeys:t=>(0,i.lK)(t).filter(t=>"string"==typeof t&&t.startsWith(e.url.host)).map(t=>"string"==typeof t?t.substring(e.url.host.length+1):t),'
+        'getOwnPropertyDescriptor(t,r){if(null!==t.getItem(e.url.host+"@"+r))return{value:t.getItem(e.url.host+"@"+r),enumerable:!0,configurable:!0,writable:!0}},'
+        'defineProperty:(t,r,i)=>(t.setItem(e.url.host+"@"+r,i.value),!0)},'
+        "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
+        "delete t.localStorage,delete t.sessionStorage,t.localStorage=n,t.sessionStorage=s}"
+    )
+    new_storage_mod = (
+        'function n(e,t){const _pfx=()=>"ig:"+e.url.host+"@";let r={get(t,r){switch(r){'
+        'case"getItem":return r=>t.getItem(_pfx()+r);'
+        'case"setItem":return(r,i)=>t.setItem(_pfx()+r,i);'
+        'case"removeItem":return r=>t.removeItem(_pfx()+r);'
+        'case"clear":return()=>{for(let r in(0,i.BR)(t))r.startsWith(_pfx())&&t.removeItem(r)};'
+        'case"key":return r=>{let n=(0,i.BR)(t).filter(t=>t.startsWith(_pfx()));return n[r]?n[r].substring(_pfx().length):null};'
+        'case"length":return(0,i.BR)(t).filter(t=>t.startsWith(_pfx())).length;'
+        'default:if(r in Object.prototype||"symbol"==typeof r)return(0,i.rF)(t,r);return t.getItem(_pfx()+r)}},'
+        'set:(t,r,i)=>(t.setItem(_pfx()+r,i),!0),'
+        'has:(t,r)=>null!==t.getItem(_pfx()+r),'
+        'ownKeys:t=>(0,i.lK)(t).filter(t=>"string"==typeof t&&t.startsWith(_pfx())).map(t=>"string"==typeof t?t.substring(_pfx().length):t),'
+        'getOwnPropertyDescriptor(t,r){if(null!==t.getItem(_pfx()+r))return{value:t.getItem(_pfx()+r),enumerable:!0,configurable:!0,writable:!0}},'
+        'defineProperty:(t,r,i)=>(t.setItem(_pfx()+r,i.value),!0),'
+        'deleteProperty:(t,r)=>(t.removeItem(_pfx()+r),!0)},'
+        "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
+        "delete t.localStorage,delete t.sessionStorage,"
+        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!1,enumerable:!0}),'
+        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!1,enumerable:!0})}'
+    )
+    if old_storage_mod in text:
+        text = text.replace(old_storage_mod, new_storage_mod, 1)
+
+    old_parent_top_exact = (
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
+        '{get:function(){return e.wrapfn(this.parent,!1)},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
+        '{get:function(){return e.wrapfn(this.top,!1)},set(e){this.top=e},configurable:!1,enumerable:!1})'
+    )
+    new_parent_top_exact = (
+        '(()=>{try{'
+        'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
+        'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
+        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
+        'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
+        'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
+        'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
+        'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
+        '}}'
+        '}catch(_){}})(),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
+        '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
+        '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
+        '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.top,!1):this.top},set(e){this.top=e},configurable:!1,enumerable:!1})'
+    )
+    if old_parent_top_exact in text:
+        text = text.replace(old_parent_top_exact, new_parent_top_exact, 1)
+
+    old_wrappm = (
+        "(0,s.pS)(t,e.config.globals.wrappostmessagefn,"
+        '{value:function(e){return e&&"function"==typeof e.postMessage?{postMessage:e.postMessage.bind(e)}:e},'
+        "configurable:!1,writable:!1,enumerable:!1})"
+    )
+    new_wrappm = (
+        "(0,s.pS)(t,e.config.globals.wrappostmessagefn,"
+        '{value:function(r){return r&&"function"==typeof r.postMessage?{postMessage:function(...a){const u=this&&o.POLLUTANT in this?this[o.POLLUTANT]:t;try{(0,s.pS)(r,o.POLLUTANT,{value:u,writable:!0,configurable:!0,enumerable:!1})}catch(_){}try{return r.postMessage(...a)}finally{try{delete r[o.POLLUTANT]}catch(_){}}}}:r},'
+        "configurable:!1,writable:!1,enumerable:!1})"
+    )
+    if old_wrappm in text:
+        text = text.replace(old_wrappm, new_wrappm, 1)
+
+    old_smap_push = (
+        '!function(e,t,r){let i=Uint8Array.from(t),n=new DataView(i.buffer),s=new TextDecoder("utf-8"),o=[],a=n.getUint32(0,!0),A=4;'
+        'for(let e=0;e<a;e++){let e=n.getUint32(A,!0);A+=4;let t=n.getUint32(A,!0);A+=4;let r=n.getUint8(A);'
+        'if(A+=1,0==r)o.push({type:r,start:e,size:t});else if(1==r){let a=e+t,l=n.getUint32(A,!0);A+=4;let c=s.decode(i.subarray(A,A+l));o.push({type:r,start:e,end:a,str:c}),A+=l}}'
+        'e.box.sourcemaps[r]=o}(e,t,r)'
+    )
+    new_smap_push = (
+        '(()=>{const o=Uint8Array.from(t);'
+        'try{(top.__sh_smaps||(top.__sh_smaps={}))[r]=o}catch(_){}'
+        '(globalThis.__sh_smaps||(globalThis.__sh_smaps={}))[r]=e.box.sourcemaps[r]=o})()'
+    )
+    if old_smap_push in text:
+        text = text.replace(old_smap_push, new_smap_push, 1)
+
+    old_ftostr_tag = 'if(-1===r)throw n.error("unreachable",e,t,r),new i.$D("unreachable");let o=e.substring(t+2,r).split(" ");if(3!==o.length||"scramtag"!==o[0]||!(0,i.Aw)(+o[1]))throw n.error("invalid tag",e,t,r,o),new i.$D("invalid tag");'
+    new_ftostr_tag = 'if(-1===r)return null;let o=e.substring(t+2,r).split(" ");if(3!==o.length||"scramtag"!==o[0]||!(0,i.Aw)(+o[1]))return null;'
+    if old_ftostr_tag in text:
+        text = text.replace(old_ftostr_tag, new_ftostr_tag, 1)
+
+    old_ftostr = 'u=e.box.sourcemaps[a];if(!u)return n.warn("failed to get rewrites for tag",a),t.return(r);'
+    new_ftostr = (
+        'u=e.box.sourcemaps[a]||globalThis.__sh_smaps?.[a]||(()=>{try{return top.__sh_smaps?.[a]}catch(_){return null}})();'
+        'if(!u)return t.return(r.replace(/\\/\\*scramtag [^*]*\\*\\//g,""));'
+        'if(u instanceof Uint8Array||ArrayBuffer.isView(u)){'
+        'let _i=new Uint8Array(u.buffer,u.byteOffset,u.byteLength),_n=new DataView(_i.buffer,_i.byteOffset,_i.byteLength),_s=new TextDecoder("utf-8"),_o=[],_a=_n.getUint32(0,!0),_A=4;'
+        'for(let _e=0;_e<_a;_e++){let _st=_n.getUint32(_A,!0);_A+=4;let _sz=_n.getUint32(_A,!0);_A+=4;let _tp=_n.getUint8(_A);_A+=1;'
+        'if(0==_tp)_o.push({type:_tp,start:_st,size:_sz});else if(1==_tp){let _ed=_st+_sz,_ln=_n.getUint32(_A,!0);_A+=4;let _tx=_s.decode(_i.subarray(_A,_A+_ln));_o.push({type:_tp,start:_st,end:_ed,str:_tx}),_A+=_ln}}'
+        'u=e.box.sourcemaps[a]=(globalThis.__sh_smaps||(globalThis.__sh_smaps={}))[a]=_o;try{(top.__sh_smaps||(top.__sh_smaps={}))[a]=_o}catch(_){}}'
+    )
+    if old_ftostr in text:
+        text = text.replace(old_ftostr, new_ftostr, 1)
+
+    old_ftostr_end = 'f+=r.slice(m),f=f.replace(`${s}${l} ${a}*/`,""),t.return(f)'
+    new_ftostr_end = 'f+=r.slice(m),f=f.replace(`${s}${l} ${a}*/`,"").replace(/\\/\\*scramtag [^*]*\\*\\//g,""),t.return(f)'
+    if old_ftostr_end in text:
+        text = text.replace(old_ftostr_end, new_ftostr_end, 1)
+
+    old_msg_null = 'origin(){return i.iswindow?"object"==typeof this.data&&"$scramjet$origin"in this.data?this.data.$scramjet$origin:e.url.origin:""},data(){return"object"==typeof this.data&&"$scramjet$data"in this.data?this.data.$scramjet$data:this.data}'
+    new_msg_null = 'origin(){return i.iswindow?"object"==typeof this.data&&null!==this.data&&"$scramjet$origin"in this.data?this.data.$scramjet$origin:e.url.origin:""},data(){return"object"==typeof this.data&&null!==this.data&&"$scramjet$data"in this.data?this.data.$scramjet$data:this.data}'
+    if old_msg_null in text:
+        text = text.replace(old_msg_null, new_msg_null, 1)
+
+    old_evt_listener = (
+        'e.Proxy("EventTarget.prototype.addEventListener",{apply(t){if("function"!=typeof t.args[1])return;let r=t.args[1],i=a(r);t.args[1]=i;let n=e.eventcallbacks.get(t.this);(n||=[]).push({event:t.args[0],originalCallback:r,proxiedCallback:i}),e.eventcallbacks.set(t.this,n)}}),'
+        'e.Proxy("EventTarget.prototype.removeEventListener",{apply(t){if("function"!=typeof t.args[1])return;let r=e.eventcallbacks.get(t.this);if(!r)return;let i=r.findIndex(e=>e.event===t.args[0]&&e.originalCallback===t.args[1]);if(-1===i)return;let n=r.splice(i,1);e.eventcallbacks.set(t.this,r),t.args[1]=n[0].proxiedCallback}})'
+    )
+    new_evt_listener = (
+        'e.Proxy("EventTarget.prototype.addEventListener",{apply(t){let r=t.args[1];if("function"!=typeof r&&!("object"==typeof r&&null!==r&&"function"==typeof r.handleEvent))return;let i="function"==typeof r?a(r):a(function(...o){return r.handleEvent.apply(r,o)});t.args[1]=i;let n=e.eventcallbacks.get(t.this);(n||=[]).push({event:t.args[0],originalCallback:r,proxiedCallback:i}),e.eventcallbacks.set(t.this,n)}}),'
+        'e.Proxy("EventTarget.prototype.removeEventListener",{apply(t){let o=t.args[1];if("function"!=typeof o&&!("object"==typeof o&&null!==o&&"function"==typeof o.handleEvent))return;let r=e.eventcallbacks.get(t.this);if(!r)return;let i=r.findIndex(e=>e.event===t.args[0]&&e.originalCallback===o);if(-1===i)return;let n=r.splice(i,1);e.eventcallbacks.set(t.this,r),t.args[1]=n[0].proxiedCallback}})'
+    )
+    if old_evt_listener in text:
+        text = text.replace(old_evt_listener, new_evt_listener, 1)
+
+    old_win_pm = (
+        'i.iswindow&&e.Proxy("window.postMessage",{apply(e){let{constructor:{constructor:t}}="object"==typeof e.args[0]&&null!==e.args[0]?e.args[0]:"object"==typeof e.args[2]&&null!==e.args[2]?e.args[2]:e.this&&o.POLLUTANT in e.this&&"object"==typeof e.this[o.POLLUTANT]&&null!==e.this[o.POLLUTANT]?e.this[o.POLLUTANT]:{},r=t("return globalThis")()[n.p],i=t("...args","this(...args)"),s="about:srcdoc"===r.url.href||"about:blank"===r.url.href;e.args[0]={$scramjet$messagetype:"window",$scramjet$origin:s?r.global.parent[n.p].url.origin:r.url.origin,$scramjet$data:e.args[0]},"string"==typeof e.args[1]&&(e.args[1]="*"),"object"==typeof e.args[1]&&(e.args[1].targetOrigin="*"),e.return(i.call(e.fn,...e.args))}})'
+    )
+    new_win_pm = (
+        'i.iswindow&&e.Proxy("window.postMessage",{apply(c){let r=null;try{let{constructor:{constructor:f}}="object"==typeof c.args[0]&&null!==c.args[0]?c.args[0]:"object"==typeof c.args[2]&&null!==c.args[2]?c.args[2]:c.this&&o.POLLUTANT in c.this&&"object"==typeof c.this[o.POLLUTANT]&&null!==c.this[o.POLLUTANT]?c.this[o.POLLUTANT]:{};r=f("return globalThis")()?.[n.p]}catch(_){}r||(r=c.this?.[n.p]||t?.[n.p]||e);let u=r?.url?.href||"",s="about:srcdoc"===u||"about:blank"===u,g=(s?r?.global?.parent?.[n.p]?.url?.origin:r?.url?.origin)||e?.url?.origin||"";c.args[0]={$scramjet$messagetype:"window",$scramjet$origin:g,$scramjet$data:c.args[0]},"string"==typeof c.args[1]&&(c.args[1]="*"),"object"==typeof c.args[1]&&null!==c.args[1]&&(c.args[1].targetOrigin="*"),c.return(c.fn.apply(c.this||t,c.args))}})'
+    )
+    if old_win_pm in text:
+        text = text.replace(old_win_pm, new_win_pm, 1)
+
+    old_smap = "let e=globalThis[r.config.globals.pushsourcemapfn];"
+    new_smap = "let e=(n?.base?.defaultView||globalThis)[r.config.globals.pushsourcemapfn]||globalThis[r.config.globals.pushsourcemapfn];"
+    if old_smap in text:
+        text = text.replace(old_smap, new_smap, 1)
+
+    old_stack = 'let r=(t,r)=>{let n=t.stack;for(let t=0;t<r.length;t++){let s=r[t].getFileName();try{if(e.config.maskedfiles.some(e=>s.endsWith(e))){let e=n.split("\\n"),t=e.find(e=>e.includes(s));e.splice(t,1),n=e.join("\\n");continue}}catch{}try{n=n.replaceAll(s,(0,i.v2)(s,e.context))}catch{}}return n};e.Trap("Error.prepareStackTrace",{get:e=>r,set(e){}})'
+    new_stack = 'let _inSt=!1,_usrSt=null,r=(t,a)=>{if(_inSt)return String(t);_inSt=!0;try{if("function"==typeof _usrSt)return _usrSt(t,a);let n=[String(t)];for(let o=0;o<a.length;o++){let c=a[o],s=String(c),f="";try{f=c.getFileName()||""}catch{}try{const _fc=f.split("?")[0];if(f&&(_fc.includes("/instagram/runtime/")||_fc.endsWith("scramjet.js")||_fc.endsWith("scramjet.wasm.js")||_fc.endsWith("controller.inject.js")||e.config.maskedfiles.some(m=>_fc.endsWith(m))))continue}catch{}try{s=s.replace(/https?:\\/\\/[^\\s)]+\\/instagram\\/~\\/sj\\/(?:[^/]+\\/){0,2}(https?(?:%3A|:)[^\\s):]+)/gi,(_,u)=>{try{return decodeURIComponent(u).split("?")[0]}catch{return _}})}catch{}n.push("    at "+s)}return n.join("\\n")}finally{_inSt=!1}};try{Error.prepareStackTrace=r}catch{}e.Trap("Error.prepareStackTrace",{get:()=>_usrSt||r,set(v){_usrSt="function"==typeof v?v:null;try{Error.prepareStackTrace=r}catch{}}})'
+    if old_stack in text:
+        text = text.replace(old_stack, new_stack, 1)
+
     old_rew = 'if(!A||"http:"!=A.protocol&&"https:"!=A.protocol)return e;'
     new_rew = (
         'if(!A||"http:"!=A.protocol&&"https:"!=A.protocol)return e;'
@@ -425,6 +580,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     )
     if old_rew in text:
         text = text.replace(old_rew, new_rew, 1)
+
     old_unrew = 'if(!r.href.startsWith(t.prefix.href))return o.error("unrewriteurl: unexpected url",e),e;'
     new_unrew = (
         'if(!r.href.startsWith(t.prefix.href)){'
@@ -434,18 +590,22 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     )
     if old_unrew in text:
         text = text.replace(old_unrew, new_unrew, 1)
+
     old_srcset = "function x(e,t,r){return e.split(/ .*,/).map"
     new_srcset = "function x(e,t,r){return e.split(/,(?=\\s*(?:https?:|\\/|data:|blob:))/i).map(e=>e.trim()).filter(Boolean).map"
     if old_srcset in text:
         text = text.replace(old_srcset, new_srcset, 1)
+
     old_url_props = "src:[t.HTMLImageElement,t.HTMLMediaElement,t.HTMLIFrameElement,t.HTMLFrameElement,t.HTMLEmbedElement,t.HTMLScriptElement,t.HTMLSourceElement],href:"
     new_url_props = "src:[t.HTMLImageElement,t.HTMLMediaElement,t.HTMLIFrameElement,t.HTMLFrameElement,t.HTMLEmbedElement,t.HTMLScriptElement,t.HTMLSourceElement],srcset:[t.HTMLImageElement,t.HTMLSourceElement],loading:[t.HTMLImageElement],href:"
     if old_url_props in text:
         text = text.replace(old_url_props, new_url_props, 1)
+
     old_setattr = 'e.Proxy("Element.prototype.setAttribute",{apply(t){let[r,s]=t.args,o=t.this.tagName.toLowerCase();null!=s&&(s=(0,n.Qf)(s)),t.args[1]=s;'
     new_setattr = 'e.Proxy("Element.prototype.setAttribute",{apply(t){let[r,s]=t.args,o=t.this.tagName.toLowerCase();null!=s&&(s=(0,n.Qf)(s)),t.args[1]=s;if("img"===o){const _rn=String(r).toLowerCase();if("data-loading"===_rn)return void t.return(void 0);if("loading"===_rn&&"lazy"===String(s).toLowerCase()){t.args[1]="eager";return;}}'
     if old_setattr in text:
         text = text.replace(old_setattr, new_setattr, 1)
+
     text = text.replace(
         'if(e.startsWith("data:")){',
         'if(e.startsWith("data:")){if(/^data:(image|font|audio|video)\\//i.test(e))return e;',
@@ -481,15 +641,46 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         't.args[0]=String(t.args[0]||"").startsWith("blob:")?"blob:"+self.location.origin+new URL(String(t.args[0]).slice(5)).pathname:e.rewriteUrl(t.args[0],{destination:"sharedworker",isModule:r})',
         1,
     )
+
+    old_fn_ctor = 'e.RawProxy(i.prototype,"constructor",r)'
+    new_fn_ctor = 'Object.defineProperty(i.prototype,"constructor",{value:t.Function,writable:!0,enumerable:!1,configurable:!0})'
+    if old_fn_ctor in text:
+        text = text.replace(old_fn_ctor, new_fn_ctor, 1)
+
+    old_nonce_rule = '{fn:()=>null,nonce:"*",csp:["iframe"],credentialless:["iframe"]}'
+    new_nonce_rule = '{fn:()=>null,csp:["iframe"],credentialless:["iframe"]}'
+    if old_nonce_rule in text:
+        text = text.replace(old_nonce_rule, new_nonce_rule, 1)
+
+    old_attr_iter = '"getNamedItemNS"===n?(e,t)=>r[`${e}:${t}`]:'
+    new_attr_iter = '"getNamedItemNS"===n?(e,t)=>r[`${e}:${t}`]:"item"===n?e=>r[e]:n===Symbol.iterator?function*(){const _ks=(0,i.BR)(r);for(let _k=0;_k<_ks.length;_k++)yield t[_ks[_k]]}:'
+    if old_attr_iter in text:
+        text = text.replace(old_attr_iter, new_attr_iter, 1)
+
+    old_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&r.startsWith(e.context.prefix.href)?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{for(let r of e.config.maskedfiles)if((0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t)).endsWith(r))return!1;return!0}))}})'
+    new_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&(r.startsWith(e.context.prefix.href)||r.includes("/instagram/runtime/media-relay"))?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{const _nm=(0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t))||"",_nc=_nm.split("?")[0];if(_nc.includes("/instagram/runtime/scramjet")||_nc.includes("/instagram/runtime/controller")||_nc.endsWith("scramjet.wasm.js"))return!1;for(let r of e.config.maskedfiles)if(_nc.endsWith(r))return!1;return!0}))}})'
+    if old_perf in text:
+        text = text.replace(old_perf, new_perf, 1)
+
+    old_wasm_init = "(0,n.QR)({module:new WebAssembly.Module(i)});"
+    new_wasm_init = "0===c.length&&(0,n.QR)({module:new WebAssembly.Module(i)});"
+    if old_wasm_init in text:
+        text = text.replace(old_wasm_init, new_wasm_init, 1)
+
     preamble = (
-        'try{if(typeof navigator!=="undefined"){'
-        'if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}'
+        'try{if(typeof window!=="undefined"){'
+        'try{delete window.IdentityCredential;delete Window.prototype.IdentityCredential;}catch(_){}'
+        'try{delete window.FederatedCredential;delete Window.prototype.FederatedCredential;}catch(_){}'
+        '}'
+        'if(typeof navigator!=="undefined"){'
+        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
+        'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
         'try{Object.defineProperty(navigator,"maxTouchPoints",{get:()=>0,configurable:true});}catch(_){}'
-        'try{if(typeof Navigator!=="undefined"&&Navigator.prototype){Object.defineProperty(Navigator.prototype,"maxTouchPoints",{get:()=>0,configurable:true});}}catch(_){}'
-        'if(String(navigator.userAgent||"").includes("HeadlessChrome/")){'
+        'try{if(_np){Object.defineProperty(_np,"maxTouchPoints",{get:()=>0,configurable:true});}}catch(_){}'
+        'if(String(navigator.userAgent||"").includes("HeadlessChrome/")&&_np){'
         'const _ua=navigator.userAgent.replace(/HeadlessChrome\\//g,"Chrome/");'
-        'Object.defineProperty(navigator,"userAgent",{get:()=>_ua,configurable:true});'
-        'Object.defineProperty(navigator,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),configurable:true});'
+        'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
+        'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
         '}'
         'if(navigator.credentials){'
         'const _rejCred=()=>Promise.reject(typeof DOMException!=="undefined"?new DOMException("The operation either timed out or was not allowed.","NotAllowedError"):new Error("NotAllowedError"));'
@@ -516,7 +707,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'globalThis.Blob=new Proxy(_OrigBlob,{construct(target,args,newTarget){try{const parts=args[0],opts=args[1];if(Array.isArray(parts)&&parts.length>0&&typeof parts[0]==="string"&&(String(opts?.type||"").includes("javascript")||parts[0].includes("onmessage")||parts[0].includes("onconnect"))){args=[[_wShim,...parts],opts];}}catch(_){}return Reflect.construct(target,args,newTarget);}});'
         '}}catch(_){}\n'
     )
-    if not text.startswith("try{if(typeof navigator"):
+    if not text.startswith("try{if(typeof window") and not text.startswith("try{if(typeof navigator"):
         text = preamble + text
     return text.encode("utf-8")
 
@@ -2174,16 +2365,17 @@ async def ig_http_relay(request: Request):
                 if not any(hk.lower() == "referer" for hk in header_dict):
                     header_dict["Referer"] = f"https://{host}/"
 
+    req_path_clean = req_path.rstrip("/")
     if (
         method == "POST"
         and host in ("www.instagram.com", "instagram.com")
-        and req_path in ("/api/graphql", "/graphql/query")
+        and req_path_clean in ("/api/graphql", "/graphql/query", "/graphql")
         and req_body
     ):
         if (
             b"useCDSWebLoginMutation" in req_body
             or b"28077768681846394" in req_body
-            or (b"enc_password" in req_body and b"sensitive_string_value" in req_body and b"identifier" in req_body)
+            or (b"enc_password" in req_body and b"identifier" in req_body)
         ):
             bridged = await _handle_ig_caa_login(
                 req_body, header_dict, cookie_str, client_ua, impersonate_profile
@@ -2201,7 +2393,14 @@ async def ig_http_relay(request: Request):
             if bridged_ar is not None:
                 return bridged_ar
 
-    if method == "POST" and host in ("www.instagram.com", "instagram.com") and req_path.startswith(("/api/v1/web/accounts/", "/api/graphql", "/graphql/query")):
+    if (
+        method == "POST"
+        and host in ("www.instagram.com", "instagram.com")
+        and (
+            req_path.startswith("/api/v1/web/accounts/")
+            or req_path_clean in ("/api/graphql", "/graphql/query", "/graphql")
+        )
+    ):
         m_csrf = re.search(r"(?:^|[;\s])csrftoken=([^;\s]+)", cookie_str)
         csrf_val = m_csrf.group(1).strip() if m_csrf else ""
         if not csrf_val:
@@ -2209,12 +2408,12 @@ async def ig_http_relay(request: Request):
                 if hk.lower() == "x-csrftoken" and hv.strip():
                     csrf_val = hv.strip()
                     break
-        if csrf_val:
-            if not any(hk.lower() == "x-csrftoken" for hk in header_dict):
-                header_dict["X-CSRFToken"] = csrf_val
-            if "csrftoken=" not in cookie_str:
-                cookie_str = f"{cookie_str}; csrftoken={csrf_val}" if cookie_str else f"csrftoken={csrf_val}"
-                header_dict["Cookie"] = cookie_str
+        if not csrf_val:
+            csrf_val = "igcsrf" + str(int(time.time()))
+        header_dict["X-CSRFToken"] = csrf_val
+        if "csrftoken=" not in cookie_str:
+            cookie_str = f"{cookie_str}; csrftoken={csrf_val}" if cookie_str else f"csrftoken={csrf_val}"
+            header_dict["Cookie"] = cookie_str
         if not any(hk.lower() == "x-ig-app-id" for hk in header_dict):
             header_dict["X-IG-App-ID"] = "936619743392459"
         if not any(hk.lower() == "x-requested-with" for hk in header_dict) and req_path.startswith("/api/v1/"):
@@ -2648,7 +2847,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   function hasAuthCookie() {{
     try {{
       const dump = String(controller?.cookieJar?.dump?.() || "");
-      return /(?:^|[\\s;])sessionid=|"sessionid"/.test(dump);
+      if (/(?:^|[\\s;])sessionid=|"sessionid"/.test(dump)) return true;
+      const vault = localStorage.getItem("__sh_cookie_vault_instagram") || sessionStorage.getItem("__sh_cookie_vault_instagram") || "";
+      return /(?:^|[\\s;])sessionid=|"sessionid"/.test(vault);
     }} catch (_) {{
       return false;
     }}
@@ -2662,6 +2863,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       return;
     }}
     try {{ sessionStorage.setItem(SESSION_KEY, s); }} catch (_) {{}}
+    try {{ localStorage.setItem(SESSION_KEY, s); }} catch (_) {{}}
   }}
 
   function restore() {{
@@ -2671,9 +2873,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       if (hasExplicitQuery) return INITIAL;
       if (!hasAuthCookie()) {{
         try {{ sessionStorage.removeItem(SESSION_KEY); }} catch (_) {{}}
+        try {{ localStorage.removeItem(SESSION_KEY); }} catch (_) {{}}
         return INITIAL;
       }}
-      const saved = sessionStorage.getItem(SESSION_KEY);
+      const saved = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
       if (saved) return saved;
       return AUTH_HOME;
     }} catch (_) {{
@@ -3178,7 +3381,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   function syncInputReactState(el) {{
     try {{
-      const rk = Object.keys(el).find((k) => k.startsWith("__reactProps$"));
+      const rk = Object.keys(el).find((k) => k.startsWith("__reactProps$") || k.startsWith("__reactEventHandlers$"));
       if (rk && typeof el[rk]?.onChange === "function") {{
         el[rk].onChange({{
           currentTarget: el,
@@ -3187,6 +3390,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           stopPropagation() {{}},
         }});
       }}
+      el.dispatchEvent(new Event("input", {{ bubbles: true, composed: true }}));
+      el.dispatchEvent(new Event("change", {{ bubbles: true, composed: true }}));
     }} catch (_) {{}}
   }}
 
@@ -3198,7 +3403,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const rawGetAttr = window.Element.prototype.getAttribute;
       const rawRemoveAttr = window.Element.prototype.removeAttribute;
 
-      const loginInputs = doc.querySelectorAll("input[name='email'], input[name='pass'], input[name='username'], input[name='password'], input[type='text']");
+      const loginInputs = doc.querySelectorAll("input[name='email'], input[name='pass'], input[name='username'], input[name='password'], input[type='text'], input[type='password']");
       for (let i = 0; i < loginInputs.length; i++) {{
         const inp = loginInputs[i];
         const curVal = String(inp.value || "");
@@ -3222,7 +3427,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             if (e.key === "Enter") {{
               onInputSync();
               const form = inp.closest("form");
-              const submitBtn = (form || doc).querySelector("[data-testid='royal-login-button'], button[type='submit'], div[role='button'][aria-label='ログイン']");
+              const submitBtn = (form || doc).querySelector("[data-testid='royal-login-button'], button[type='submit'], div[role='button'][aria-label='ログイン'], button[aria-label='ログイン']");
               if (submitBtn && submitBtn.getAttribute("aria-disabled") !== "true") {{
                 e.preventDefault();
                 submitBtn.click();
