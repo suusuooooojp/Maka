@@ -2959,18 +2959,6 @@ body.sidebar-collapsed .m3-layout-body {{
     if (e.key === "Enter") {{
       const q = searchInput.value.trim();
       if (!q) return;
-      if (q.toLowerCase() === "suusuo") {{
-        try {{
-          localStorage.setItem("sh_admin_user", "suusuo");
-          document.cookie = "sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax";
-        }} catch (_) {{}}
-        syncAdminModeUI();
-        openAdminPanelModal();
-        searchInput.value = "";
-        filterCards();
-        toast("👑 suusuo 管理者モードを有効化しました");
-        return;
-      }}
       const visibleCards = cards.filter(c => c.style.display !== "none");
       if (visibleCards.length === 1) {{
         visibleCards[0].click();
@@ -3047,7 +3035,7 @@ body.sidebar-collapsed .m3-layout-body {{
     }});
   }});
 
-  // --- suusuo Admin Mode, App Pause & Custom Dialog System ---
+  // --- suusuo Admin Mode (Authenticated via OpenChat Login), App Pause & Custom Dialog System ---
   let adminConfig = {{
     pauseAll: false,
     pausedServices: [],
@@ -3061,14 +3049,19 @@ body.sidebar-collapsed .m3-layout-body {{
     updatedAt: 0,
   }};
 
-  function isSuusuoAdmin() {{
+  function getOpenChatAuthToken() {{
     try {{
-      const u1 = (localStorage.getItem("sh_admin_user") || "").trim().toLowerCase();
-      const u2 = (localStorage.getItem("sh_openchat_auth_user") || localStorage.getItem("schoolhub_chat_user") || "").trim().toLowerCase();
-      if (u1 === "suusuo" || u2 === "suusuo") return true;
-      if (document.cookie.indexOf("sh_admin_user=suusuo") !== -1) return true;
+      const m = document.cookie.match(/(?:^|;\\s*)sh_openchat_auth=([^;]+)/);
+      if (m && m[1]) return decodeURIComponent(m[1]).trim();
     }} catch (_) {{}}
-    return false;
+    try {{
+      return (localStorage.getItem("sh_openchat_auth") || localStorage.getItem("schoolhub_chat_token") || "").trim();
+    }} catch (_) {{}}
+    return "";
+  }}
+
+  function isSuusuoAdmin() {{
+    return Boolean(window.__shIsAuthenticatedSuusuo === true && getOpenChatAuthToken());
   }}
 
   function syncAdminModeUI() {{
@@ -3116,9 +3109,10 @@ body.sidebar-collapsed .m3-layout-body {{
     if (titleEl) titleEl.textContent = adminConfig.pauseTitle || "アプリは一時停止中です";
     if (bodyEl) bodyEl.textContent = adminConfig.pauseMessage || "現在、管理者によりこのアプリは一時停止されています。";
     if (bypassBtn) {{
-      if (isSuusuoAdmin() && targetPath) {{
+      const tok = getOpenChatAuthToken();
+      if (isSuusuoAdmin() && targetPath && tok) {{
         const sep = targetPath.includes("?") ? "&" : "?";
-        bypassBtn.href = `${{targetPath}}${{sep}}admin_bypass=1`;
+        bypassBtn.href = `${{targetPath}}${{sep}}admin_bypass=1&auth=${{encodeURIComponent(tok)}}`;
         bypassBtn.style.display = "inline-flex";
       }} else {{
         bypassBtn.style.display = "none";
@@ -3216,6 +3210,10 @@ body.sidebar-collapsed .m3-layout-body {{
   }}
 
   function openAdminPanelModal() {{
+    if (!isSuusuoAdmin()) {{
+      toast("オープンチャットで suusuo にログインしてください");
+      return;
+    }}
     populateAdminPanelForm();
     $("shAdminPanelModal")?.classList.add("open");
   }}
@@ -3264,6 +3262,11 @@ body.sidebar-collapsed .m3-layout-body {{
 
   $("shAdminSaveBtn")?.addEventListener("click", async () => {{
     const saveBtn = $("shAdminSaveBtn");
+    const authTok = getOpenChatAuthToken();
+    if (!authTok || !isSuusuoAdmin()) {{
+      toast("オープンチャットで suusuo にログインしてください");
+      return;
+    }}
     const draft = readAdminFormToConfig();
     if (saveBtn) {{
       saveBtn.disabled = true;
@@ -3274,9 +3277,9 @@ body.sidebar-collapsed .m3-layout-body {{
         method: "POST",
         headers: {{
           "Content-Type": "application/json",
-          "X-Admin-User": "suusuo",
+          "X-OpenChat-Auth": authTok,
         }},
-        body: JSON.stringify({{ adminUser: "suusuo", config: draft }}),
+        body: JSON.stringify({{ authToken: authTok, config: draft }}),
       }});
       const data = await res.json().catch(() => null);
       if (res.ok && data && data.ok && data.config) {{
@@ -3301,11 +3304,28 @@ body.sidebar-collapsed .m3-layout-body {{
     }}
   }});
 
+  let openAdminCheckedOnBoot = false;
   async function fetchAdminConfig() {{
     try {{
-      const res = await fetch("/api/admin/config", {{ cache: "no-store" }});
+      const tok = getOpenChatAuthToken();
+      const res = await fetch("/api/admin/config", {{
+        cache: "no-store",
+        headers: tok ? {{ "X-OpenChat-Auth": tok }} : {{}},
+      }});
       if (!res.ok) return;
       const data = await res.json();
+      if (data && typeof data.isAdmin === "boolean") {{
+        window.__shIsAuthenticatedSuusuo = Boolean(data.isAdmin && tok);
+        syncAdminModeUI();
+        if (!openAdminCheckedOnBoot) {{
+          openAdminCheckedOnBoot = true;
+          try {{
+            if (new URLSearchParams(location.search).get("open_admin") === "1" && isSuusuoAdmin()) {{
+              setTimeout(openAdminPanelModal, 100);
+            }}
+          }} catch (_) {{}}
+        }}
+      }}
       if (data && data.ok && data.config) {{
         adminConfig = data.config;
         applyAdminConfigToCards();
@@ -3314,17 +3334,15 @@ body.sidebar-collapsed .m3-layout-body {{
     }} catch (_) {{}}
   }}
 
-  window.addEventListener("sh-admin-mode-change", () => {{
+  window.addEventListener("sh-admin-mode-change", (ev) => {{
+    if (ev && ev.detail && typeof ev.detail.isAdmin === "boolean") {{
+      window.__shIsAuthenticatedSuusuo = Boolean(ev.detail.isAdmin && getOpenChatAuthToken());
+    }}
     syncAdminModeUI();
   }});
   syncAdminModeUI();
   fetchAdminConfig();
   setInterval(fetchAdminConfig, 5000);
-  try {{
-    if (new URLSearchParams(location.search).get("open_admin") === "1" && isSuusuoAdmin()) {{
-      setTimeout(openAdminPanelModal, 200);
-    }}
-  }} catch (_) {{}}
 
   // --- Unified Session ID & Real-time Activity Heartbeat ---
   function getCookieSid() {{

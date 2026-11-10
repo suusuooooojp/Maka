@@ -5046,22 +5046,49 @@ _CLIENT_JS = r"""
   let currentAuthToken = getStoredAuthToken();
   let currentAuthUser = getStoredAuthUsername();
 
+  function isLoggedIn() {
+    return Boolean(currentAuthToken && currentAuthToken.includes('.'));
+  }
+
   function isSuusuoAdmin() {
-    try {
-      if (String(currentAuthUser || '').trim().toLowerCase() === 'suusuo') return true;
-      if ((localStorage.getItem('sh_admin_user') || '').trim().toLowerCase() === 'suusuo') return true;
-      if (document.cookie.indexOf('sh_admin_user=suusuo') !== -1) return true;
-    } catch (_) {}
-    return false;
+    return Boolean(isLoggedIn() && String(currentAuthUser || '').trim().toLowerCase() === 'suusuo');
+  }
+
+  function syncServerAuthPayload(data) {
+    if (!data || typeof data.loggedIn !== 'boolean') return;
+    if (!data.loggedIn) {
+      if (currentAuthToken || currentAuthUser) {
+        setAuthState('', '', '');
+      }
+      return;
+    }
+    const srvUser = String(data.username || '').trim();
+    if (srvUser && srvUser !== currentAuthUser) {
+      currentAuthUser = srvUser;
+      try {
+        localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
+        localStorage.setItem('schoolhub_chat_user', currentAuthUser);
+      } catch (_) {}
+    }
+    const adminNow = isSuusuoAdmin();
+    if (window.__shIsAuthenticatedSuusuo !== adminNow) {
+      window.__shIsAuthenticatedSuusuo = adminNow;
+      try {
+        window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: adminNow, username: currentAuthUser } }));
+      } catch (_) {}
+    }
+    updateAuthUi();
   }
 
   function setAuthState(token, username, tripCode) {
     currentAuthToken = String(token || '').trim();
-    currentAuthUser = String(username || '').trim();
+    currentAuthUser = currentAuthToken ? String(username || '').trim() : '';
     currentTripCode = '';
     setStoredTripKey('');
     setStoredTripCode('');
     try {
+      document.cookie = 'sh_admin_user=; path=/; max-age=0; SameSite=Lax';
+      localStorage.removeItem('sh_admin_user');
       if (currentAuthToken) {
         document.cookie = 'sh_openchat_auth=' + encodeURIComponent(currentAuthToken) + '; path=/; max-age=31536000; SameSite=Lax';
         localStorage.setItem('sh_openchat_auth', currentAuthToken);
@@ -5070,26 +5097,18 @@ _CLIENT_JS = r"""
           localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
           localStorage.setItem('schoolhub_chat_user', currentAuthUser);
         }
-        if (currentAuthUser.toLowerCase() === 'suusuo') {
-          localStorage.setItem('sh_admin_user', 'suusuo');
-          document.cookie = 'sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax';
-        }
       } else {
         document.cookie = 'sh_openchat_auth=; path=/; max-age=0; SameSite=Lax';
-        document.cookie = 'sh_admin_user=; path=/; max-age=0; SameSite=Lax';
         localStorage.removeItem('sh_openchat_auth');
         localStorage.removeItem('sh_openchat_auth_user');
         localStorage.removeItem('schoolhub_chat_token');
         localStorage.removeItem('schoolhub_chat_user');
-        localStorage.removeItem('sh_admin_user');
       }
-      window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: isSuusuoAdmin(), username: currentAuthUser } }));
+      const adminNow = isSuusuoAdmin();
+      window.__shIsAuthenticatedSuusuo = adminNow;
+      window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: adminNow, username: currentAuthUser } }));
     } catch (_) {}
     updateAuthUi();
-  }
-
-  function isLoggedIn() {
-    return Boolean(currentAuthToken && currentAuthToken.includes('.'));
   }
 
   function ensureAdminBtnInBar(barEl, idStr) {
@@ -5119,6 +5138,7 @@ _CLIENT_JS = r"""
   function updateAuthUi() {
     const logged = isLoggedIn();
     const adminMode = isSuusuoAdmin();
+    window.__shIsAuthenticatedSuusuo = adminMode;
     const displayUser = currentAuthUser || currentSenderId || 'ログイン済';
     const roleSuffix = adminMode ? ' [👑管理者モード]' : ' (メッセージ・動画投稿OK)';
     if (loginGateBar && loginGateText && loginOpenBtn) {
@@ -5131,7 +5151,7 @@ _CLIENT_JS = r"""
         loginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         loginGateBar.classList.remove('is-logged-in');
-        loginGateText.textContent = adminMode ? '👑 suusuo 管理者モード有効' : '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        loginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         loginOpenBtn.textContent = 'ログインして投稿';
         loginOpenBtn.className = 'sh-login-action-btn';
       }
@@ -5146,7 +5166,7 @@ _CLIENT_JS = r"""
         hubLoginOpenBtn.className = 'sh-logout-action-btn';
       } else {
         hubLoginGateBar.classList.remove('is-logged-in');
-        hubLoginGateText.textContent = adminMode ? '👑 suusuo 管理者モード有効' : '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
+        hubLoginGateText.textContent = '見るだけはログイン不要 / 投稿・動画送信は要ログイン';
         hubLoginOpenBtn.textContent = 'ログインして投稿';
         hubLoginOpenBtn.className = 'sh-login-action-btn';
       }
@@ -5305,7 +5325,11 @@ _CLIENT_JS = r"""
           applyServerMyId(data.myId, data.token, '');
         }
         closeLoginModal();
-        appendSystemNotice((data.username || uname) + ' としてログインしました。チャット・動画投稿が可能です。');
+        if (isSuusuoAdmin()) {
+          appendSystemNotice('👑 ' + (data.username || uname) + ' としてログインしました。管理者モードが自動で有効になりました（「👑 管理者設定」から操作できます）。');
+        } else {
+          appendSystemNotice((data.username || uname) + ' としてログインしました。チャット・動画投稿が可能です。');
+        }
         if (pendingSendAfterLogin) {
           const fn = pendingSendAfterLogin;
           pendingSendAfterLogin = null;
@@ -7234,6 +7258,9 @@ _CLIENT_JS = r"""
             openLoginModal();
             return;
           }
+          if (data && typeof data.loggedIn === 'boolean') {
+            syncServerAuthPayload(data);
+          }
           if (data && data.myId) {
             applyServerMyId(data.myId, data.token, data.trip);
           }
@@ -7335,6 +7362,7 @@ _CLIENT_JS = r"""
       });
       if (res.ok) {
         const data = await res.json();
+        syncServerAuthPayload(data);
         if (data && data.myId) {
           applyServerMyId(data.myId, data.token, data.trip);
         }
@@ -7366,6 +7394,7 @@ _CLIENT_JS = r"""
       });
       if (res.ok) {
         const data = await res.json();
+        syncServerAuthPayload(data);
         if (data && data.myId) {
           applyServerMyId(data.myId, data.token, data.trip);
         }
@@ -7467,13 +7496,7 @@ _CLIENT_JS = r"""
       }
 
       if (cmd === '/admin') {
-        if (isSuusuoAdmin() || arg.toLowerCase() === 'suusuo') {
-          try {
-            localStorage.setItem('sh_admin_user', 'suusuo');
-            document.cookie = 'sh_admin_user=suusuo; path=/; max-age=31536000; SameSite=Lax';
-            window.dispatchEvent(new CustomEvent('sh-admin-mode-change', { detail: { isAdmin: true, username: 'suusuo' } }));
-          } catch (_) {}
-          updateAuthUi();
+        if (isSuusuoAdmin()) {
           if (typeof window.__shOpenAdminModal === 'function') {
             window.__shOpenAdminModal();
           } else {
@@ -7481,7 +7504,7 @@ _CLIENT_JS = r"""
           }
           appendSystemNotice('👑 管理者モード (suusuo) 設定パネルを開きました。');
         } else {
-          appendSystemNotice('管理者モードは名前を「suusuo」にしてログインすると利用できます。');
+          appendSystemNotice('管理者モードはオープンチャットで「suusuo」にログインすると自動で有効になります。');
         }
         return;
       }

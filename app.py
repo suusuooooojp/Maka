@@ -1516,16 +1516,6 @@ _load_admin_config()
 
 
 def _is_suusuo_request(request: Request, body_data: dict | None = None) -> bool:
-    if body_data and isinstance(body_data, dict):
-        u = str(body_data.get("adminUser") or body_data.get("username") or "").strip().lower()
-        if u == "suusuo":
-            return True
-    hdr_u = (request.headers.get("x-admin-user") or "").strip().lower()
-    if hdr_u == "suusuo":
-        return True
-    cookie_u = (request.cookies.get("sh_admin_user") or "").strip().lower()
-    if cookie_u == "suusuo":
-        return True
     try:
         auth_user = openchat_proxy._extract_auth_user(request, data=body_data or {})
         if auth_user and str(auth_user.get("username") or "").strip().lower() == "suusuo":
@@ -1540,28 +1530,29 @@ async def api_admin_config(request: Request):
     cors_headers = {
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, X-Admin-User, X-OpenChat-Auth",
+        "Access-Control-Allow-Headers": "Content-Type, X-OpenChat-Auth",
         "Cache-Control": "no-store, no-cache, must-revalidate",
     }
     if request.method == "OPTIONS":
         return Response(status_code=204, headers=cors_headers)
     if request.method == "GET":
-        return JSONResponse({"ok": True, "config": _ADMIN_CONFIG}, headers=cors_headers)
+        return JSONResponse(
+            {"ok": True, "config": _ADMIN_CONFIG, "isAdmin": _is_suusuo_request(request)},
+            headers=cors_headers,
+        )
     try:
         data = await request.json()
     except Exception:
         data = {}
     if not _is_suusuo_request(request, data):
         return JSONResponse(
-            {"ok": False, "error": "管理者 (suusuo) 権限が必要です"},
+            {"ok": False, "error": "オープンチャットで suusuo にログインしてください"},
             status_code=403,
             headers=cors_headers,
         )
     incoming_cfg = data.get("config") if isinstance(data.get("config"), dict) else data
     saved = _save_admin_config(incoming_cfg)
-    resp = JSONResponse({"ok": True, "config": saved}, headers=cors_headers)
-    resp.set_cookie("sh_admin_user", "suusuo", max_age=365 * 24 * 3600, path="/", samesite="lax")
-    return resp
+    return JSONResponse({"ok": True, "config": saved, "isAdmin": True}, headers=cors_headers)
 
 
 def _match_paused_service(req_path: str) -> tuple[bool, str]:
@@ -1585,12 +1576,13 @@ def _match_paused_service(req_path: str) -> tuple[bool, str]:
     return False, ""
 
 
-def _render_paused_service_html(service_name: str, cfg: dict, req_url: str) -> str:
+def _render_paused_service_html(service_name: str, cfg: dict, req_url: str, is_admin: bool = False) -> str:
     title_esc = _html_escape(str(cfg.get("pauseTitle") or "アプリは一時停止中です"))
     msg_esc = _html_escape(str(cfg.get("pauseMessage") or "現在、管理者によりこのアプリは一時停止されています。")).replace("\n", "<br>")
     svc_esc = _html_escape(service_name or "アプリ")
     sep = "&" if "?" in req_url else "?"
     bypass_url = _html_escape(f"{req_url}{sep}admin_bypass=1")
+    btn_display = "inline-flex" if is_admin else "none"
     return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -1681,7 +1673,7 @@ def _render_paused_service_html(service_name: str, cfg: dict, req_url: str) -> s
     font-size: 14px;
   }}
   .btn-admin {{
-    display: none;
+    display: {btn_display};
     align-items: center;
     justify-content: center;
     height: 40px;
@@ -1706,12 +1698,24 @@ def _render_paused_service_html(service_name: str, cfg: dict, req_url: str) -> s
     </div>
   </div>
   <script>
-    try {{
-      var u = (localStorage.getItem("sh_admin_user") || localStorage.getItem("sh_openchat_auth_user") || "").trim().toLowerCase();
-      if (u === "suusuo" || document.cookie.indexOf("sh_admin_user=suusuo") !== -1) {{
-        document.getElementById("adminBypassBtn").style.display = "inline-flex";
-      }}
-    }} catch (_) {{}}
+    (async () => {{
+      try {{
+        var tok = localStorage.getItem("sh_openchat_auth") || "";
+        if (!tok) return;
+        var res = await fetch("/openchat/auth-status", {{ headers: {{ "X-OpenChat-Auth": tok }}, cache: "no-store" }});
+        var data = await res.json();
+        if (data && data.loggedIn && String(data.username || "").trim().toLowerCase() === "suusuo") {{
+          var btn = document.getElementById("adminBypassBtn");
+          if (btn) {{
+            btn.style.display = "inline-flex";
+            var href = btn.getAttribute("href") || "";
+            if (href.indexOf("auth=") === -1) {{
+              btn.setAttribute("href", href + (href.indexOf("?") === -1 ? "?" : "&") + "auth=" + encodeURIComponent(tok));
+            }}
+          }}
+        }}
+      }} catch (_) {{}}
+    }})();
   </script>
 </body>
 </html>"""
@@ -1733,7 +1737,8 @@ async def openchat_global_middleware(request: Request, call_next):
                 "Access-Control-Allow-Origin": "*",
             },
         )
-    if request.method == "GET" and request.query_params.get("admin_bypass") != "1":
+    is_admin_req = _is_suusuo_request(request)
+    if request.method == "GET" and not (request.query_params.get("admin_bypass") == "1" and is_admin_req):
         accept_hdr = (request.headers.get("accept") or "").lower()
         sec_dest = (request.headers.get("sec-fetch-dest") or "").lower()
         if "text/html" in accept_hdr or sec_dest in ("document", "iframe"):
@@ -1741,7 +1746,7 @@ async def openchat_global_middleware(request: Request, call_next):
             if is_paused:
                 full_url = str(request.url.path) + (("?" + str(request.url.query)) if request.url.query else "")
                 return HTMLResponse(
-                    content=_render_paused_service_html(paused_svc_name, _ADMIN_CONFIG, full_url),
+                    content=_render_paused_service_html(paused_svc_name, _ADMIN_CONFIG, full_url, is_admin=is_admin_req),
                     status_code=200,
                     headers={"Cache-Control": "no-store"},
                 )
