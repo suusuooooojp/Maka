@@ -327,16 +327,47 @@ class TrumpRoom:
         if pid in self.seats:
             return
 
+        human_seats = sum(1 for s in range(4) if self.is_seat_human(s))
+
         # --------------------------------------------------------------------
-        # 試合が終わるまで新規の人入れないように (Lock during active matches)
+        # Botの時はすぐ入れるように (Seat immediately when Bots are in the room)
         # --------------------------------------------------------------------
+        if human_seats == 0:
+            # All 4 seats are Bots: seat this player at seat 0 and start a fresh round right away
+            self.seats[0] = pid
+            p["prefer_spectate"] = False
+            p["waiting_for_next"] = False
+            self._start_new_round(reset_ranks=True)
+            self._emit_event("bubble", f"{p['name']}さんが入室し試合を開始しました", seat=0, sfx="select")
+            return
+
+        if human_seats < 4:
+            # Open Bot seat(s) available: replace a Bot seat immediately so player can play right away
+            chosen_seat: Optional[int] = None
+            for s in range(4):
+                if not self.is_seat_human(s) and s not in self.finish_order and len(self.hands[s]) > 0:
+                    chosen_seat = s
+                    break
+            if chosen_seat is None:
+                for s in range(4):
+                    if not self.is_seat_human(s):
+                        chosen_seat = s
+                        break
+            if chosen_seat is not None:
+                self.seats[chosen_seat] = pid
+                p["prefer_spectate"] = False
+                p["waiting_for_next"] = False
+                if self.current_turn == chosen_seat:
+                    self.turn_since = time.time()
+                self._emit_event("bubble", f"{p['name']}さんが着席", seat=chosen_seat, sfx="select")
+                return
+
+        # All 4 seats are occupied by humans and match is in progress
         if is_playing:
-            # Match is currently in progress! Do not allow joining seats mid-game.
             p["prefer_spectate"] = True
             p["waiting_for_next"] = True
             return
 
-        # If round has ended, player can sit down into an open bot seat
         for s in range(4):
             if self.seats[s] is None or self.seats[s] not in self.participants:
                 self.seats[s] = pid
@@ -355,16 +386,15 @@ class TrumpRoom:
             self.remove_participant(pid)
             changed = True
 
-        # Only seat non-spectators if round is in round_end
-        if self.phase == "round_end":
-            for pid, p in list(self.participants.items()):
-                if not p.get("prefer_spectate") and pid not in self.seats:
-                    for s in range(4):
-                        if self.seats[s] is None:
-                            self.seats[s] = pid
-                            p["waiting_for_next"] = False
-                            changed = True
-                            break
+        # Seat any non-spectators into open Bot seats
+        for pid, p in list(self.participants.items()):
+            if not p.get("prefer_spectate") and pid not in self.seats:
+                for s in range(4):
+                    if not self.is_seat_human(s):
+                        self.seats[s] = pid
+                        p["waiting_for_next"] = False
+                        changed = True
+                        break
         return changed
 
     def get_summary(self) -> dict:
@@ -384,7 +414,7 @@ class TrumpRoom:
             "spectatorCount": spec_count,
             "isFull": human_seats >= 4,
             "roundNumber": self.round_number,
-            "isMatchInProgress": (self.phase != "round_end"),
+            "isMatchInProgress": (self.phase != "round_end" and human_seats >= 4),
             "seatedInfo": seated_info,
         }
 
@@ -838,7 +868,7 @@ class TrumpRoom:
         spectator_list = [p["name"] for k, p in self.participants.items() if k not in self.seats]
         p_obj = self.participants.get(pid, {})
         waiting_for_next = bool(p_obj.get("waiting_for_next"))
-        is_playing = (self.phase != "round_end")
+        is_playing = (self.phase != "round_end" and human_seats >= 4)
 
         seats_info = []
         for s in range(4):
@@ -1124,8 +1154,11 @@ async def trump_get_state(mode: str, request: Request):
         if v:
             name = v.get("username", name)
 
+    spectate_param = request.query_params.get("spectate")
+    prefer_spec = (spectate_param == "1") if spectate_param is not None else None
+
     async with room.lock:
-        room.touch_participant(pid, name=name if name else None)
+        room.touch_participant(pid, name=name if name else None, prefer_spectate=prefer_spec)
         view = room.build_view_for(pid)
     return JSONResponse(view, headers={"Cache-Control": "no-store"})
 
@@ -1164,6 +1197,10 @@ async def _handle_room_action_locked(room: TrumpRoom, pid: str, act: str, body: 
             my_seat = s
             break
 
+    if act == "leave":
+        room.remove_participant(pid)
+        return
+
     if act == "set_name":
         new_name = str(body.get("name") or "").strip()[:16]
         if new_name and pid in room.participants:
@@ -1171,9 +1208,9 @@ async def _handle_room_action_locked(room: TrumpRoom, pid: str, act: str, body: 
 
     elif act == "toggle_spectate":
         want_spec = bool(body.get("spectate"))
-        if not want_spec and room.phase != "round_end":
-            # 試合が終わるまで新規の人入れないように: Match in progress
-            room._emit_event("bubble", "試合進行中のため終了まで参加できません", seat=-1)
+        human_seats = sum(1 for s in range(4) if room.is_seat_human(s))
+        if not want_spec and room.phase != "round_end" and human_seats >= 4 and my_seat is None:
+            room._emit_event("bubble", "満席・試合進行中のため終了まで参加できません", seat=-1)
             return
         room.touch_participant(pid, prefer_spectate=want_spec)
 
@@ -1417,19 +1454,54 @@ html, body {
 @keyframes m3DealCard {
   0% {
     opacity: 0;
-    transform: translateY(-220px) scale(0.3) rotate(25deg);
+    transform: translate3d(var(--deal-offset-x, 0px), -48px, 0) scale(0.76) rotate(var(--deal-rot, -6deg));
   }
-  65% {
+  70% {
     opacity: 1;
-    transform: translateY(-6px) scale(1.04) rotate(-2deg);
+    transform: translate3d(0, 2px, 0) scale(1.02) rotate(0deg);
   }
   100% {
     opacity: 1;
-    transform: translate(0, 0) scale(1) rotate(0deg);
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
   }
 }
 .card-dealing {
-  animation: m3DealCard 0.42s var(--m3-easing) both;
+  animation: m3DealCard 0.36s var(--m3-easing) backwards;
+  will-change: transform, opacity;
+}
+
+@keyframes m3FlyToSeat {
+  0% {
+    opacity: 0.95;
+    transform: translate3d(-50%, -50%, 0) scale(0.85) rotate(0deg);
+  }
+  80% {
+    opacity: 0.95;
+    transform: translate3d(calc(-50% + var(--fly-x, 0px)), calc(-50% + var(--fly-y, 0px)), 0) scale(0.65) rotate(var(--fly-rot, 12deg));
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(calc(-50% + var(--fly-x, 0px)), calc(-50% + var(--fly-y, 0px)), 0) scale(0.45) rotate(var(--fly-rot, 18deg));
+  }
+}
+.deal-deck-overlay {
+  position: absolute; inset: 0; pointer-events: none; z-index: 25; overflow: hidden;
+}
+.deal-deck-stack {
+  position: absolute; top: 46%; left: 50%; transform: translate(-50%, -50%);
+  width: 44px; height: 64px; border-radius: 6px;
+  background: repeating-linear-gradient(45deg, #1e3a8a, #1e3a8a 5px, #172554 5px, #172554 10px);
+  border: 2px solid #93c5fd;
+  box-shadow: 0 3px 0 #1e40af, 0 6px 0 #172554, 0 10px 20px rgba(0,0,0,0.6);
+  transition: opacity 0.25s;
+}
+.deal-flying-card {
+  position: absolute; top: 46%; left: 50%;
+  width: 38px; height: 56px; border-radius: 5px;
+  background: repeating-linear-gradient(45deg, #2563eb, #2563eb 5px, #1d4ed8 5px, #1d4ed8 10px);
+  border: 1.5px solid #bfdbfe;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.45);
+  animation: m3FlyToSeat 0.34s var(--m3-easing) both;
 }
 
 .t-card {
@@ -1510,8 +1582,8 @@ html, body {
 .btn-act:disabled { opacity: 0.4; cursor: not-allowed; transform: none !important; }
 
 .hand-cards-row {
-  display: flex; gap: 8px; justify-content: center; align-items: flex-end; min-height: var(--card-h);
-  overflow-x: auto; padding: 18px 4px 6px;
+  display: flex; gap: 8px; justify-content: center; align-items: flex-end; min-height: calc(var(--card-h) + 28px);
+  overflow-x: auto; padding: 26px 8px 8px;
 }
 
 /* Modals */
@@ -1677,6 +1749,9 @@ html, body {
         <div class="played-cards-row" id="centerPlayedCards"></div>
         <div class="play-caption hidden" id="centerPlayCaption"></div>
       </div>
+
+      <!-- Visual Deck Dealing Overlay -->
+      <div class="deal-deck-overlay hidden" id="dealDeckOverlay"></div>
     </div>
 
     <!-- Bottom Player Panel -->
@@ -1759,6 +1834,9 @@ let latestState = null;
 let selectedHandIds = new Set();
 let selectedDiscardIndices = new Set();
 let sfxAudioContext = null;
+let lastDealtRoundKey = null;
+let knownHandCardIds = new Set();
+let dealOverlayTimer = null;
 
 // Sound Effects Synthesizer
 function playSfx(type) {
@@ -1965,6 +2043,10 @@ function renderLobby(rooms) {
 
 function enterRoom(mode, wantSpectate) {
   currentMode = mode;
+  lastDealtRoundKey = null;
+  knownHandCardIds.clear();
+  selectedHandIds.clear();
+  selectedDiscardIndices.clear();
   document.getElementById("lobbyScreen").classList.add("hidden");
   document.getElementById("gameScreen").classList.remove("hidden");
   document.getElementById("btnExitRoom").classList.remove("hidden");
@@ -1972,9 +2054,24 @@ function enterRoom(mode, wantSpectate) {
 }
 
 function exitToLobby() {
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try {
+      socket.send(JSON.stringify({ action: "leave", pid: currentPid, name: currentUsername, token: authToken }));
+    } catch(e) {}
+  } else if (currentMode) {
+    fetch(`/trump/api/action/${currentMode}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "leave", pid: currentPid, name: currentUsername, token: authToken })
+    }).catch(()=>{});
+  }
   if (socket) { socket.close(); socket = null; }
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   currentMode = null;
+  lastDealtRoundKey = null;
+  knownHandCardIds.clear();
+  selectedHandIds.clear();
+  selectedDiscardIndices.clear();
   document.getElementById("gameScreen").classList.add("hidden");
   document.getElementById("lobbyScreen").classList.remove("hidden");
   document.getElementById("btnExitRoom").classList.add("hidden");
@@ -2000,10 +2097,10 @@ function connectToRoom(mode, wantSpectate = false) {
       } catch(e) {}
     };
     socket.onclose = () => {
-      startPollingFallback(mode);
+      if (currentMode) startPollingFallback(mode);
     };
     socket.onerror = () => {
-      startPollingFallback(mode);
+      if (currentMode) startPollingFallback(mode);
     };
   } catch(e) {
     startPollingFallback(mode);
@@ -2040,10 +2137,71 @@ function sendRoomAction(actionObj) {
 }
 
 // ----------------------------------------------------------------------------
+// Visual Table Deck Dealing Animation (配るモーション)
+// ----------------------------------------------------------------------------
+function triggerTableDealAnimation(state) {
+  const overlay = document.getElementById("dealDeckOverlay");
+  if (!overlay) return;
+  clearTimeout(dealOverlayTimer);
+  overlay.innerHTML = "";
+  overlay.classList.remove("hidden");
+
+  const deckEl = document.createElement("div");
+  deckEl.className = "deal-deck-stack";
+  overlay.appendChild(deckEl);
+
+  // 4 directions: Bottom(You), West, North, East
+  const targets = [
+    { x: "0px",    y: "190px",  rot: "6deg" },
+    { x: "-220px", y: "-20px",  rot: "-18deg" },
+    { x: "0px",    y: "-165px", rot: "12deg" },
+    { x: "220px",  y: "-20px",  rot: "18deg" },
+  ];
+  const totalPasses = state.mode === "poker" ? 2 : 3;
+  const totalFlyCards = totalPasses * 4;
+
+  for (let i = 0; i < totalFlyCards; i++) {
+    const t = targets[i % 4];
+    const fly = document.createElement("div");
+    fly.className = "deal-flying-card";
+    fly.style.setProperty("--fly-x", t.x);
+    fly.style.setProperty("--fly-y", t.y);
+    fly.style.setProperty("--fly-rot", t.rot);
+    const delaySec = i * 0.038;
+    fly.style.animationDelay = `${delaySec}s`;
+    overlay.appendChild(fly);
+    if (i % 2 === 0) {
+      setTimeout(() => playSfx("card"), Math.round(delaySec * 1000));
+    }
+  }
+
+  const totalDurationMs = Math.round((totalFlyCards * 0.038 + 0.38) * 1000);
+  setTimeout(() => {
+    if (deckEl) deckEl.style.opacity = "0";
+  }, Math.max(200, totalDurationMs - 220));
+  dealOverlayTimer = setTimeout(() => {
+    overlay.classList.add("hidden");
+    overlay.innerHTML = "";
+  }, totalDurationMs + 60);
+}
+
+// ----------------------------------------------------------------------------
 // State Handler & UI Rendering
 // ----------------------------------------------------------------------------
 function handleStateUpdate(state) {
   latestState = state;
+
+  // Detect new round or newly seated player to trigger Deal Animation once
+  const roundKey = `${state.mode}_${state.roundNumber}_${state.isSpectator ? 'spec' : state.mySeat}`;
+  if (state.phase === "playing" && roundKey !== lastDealtRoundKey) {
+    lastDealtRoundKey = roundKey;
+    knownHandCardIds.clear();
+    selectedHandIds.clear();
+    selectedDiscardIndices.clear();
+    triggerTableDealAnimation(state);
+  } else if (state.phase === "round_end") {
+    knownHandCardIds.clear();
+  }
 
   // Match in progress banner
   const lockBanner = document.getElementById("matchLockBanner");
@@ -2178,7 +2336,7 @@ function renderPlayerBottomPanel(state) {
     }
 
     handRow.innerHTML = `<div style="color:#94a3b8;font-size:13px;padding:20px">
-      ${state.isMatchInProgress ? "🔒 現在試合中のため観戦モードです。この試合が終了次第、空き席に着席できます。" : "🟢 現在観戦モードです。「空き席に座る」を押して対戦に参加できます。"}
+      ${state.isMatchInProgress ? "🔒 現在満席・試合中のため観戦モードです。この試合が終了次第、空き席に着席できます。" : "🟢 現在観戦モードです。「空き席に座る」を押すとすぐに参加できます。"}
     </div>`;
     return;
   }
@@ -2210,8 +2368,20 @@ function renderPlayerBottomPanel(state) {
     btnPass.disabled = (!isMyTurn || !state.tablePlay);
   }
 
-  // Render Hand Cards with Physical Deal Motion (配るモーション)
+  // Sync knownHandCardIds and detect which cards are newly dealt/drawn
+  const currentHandIds = new Set(state.myHand.map(c => c.id));
+  for (const oldId of Array.from(knownHandCardIds)) {
+    if (!currentHandIds.has(oldId)) {
+      knownHandCardIds.delete(oldId);
+    }
+  }
+
+  // Render Hand Cards with Physical Deal Motion only for newly dealt/drawn cards
   handRow.innerHTML = "";
+  const totalCards = state.myHand.length;
+  const mid = (totalCards - 1) / 2;
+  let newCardOrder = 0;
+
   state.myHand.forEach((card, idx) => {
     let isSelected = false;
     let extraCls = "";
@@ -2229,9 +2399,23 @@ function renderPlayerBottomPanel(state) {
     }
 
     const cardEl = createCardElement(card, false, extraCls);
-    // Add physical deal animation with staggered delay
-    cardEl.classList.add("card-dealing");
-    cardEl.style.animationDelay = `${idx * 0.08}s`;
+    const isNewlyDealt = !knownHandCardIds.has(card.id);
+    if (isNewlyDealt) {
+      knownHandCardIds.add(card.id);
+      const offsetX = Math.round((mid - idx) * 18);
+      const rot = Math.round((idx - mid) * 2.2);
+      cardEl.style.setProperty("--deal-offset-x", `${offsetX}px`);
+      cardEl.style.setProperty("--deal-rot", `${rot}deg`);
+      cardEl.classList.add("card-dealing");
+      cardEl.style.animationDelay = `${Math.min(newCardOrder * 0.045, 0.54)}s`;
+      newCardOrder++;
+      cardEl.addEventListener("animationend", () => {
+        cardEl.classList.remove("card-dealing");
+        cardEl.style.animationDelay = "";
+        cardEl.style.removeProperty("--deal-offset-x");
+        cardEl.style.removeProperty("--deal-rot");
+      }, { once: true });
+    }
 
     cardEl.addEventListener("click", () => {
       if (!isMyTurn) return;

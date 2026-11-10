@@ -1978,10 +1978,6 @@ button, input, textarea, select {{
       {ic_search}
       <span class="btn-label">検索</span>
     </button>
-    <a href="/openchat" class="topbar-action-btn primary-tonal" title="オープンチャットを開く">
-      {ic_chat}
-      <span class="btn-label">チャット</span>
-    </a>
     <span class="topbar-meta-chip" id="externalSyncText">{initial_sync_str}</span>
     <span class="topbar-meta-chip" id="jstClock">--:--:-- JST</span>
     <button type="button" class="topbar-action-btn" id="m3SettingsBtn" title="表示・テーマ詳細設定" aria-label="設定">
@@ -2032,10 +2028,6 @@ button, input, textarea, select {{
       <button type="button" class="sidebar-item" data-nav-target="activity" data-tooltip="統計・稼働状況">
         <span class="item-icon">{ic_stats}</span>
         <span class="item-label">統計</span>
-      </button>
-      <button type="button" class="sidebar-item" data-nav-target="hub-openchat-section" data-tooltip="チャット">
-        <span class="item-icon">{ic_chat}</span>
-        <span class="item-label">チャット</span>
       </button>
     </div>
 
@@ -2255,10 +2247,6 @@ button, input, textarea, select {{
   <button type="button" class="bottom-nav-item" data-nav-target="activity">
     <span class="bottom-nav-pill">{ic_stats}</span>
     <span>統計</span>
-  </button>
-  <button type="button" class="bottom-nav-item" data-nav-target="hub-openchat-section">
-    <span class="bottom-nav-pill">{ic_chat}</span>
-    <span>チャット</span>
   </button>
 </nav>
 

@@ -4794,6 +4794,18 @@ _CLIENT_JS = r"""
 
   const toggleBtn = document.getElementById('sh-chat-toggle-btn');
   const panel = document.getElementById('sh-chat-panel');
+  function shouldHideFloatingChatButton() {
+    const p = window.location.pathname || '';
+    if (/^\/openchat(?:\/|$)/i.test(p)) return true;
+    if (p === '/' || p === '/index.html') return true;
+    if (window.__SH_HUB_TRACKER_ACTIVE) return true;
+    if (document.getElementById('hub-openchat-section') || document.getElementById('hub-chat-body')) return true;
+    return false;
+  }
+  if (shouldHideFloatingChatButton()) {
+    if (toggleBtn) toggleBtn.style.setProperty('display', 'none', 'important');
+    if (panel) panel.style.setProperty('display', 'none', 'important');
+  }
   const header = document.getElementById('sh-chat-header');
   const closeBtn = document.getElementById('sh-chat-close-btn');
   const soundBtn = document.getElementById('sh-chat-sound-btn');
@@ -5409,10 +5421,9 @@ _CLIENT_JS = r"""
       toggleBtn.style.top = defY + 'px';
     }
 
-    const isStandaloneOpenChat = /^\/openchat(?:\/|$)/i.test(window.location.pathname || '');
-    if (isStandaloneOpenChat) {
-      toggleBtn.style.display = 'none';
-      panel.style.display = 'none';
+    if (shouldHideFloatingChatButton()) {
+      toggleBtn.style.setProperty('display', 'none', 'important');
+      panel.style.setProperty('display', 'none', 'important');
     }
 
     try {
@@ -5581,6 +5592,13 @@ _CLIENT_JS = r"""
   })();
 
   function toggleChat(openState) {
+    if (shouldHideFloatingChatButton()) {
+      isOpen = false;
+      panel.classList.remove('open');
+      toggleBtn.style.setProperty('display', 'none', 'important');
+      panel.style.setProperty('display', 'none', 'important');
+      return;
+    }
     isOpen = (typeof openState === 'boolean') ? openState : !isOpen;
     try {
       localStorage.setItem('sh_openchat_open', isOpen ? '1' : '0');
