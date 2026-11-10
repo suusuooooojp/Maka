@@ -632,18 +632,52 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
   // 4. WebRTC DataChannel Heartbeat, Kickout Auto-Reconnect & AdBlock-Penalty Suppressor
   const origFetch = window.fetch;
 
+  const getDeviceUuid = function() {
+    try {
+      let id = localStorage.getItem('device_id');
+      if (!id) {
+        id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+          ? crypto.randomUUID()
+          : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+              const r = Math.random() * 16 | 0;
+              return (c === 'x' ? r : (r & 3 | 8)).toString(16);
+            });
+        localStorage.setItem('device_id', id);
+      }
+      return id;
+    } catch (_) {
+      return 'cm-web-device';
+    }
+  };
+
+  const buildCmApiUrl = function(path) {
+    const devId = getDeviceUuid();
+    const qUuid = (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : (devId + '-' + Date.now());
+    const sep = path.includes('?') ? '&' : '?';
+    return path + sep + 'device_type=web&query_uuid=' + encodeURIComponent(qUuid) + '&site=cm&device_id=' + encodeURIComponent(devId);
+  };
+
   const getStoredSession = function() {
-    if (window.__cm_session && window.__cm_session.token) return window.__cm_session;
+    let base = (window.__cm_session && typeof window.__cm_session === 'object') ? Object.assign({}, window.__cm_session) : {};
     try {
       const raw = sessionStorage.getItem('__cm_last_session') || localStorage.getItem('__cm_last_session');
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (parsed && parsed.token) {
-          window.__cm_session = parsed;
-          return parsed;
+        if (parsed && typeof parsed === 'object') {
+          base = Object.assign({}, parsed, base);
         }
       }
     } catch (_) {}
+    if (!base.token) {
+      try {
+        const ud = JSON.parse(localStorage.getItem('userData') || '{}');
+        if (ud && ud.token) base.token = ud.token;
+      } catch (_) {}
+    }
+    if (base.token) {
+      window.__cm_session = base;
+      return base;
+    }
     return window.__cm_session || null;
   };
 
@@ -683,49 +717,79 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         lastConn = JSON.parse(localStorage.getItem('__cm_last_connect') || '{}') || {};
       } catch (_) {}
 
-      const token = sess.token || lastConn.token || '';
+      let token = sess.token || lastConn.token || '';
+      if (!token) {
+        try {
+          const ud = JSON.parse(localStorage.getItem('userData') || '{}');
+          if (ud && ud.token) token = ud.token;
+        } catch (_) {}
+      }
       const gamePkg = sess.game || sess.game_name || lastConn.game_name || lastConn.game || 'com.roblox.client';
-      const androidId = sess.android_id || lastConn.android_id || '';
-      const serverId = sess.server_id || lastConn.server_id || undefined;
+      let androidId = sess.android_id || lastConn.android_id || '';
+      let serverId = parseInt(sess.server_id || lastConn.server_id || localStorage.getItem('selectedServer') || '1', 10);
+      if (!Number.isFinite(serverId) || serverId <= 0) serverId = 1;
 
       if (token) {
+        const apiHeaders = {
+          'Content-Type': 'application/json',
+          'X-User-Token': token,
+          'X-User-Language': 'ja',
+          'X-User-Locale': 'jp'
+        };
+
         // 1. Claim fresh upstream reward time first
         try {
-          await origFetch('/cloudmoon/api/web/ad', {
+          await origFetch(buildCmApiUrl('/cloudmoon/api/web/ad'), {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'X-User-Token': token
-            },
+            headers: apiHeaders,
             body: JSON.stringify({ game_name: gamePkg, game: gamePkg })
           });
         } catch (_) {}
 
+        // 1b. If androidId is missing, fetch it from /phone/list
+        if (!androidId) {
+          try {
+            const listResp = await origFetch(buildCmApiUrl('/cloudmoon/api/phone/list'), {
+              method: 'GET',
+              headers: apiHeaders
+            });
+            const listJson = await listResp.json();
+            const firstItem = listJson && listJson.data && Array.isArray(listJson.data.list) ? listJson.data.list[0] : null;
+            if (firstItem && firstItem.android_id) {
+              androidId = firstItem.android_id;
+            }
+          } catch (_) {}
+        }
+
         // 2. Request a fresh SID for the same running Android instance via /phone/connect
         if (androidId) {
+          const rawParams = lastConn.params;
+          const paramsStr = (typeof rawParams === 'string' && rawParams.startsWith('{'))
+            ? rawParams
+            : JSON.stringify({ language: 'ja', locale: 'jp' });
           const connectPayload = {
-            android_id: String(androidId),
+            android_id: androidId,
             game_name: String(gamePkg),
             screen_res: '720x1280',
-            ad_unblock: true,
-            params: lastConn.params || []
+            server_id: serverId,
+            params: paramsStr,
+            ad_unblock: true
           };
-          if (serverId !== undefined && serverId !== null) {
-            connectPayload.server_id = serverId;
-          }
           try {
-            const connResp = await origFetch('/cloudmoon/api/phone/connect', {
+            const connResp = await origFetch(buildCmApiUrl('/cloudmoon/api/phone/connect'), {
               method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'X-User-Token': token
-              },
+              headers: apiHeaders,
               body: JSON.stringify(connectPayload)
             });
             const connJson = await connResp.json();
-            if (connJson && connJson.code === 0 && connJson.data && connJson.data.enter_url) {
-              const enterUrl = new URL(connJson.data.enter_url, window.location.origin);
-              const newSid = enterUrl.searchParams.get('sid');
+            if (connJson && connJson.code === 0 && connJson.data) {
+              let newSid = connJson.data.sid || '';
+              if (!newSid && connJson.data.enter_url) {
+                try {
+                  const enterUrl = new URL(connJson.data.enter_url, window.location.origin);
+                  newSid = enterUrl.searchParams.get('sid') || '';
+                } catch (_) {}
+              }
               if (newSid) {
                 const quality = localStorage.getItem('quality') || new URLSearchParams(window.location.search).get('quality') || 'HD';
                 window.__cm_intentional_exit = true;
@@ -749,10 +813,29 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     if (typeof RTCPeerConnection !== 'undefined') {
       const origCreateDc = RTCPeerConnection.prototype.createDataChannel;
       RTCPeerConnection.prototype.createDataChannel = function(label, options) {
+        const pc = this;
         const dc = origCreateDc.apply(this, arguments);
         try {
+          window.__cm_pc = pc;
           window.__cm_dc = dc;
           window.__cm_dc_opened_at = 0;
+          pc.addEventListener('connectionstatechange', function() {
+            if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
+              if (pc.connectionState === 'failed') {
+                setTimeout(function() {
+                  if (pc.connectionState !== 'connected') {
+                    window.__cmAutoReconnect('pc_connection_failed');
+                  }
+                }, 2000);
+              } else if (pc.connectionState === 'disconnected') {
+                setTimeout(function() {
+                  if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
+                    window.__cmAutoReconnect('pc_connection_disconnected');
+                  }
+                }, 4500);
+              }
+            }
+          });
           dc.addEventListener('open', function() {
             window.__cm_dc = dc;
             window.__cm_dc_opened_at = Date.now();
@@ -760,13 +843,13 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
             try { dc.send('adBlock>false'); } catch (_) {}
           });
           dc.addEventListener('close', function() {
-            // If DataChannel closes during active gameplay, auto-reconnect within 3.5s
+            // If DataChannel closes during active gameplay, auto-reconnect within 2.5s
             if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
               setTimeout(function() {
                 if (!window.__cm_dc || window.__cm_dc.readyState !== 'open') {
                   window.__cmAutoReconnect('datachannel_closed');
                 }
-              }, 3500);
+              }, 2500);
             }
           });
         } catch (_) {}
@@ -894,11 +977,13 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         const s = getStoredSession();
         if (s && s.token) {
           const gamePkg = s.game || s.game_name || 'com.roblox.client';
-          origFetch('/cloudmoon/api/web/ad', {
+          origFetch(buildCmApiUrl('/cloudmoon/api/web/ad'), {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              'X-User-Token': s.token
+              'X-User-Token': s.token,
+              'X-User-Language': 'ja',
+              'X-User-Locale': 'jp'
             },
             body: JSON.stringify({ game_name: gamePkg, game: gamePkg })
           }).catch(function() {});
@@ -924,10 +1009,13 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
             const ct = v.currentTime || 0;
             if (ct > 0 && ct === lastVideoTime) {
               stalledTicks++;
-              // If video is frozen and DataChannel is closed, trigger immediate reconnect
-              if (stalledTicks >= 2 && (!window.__cm_dc || window.__cm_dc.readyState !== 'open')) {
+              const pcState = (window.__cm_pc && window.__cm_pc.connectionState) || '';
+              const iceState = (window.__cm_pc && window.__cm_pc.iceConnectionState) || '';
+              const dcNotOpen = (!window.__cm_dc || window.__cm_dc.readyState !== 'open');
+              const pcDead = (pcState === 'disconnected' || pcState === 'failed' || pcState === 'closed' || iceState === 'disconnected' || iceState === 'failed');
+              if ((stalledTicks >= 2 && (dcNotOpen || pcDead)) || stalledTicks >= 5) {
                 stalledTicks = 0;
-                window.__cmAutoReconnect('video_frozen_dc_closed');
+                window.__cmAutoReconnect('video_frozen');
               }
             } else {
               stalledTicks = 0;
@@ -1336,7 +1424,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
             navigator.sendBeacon('/activity/heartbeat', new Blob([payload], { type: 'application/json' }));
             return;
           }
-          doFetch('/activity/heartbeat', {
+          origFetch('/activity/heartbeat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: payload,
@@ -1516,6 +1604,11 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'd("keydown",a,e=>{e.key==="Enter"&&v()(),e.key==="Escape"&&y()()})',
             'd("keydown",a,e=>{if(e.key==="Enter"){e.preventDefault();e.stopPropagation();return}e.key==="Escape"&&y()()})',
         )
+        # Fix closeInput() in both 2.D2AbakOU.js and older bundles so isTypingMode is always reset when closing text input
+        js_text = js_text.replace(
+            'closeInput(){this.inputTextShow=!1,this.inputTextStr=``,this.prevInputTextStr=``,Z.send(xr())}',
+            'closeInput(){this.inputTextShow=!1,this.isTypingMode=!1,this.inputTextStr=``,this.prevInputTextStr=``,Z.send(xr())}',
+        )
         js_text = js_text.replace(
             'closeInput(){this.inputTextShow=!1,this.prevInputTextStr=``,this.inputTextStr=``,Z.send(Or())}',
             'closeInput(){this.inputTextShow=!1,this.isTypingMode=!1,this.prevInputTextStr=``,this.inputTextStr=``,Z.send(Or())}',
@@ -1523,6 +1616,15 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         js_text = js_text.replace(
             'sendText(){if(this.inputTextShow){if(this.prevInputTextStr!==``&&this.inputTextStr===this.prevInputTextStr){Z.send(br(this.inputEnterType)),this.prevInputTextStr=``,this.inputTextStr=``;return}Z.send(yr(this.inputTextCnt++,this.inputTextStr)),this.prevInputTextStr=this.inputTextStr}}',
             'sendText(){if(this.inputTextShow){let _txt=this.inputTextStr||``;if(!_txt)return;Z.send(yr(this.inputTextCnt++,_txt));let _et=this.inputEnterType;this.prevInputTextStr=``;this.inputTextStr=``;setTimeout(()=>{try{Z.send(br(_et))}catch(_){}},35)}}',
+        )
+        # Fix handleGlobalKeyDown / handleGlobalKeyUp in 2.D2AbakOU.js so WASD/hotkeys never get stuck in typing mode when input bar is closed
+        js_text = js_text.replace(
+            'async handleGlobalKeyDown(e){if(this.isTypingMode){if(this.betaInput&&e.preventDefault(),(e.ctrlKey||e.metaKey)&&e.key===`v`&&!e.repeat)return;let t=this.generateKeyCodeMessage(e,Q.ACTION_DOWN);this.sendRawKeyToAndroid(t)}else this.processKeyDown(e)}',
+            'async handleGlobalKeyDown(e){if(this.isTypingMode){if(!this.inputTextShow&&!this.betaInput){this.isTypingMode=!1;this.processKeyDown(e);return}if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;if(this.betaInput&&e.preventDefault(),(e.ctrlKey||e.metaKey)&&e.key===`v`&&!e.repeat)return;let t=this.generateKeyCodeMessage(e,Q.ACTION_DOWN);this.sendRawKeyToAndroid(t)}else this.processKeyDown(e)}',
+        )
+        js_text = js_text.replace(
+            'handleGlobalKeyUp(e){if(this.isTypingMode){if(this.betaInput&&e.preventDefault(),(e.ctrlKey||e.metaKey)&&e.key===`v`&&!e.repeat)return;let t=this.generateKeyCodeMessage(e,Q.ACTION_UP);this.sendRawKeyToAndroid(t)}else this.processKeyUP(e)}',
+            'handleGlobalKeyUp(e){if(this.isTypingMode){if(!this.inputTextShow&&!this.betaInput){this.isTypingMode=!1;this.processKeyUP(e);return}if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;if(this.betaInput&&e.preventDefault(),(e.ctrlKey||e.metaKey)&&e.key===`v`&&!e.repeat)return;let t=this.generateKeyCodeMessage(e,Q.ACTION_UP);this.sendRawKeyToAndroid(t)}else this.processKeyUP(e)}',
         )
         js_text = js_text.replace(
             'if(this.isTypingMode){let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(0,t,0,0)));return}',
@@ -1532,14 +1634,18 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'if(this.isTypingMode){let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
             'if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
         )
+
+        # Fix Touch pointer ID overflow on iPad/iOS where Touch.identifier increments on every tap and exceeds Android MAX_POINTER_ID (31)
         js_text = js_text.replace(
-            'async handleGlobalKeyDown(e){if(this.isTypingMode){let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(0,t,0,n))}return}',
-            'async handleGlobalKeyDown(e){if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(0,t,0,n))}return}',
+            "getTouchCounter(e){return this.touchIdMap.has(e)||this.touchIdMap.set(e,this.touchCounter++),this.touchIdMap.get(e)}",
+            "getTouchCounter(e){if(!this.touchIdMap.has(e)){let u=new Set(this.touchIdMap.values()),s=11;while(u.has(s)&&s<30)s++;if(s>=30){this.touchIdMap.clear();s=11}this.touchIdMap.set(e,s)}return this.touchIdMap.get(e)}",
         )
         js_text = js_text.replace(
-            'async handleGlobalKeyUp(e){if(this.isTypingMode){let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(1,t,0,n))}return}',
-            'async handleGlobalKeyUp(e){if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(1,t,0,n))}return}',
+            "touchend(e){e.preventDefault(),this.enableTouch&&Z.send(`touch>Touch end${this.getChangedTouchesString(e)}`)}touchcancel(e){e.preventDefault(),this.enableTouch&&Z.send(`touch>Touch endcancel${this.getChangedTouchesString(e)}`)}",
+            "touchend(e){e.preventDefault();let s=this.getChangedTouchesString(e);for(let n=0;n<e.changedTouches.length;n++)this.touchIdMap.delete(String(e.changedTouches[n].identifier));this.enableTouch&&Z.send(`touch>Touch end${s}`)}touchcancel(e){e.preventDefault();let s=this.getChangedTouchesString(e);for(let n=0;n<e.changedTouches.length;n++)this.touchIdMap.delete(String(e.changedTouches[n].identifier));this.enableTouch&&Z.send(`touch>Touch end${s}`)}",
         )
+        # Never allow touchState>false to disable touch input
+        js_text = js_text.replace("n===`touchState`?K.enableTouch=r===`true`", "n===`touchState`?(K.enableTouch=!0)")
 
         # Initialize in-game quality state from localStorage ('HD' by default) instead of hardcoded 'SD'
         js_text = js_text.replace(
@@ -1909,9 +2015,9 @@ async def _auto_claim_upstream_reward(
         try:
             # Upstream /web/ad expects `game_name` (Hn in 2.D2AbakOU.js sends `{"game_name": t.gameName}`)
             ad_resp = await client.post(
-                f"{API_ORIGIN}/web/ad",
+                f"{API_ORIGIN}/web/ad?device_type=web&site=cm",
                 headers=headers,
-                content=json.dumps({"game_name": pkg, "game": pkg}).encode("utf-8"),
+                content=json.dumps({"game_name": pkg}).encode("utf-8"),
                 timeout=5.0,
             )
             if ad_resp.status_code == 200:
@@ -1919,14 +2025,36 @@ async def _auto_claim_upstream_reward(
                 ad_data = ad_json.get("data") if isinstance(ad_json, dict) else None
                 if isinstance(ad_data, dict):
                     reward_hash = ad_data.get("rewardHash") or ""
-                    ad_source = ad_data.get("adSource") or "admob"
+                    ad_source = ad_data.get("adSource") if ad_data.get("adSource") is not None else ""
                     if reward_hash:
-                        await client.post(
-                            f"{API_ORIGIN}/ad/gpt_reward",
+                        rw_resp = await client.post(
+                            f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
                             headers=headers,
                             content=json.dumps({"hash": reward_hash, "source": ad_source}).encode("utf-8"),
                             timeout=5.0,
                         )
+                        rw_ok = False
+                        if rw_resp.status_code == 200:
+                            try:
+                                rw_ok = rw_resp.json().get("code") == 0
+                            except Exception:
+                                pass
+                        if not rw_ok:
+                            # Some upstream reward hashes enforce a brief cooldown before claiming
+                            await asyncio.sleep(3.0)
+                            for alt_source in (ad_source or "playwire", "adsense_new", "admob"):
+                                rw_retry = await client.post(
+                                    f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
+                                    headers=headers,
+                                    content=json.dumps({"hash": reward_hash, "source": alt_source}).encode("utf-8"),
+                                    timeout=5.0,
+                                )
+                                if rw_retry.status_code == 200:
+                                    try:
+                                        if rw_retry.json().get("code") == 0:
+                                            break
+                                    except Exception:
+                                        pass
                     else:
                         break
         except Exception as exc:
@@ -2368,7 +2496,7 @@ async def cloudmoon_runsite_proxy(request: Request, path: str) -> Response:
             media_type=ct,
             headers={
                 "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "public, max-age=300",
+                "Cache-Control": "no-cache" if clean_path.endswith(".js") else "public, max-age=300",
             },
         )
 
@@ -2413,9 +2541,9 @@ async def cloudmoon_runsite_proxy(request: Request, path: str) -> Response:
         headers={
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": (
-                "public, max-age=300"
-                if is_immutable
-                else ("no-store" if ("text/html" in ct or clean_path.endswith(".js")) else "public, max-age=86400")
+                "no-cache"
+                if clean_path.endswith(".js")
+                else ("no-store" if "text/html" in ct else "public, max-age=86400")
             ),
         },
     )
@@ -2511,7 +2639,7 @@ async def cloudmoon_assets_proxy(request: Request, path: str) -> Response:
             media_type=ct,
             headers={
                 "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "public, max-age=300",
+                "Cache-Control": "no-cache" if path.endswith(".js") else "public, max-age=300",
             },
         )
 
@@ -2545,7 +2673,7 @@ async def cloudmoon_assets_proxy(request: Request, path: str) -> Response:
         media_type=ct.split(";")[0],
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "public, max-age=300",
+            "Cache-Control": "no-cache" if path.endswith(".js") else "public, max-age=300",
         },
     )
 
