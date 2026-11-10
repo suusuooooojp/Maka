@@ -57,7 +57,7 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
                 curl.setopt(resolve_opt, list(_DNS_RESOLVE_MAP.values()))
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 15000)
+            curl.setopt(connect_timeout_ms, 3500)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
@@ -125,7 +125,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261110-ig-v9"
+RUNTIME_REV = "20261110-ig-v10"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -1168,32 +1168,43 @@ async def _reset_curl_session(failed_session=None) -> None:
                 pass
 
 
+class _NullHttpxCookies(httpx.Cookies):
+    """Stateless cookie container so httpx.AsyncClient never stores Set-Cookie headers across requests."""
+
+    def extract_cookies(self, response: httpx.Response) -> None:
+        pass
+
+
 async def _get_media_http_client() -> httpx.AsyncClient:
-    """Shared cookieless persistent IPv4 client for Instagram images, Reel videos, and HTTP relay fallback."""
+    """Shared cookieless persistent IPv4 client for Instagram HTML, API, images, and Reel videos."""
     global _MEDIA_HTTP_CLIENT
     if _MEDIA_HTTP_CLIENT is not None and not _MEDIA_HTTP_CLIENT.is_closed:
         return _MEDIA_HTTP_CLIENT
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
-            timeout = httpx.Timeout(connect=15.0, read=45.0, write=15.0, pool=15.0)
+            timeout = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
                     local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
-                _MEDIA_HTTP_CLIENT = httpx.AsyncClient(
+                client = httpx.AsyncClient(
                     transport=transport,
+                    cookies=_NullHttpxCookies(),
                     follow_redirects=True,
                     timeout=timeout,
                 )
             else:
-                _MEDIA_HTTP_CLIENT = httpx.AsyncClient(
+                client = httpx.AsyncClient(
+                    cookies=_NullHttpxCookies(),
                     follow_redirects=True,
                     limits=limits,
                     timeout=timeout,
                 )
+            client._cookies = _NullHttpxCookies()
+            _MEDIA_HTTP_CLIENT = client
     return _MEDIA_HTTP_CLIENT
 
 
@@ -1704,6 +1715,9 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
     return patched.encode("utf-8")
 
 
+_CURL_DISABLED_UNTIL: float = 0.0
+
+
 async def _ig_raw_single_request(
     method: str,
     url: str,
@@ -1715,16 +1729,18 @@ async def _ig_raw_single_request(
     fresh_curl: bool,
     impersonate_profile: str,
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
-    if not use_httpx and StatelessCurlSession is not None:
+    global _CURL_DISABLED_UNTIL
+    if not use_httpx and StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
         ephemeral: StatelessCurlSession | None = None
         session = None
         try:
+            curl_timeout = min(float(timeout), 4.5)
             if fresh_curl:
                 ephemeral = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=max(int(timeout) + 3, 20),
+                    timeout=5,
                     max_clients=4,
                 )
                 session = ephemeral
@@ -1736,7 +1752,7 @@ async def _ig_raw_single_request(
                 headers=headers,
                 data=body if body else None,
                 allow_redirects=False,
-                timeout=timeout,
+                timeout=curl_timeout,
             )
             status = int(upstream.status_code)
             reason = getattr(upstream, "reason", "")
@@ -1745,6 +1761,7 @@ async def _ig_raw_single_request(
             raw_multi = list(upstream.headers.multi_items())
             return status, status_text, resp_body, raw_multi
         except Exception:
+            _CURL_DISABLED_UNTIL = time.time() + 600.0
             if not fresh_curl and session is not None:
                 try:
                     asyncio.create_task(_reset_curl_session(session))
@@ -1780,7 +1797,7 @@ async def _ig_upstream_request(
     body: bytes | None = None,
     *,
     timeout: float = 22.0,
-    prefer_httpx: bool = False,
+    prefer_httpx: bool = True,
     fresh_curl: bool = False,
     impersonate_profile: str = "chrome131",
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
@@ -1795,7 +1812,7 @@ async def _ig_upstream_request(
         except Exception:
             pass
 
-    used_httpx = prefer_httpx or (StatelessCurlSession is None)
+    used_httpx = prefer_httpx or (StatelessCurlSession is None) or (time.time() < _CURL_DISABLED_UNTIL)
     try:
         status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
             method,
@@ -2592,14 +2609,13 @@ async def ig_http_relay(request: Request):
             headers=header_dict,
             body=req_body if req_body else None,
             timeout=22.0,
-            prefer_httpx=is_media_cdn,
+            prefer_httpx=True,
             fresh_curl=is_credential_login,
             impersonate_profile=impersonate_profile,
         )
-    except Exception as exc:
-        err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
+    except Exception:
         return Response(
-            err_msg,
+            b"relay gateway error",
             status_code=502,
             media_type="text/plain; charset=utf-8",
             headers={"Cache-Control": "no-store"},
@@ -3431,9 +3447,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   function buildPlugins() {{
     const U = globalThis.ScramjetUtils || globalThis.$scramjetUtils || {{}};
     const result = [];
-    if (typeof U.HttpCachePlugin === "function") {{
-      try {{ result.push(new U.HttpCachePlugin()); }} catch (_) {{}}
-    }}
     if (typeof U.UrlWatcherPlugin === "function") {{
       try {{ result.push(new U.UrlWatcherPlugin((url) => observeUrl(String(url)))); }} catch (_) {{}}
     }}
@@ -3952,10 +3965,18 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     if (!("serviceWorker" in navigator)) throw new Error("Service Worker unavailable");
     try {{
       const revKey = "sh:ig:rev";
-      if (localStorage.getItem(revKey) !== "{RUNTIME_REV}" && typeof caches !== "undefined") {{
-        const cKeys = await caches.keys();
-        await Promise.all(cKeys.filter((k) => k.startsWith("sh-ig-")).map((k) => caches.delete(k).catch(() => {{}})));
-        localStorage.setItem(revKey, "{RUNTIME_REV}");
+      if (typeof caches !== "undefined") {{
+        caches.delete("scramjet-http-cache-v2").catch(() => {{}});
+        caches.delete("scramjet-http-cache").catch(() => {{}});
+        if (localStorage.getItem(revKey) !== "{RUNTIME_REV}") {{
+          const cKeys = await caches.keys();
+          await Promise.all(
+            cKeys
+              .filter((k) => k.startsWith("sh-ig-") || k.startsWith("scramjet-http-cache"))
+              .map((k) => caches.delete(k).catch(() => {{}}))
+          );
+          localStorage.setItem(revKey, "{RUNTIME_REV}");
+        }}
       }}
     }} catch (_) {{}}
 
