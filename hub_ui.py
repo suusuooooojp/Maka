@@ -97,14 +97,14 @@ def render_home(proxies, request=None):
         ccu_num = int(svc_ccu_map.get(name_raw) or 0)
         acc_num = int(svc_counts.get(name_raw) or 0)
         status_cls = "service-status active" if ccu_num > 0 else "service-status"
-        is_def_fav = (name.lower() == "youtube")
+        is_def_fav = (name_raw.lower() == "youtube")
         fav_cls = "fav-btn pinned" if is_def_fav else "fav-btn"
         aria_pr = "true" if is_def_fav else "false"
+        card_style = 'style="order:-1;"' if is_def_fav else ""
         cards_html.append(
             f'''<a class="card service" href="{path_esc}" data-service="{name_esc}" data-name="{name_esc}" '''
             f'''data-path="{path_esc}" data-category="{cat_esc}" data-cat-label="{cat_label_esc}" '''
-            f'''data-desc="{desc_esc}" data-icon-key="{escape(icon_key)}" data-keywords="{kw_esc}" '''
-            f'''style="{'order:-1;' if is_def_fav else ''}">'''
+            f'''data-desc="{desc_esc}" data-icon-key="{escape(icon_key)}" data-keywords="{kw_esc}" {card_style}>'''
             f'''<div class="card-head">'''
             f'''<div class="card-title-group">'''
             f'''<span class="card-icon-box" data-cat="{cat_esc}">{svc_svg}</span>'''
