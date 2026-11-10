@@ -317,16 +317,18 @@ def check_security(request: Request) -> Optional[Response]:
 
     # 5. Check for Known Exploit / Vulnerability Probing Paths
     lowered_path = path.lower()
-    for suspicious_prefix in _SUSPICIOUS_PATH_PREFIXES:
-        if lowered_path.startswith(suspicious_prefix) or (suspicious_prefix in lowered_path):
-            _IP_PROBE_COUNTS[client_ip] = _IP_PROBE_COUNTS.get(client_ip, 0) + 1
-            if _IP_PROBE_COUNTS[client_ip] >= 2:
-                _IP_BANS[client_ip] = (now + EXPLOIT_BAN_SECONDS, "exploit")
-            return JSONResponse(
-                {"error": "Forbidden", "message": "不正なアクセスをブロックしました (Unauthorized Scan)"},
-                status_code=403,
-                headers={"Cache-Control": "no-store"},
-            )
+    is_proxy_or_asset_prefix = lowered_path.startswith(_RATE_LIMIT_EXEMPT_PREFIXES)
+    if not is_proxy_or_asset_prefix:
+        for suspicious_prefix in _SUSPICIOUS_PATH_PREFIXES:
+            if lowered_path.startswith(suspicious_prefix) or (suspicious_prefix in lowered_path):
+                _IP_PROBE_COUNTS[client_ip] = _IP_PROBE_COUNTS.get(client_ip, 0) + 1
+                if _IP_PROBE_COUNTS[client_ip] >= 2:
+                    _IP_BANS[client_ip] = (now + EXPLOIT_BAN_SECONDS, "exploit")
+                return JSONResponse(
+                    {"error": "Forbidden", "message": "不正なアクセスをブロックしました (Unauthorized Scan)"},
+                    status_code=403,
+                    headers={"Cache-Control": "no-store"},
+                )
 
     # 6. Check for Malicious Vulnerability Scanner User-Agents
     ua = request.headers.get("user-agent", "")
@@ -339,7 +341,8 @@ def check_security(request: Request) -> Optional[Response]:
         )
 
     # 7. Check URI length (buffer overflow / query stuffing prevention)
-    if len(full_path_query) > 4096:
+    max_uri_len = 16384 if is_proxy_or_asset_prefix else 4096
+    if len(full_path_query) > max_uri_len:
         return JSONResponse(
             {"error": "URI Too Long", "message": "URI長が制限を超えています"},
             status_code=414,
@@ -348,7 +351,7 @@ def check_security(request: Request) -> Optional[Response]:
 
     # 8. Sliding-Window Rate Limiting (F5 Attack / HTTP Flood Protection)
     if (
-        lowered_path.startswith(_RATE_LIMIT_EXEMPT_PREFIXES)
+        is_proxy_or_asset_prefix
         or lowered_path.endswith(_RATE_LIMIT_EXEMPT_EXTS)
     ):
         return None

@@ -117,7 +117,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261109-ig-v7"
+RUNTIME_REV = "20261110-ig-v8"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -466,11 +466,11 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
         'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
         'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
-        'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
-        'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
+        'const _c="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",_av="5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
-        '}}'
+        'const _pd=Object.getOwnPropertyDescriptor(_np,"platform");if(_pd&&_pd.get){const _pg=new Proxy(_pd.get,{apply:()=>"Win32"});e.box.unproxy.set(_pg,_pd.get);Object.defineProperty(_np,"platform",{..._pd,get:_pg})}'
+        '}'
         '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
@@ -674,14 +674,20 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '}'
         'if(typeof navigator!=="undefined"){'
         'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
+        'const _dUa="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";'
+        'const _dAv="5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";'
         'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
         'try{Object.defineProperty(navigator,"maxTouchPoints",{get:()=>0,configurable:true});}catch(_){}'
         'try{if(_np){Object.defineProperty(_np,"maxTouchPoints",{get:()=>0,configurable:true});}}catch(_){}'
-        'if(String(navigator.userAgent||"").includes("HeadlessChrome/")&&_np){'
-        'const _ua=navigator.userAgent.replace(/HeadlessChrome\\//g,"Chrome/");'
-        'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
-        'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
+        'try{if(_np){'
+        'Object.defineProperty(_np,"userAgent",{get:()=>_dUa,enumerable:true,configurable:true});'
+        'Object.defineProperty(_np,"appVersion",{get:()=>_dAv,enumerable:true,configurable:true});'
+        'Object.defineProperty(_np,"platform",{get:()=>"Win32",enumerable:true,configurable:true});'
+        'if("userAgentData"in _np||"userAgentData"in navigator){'
+        'const _uad={brands:[{brand:"Google Chrome",version:"131"},{brand:"Chromium",version:"131"},{brand:"Not_A Brand",version:"24"}],mobile:false,platform:"Windows",getHighEntropyValues:async()=>({architecture:"x86",bitness:"64",brands:[{brand:"Google Chrome",version:"131"},{brand:"Chromium",version:"131"},{brand:"Not_A Brand",version:"24"}],fullVersionList:[{brand:"Google Chrome",version:"131.0.0.0"},{brand:"Chromium",version:"131.0.0.0"},{brand:"Not_A Brand",version:"24.0.0.0"}],mobile:false,model:"",platform:"Windows",platformVersion:"15.0.0",uaFullVersion:"131.0.0.0"}),toJSON(){return{brands:this.brands,mobile:false,platform:"Windows"};}};'
+        'Object.defineProperty(_np,"userAgentData",{get:()=>_uad,enumerable:true,configurable:true});'
         '}'
+        '}}catch(_){}'
         'if(navigator.credentials){'
         'const _rejCred=()=>Promise.reject(typeof DOMException!=="undefined"?new DOMException("The operation either timed out or was not allowed.","NotAllowedError"):new Error("NotAllowedError"));'
         'const _getCred=(opts)=>(opts&&opts.publicKey)?_rejCred():Promise.resolve(null);'
@@ -703,7 +709,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
-        'const _wShim=`(()=>{try{if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}if(String(navigator.userAgent||"").includes("HeadlessChrome/")){const _ua=navigator.userAgent.replace(/HeadlessChrome\\\\//g,"Chrome/");Object.defineProperty(navigator,"userAgent",{get:()=>_ua,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_ua.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
+        'const _wShim=`(()=>{try{if(typeof navigator!=="undefined"){const _dUa="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}Object.defineProperty(navigator,"userAgent",{get:()=>_dUa,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_dUa.replace(/^Mozilla\\\\//,""),configurable:true});Object.defineProperty(navigator,"platform",{get:()=>"Win32",configurable:true});}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
         'globalThis.Blob=new Proxy(_OrigBlob,{construct(target,args,newTarget){try{const parts=args[0],opts=args[1];if(Array.isArray(parts)&&parts.length>0&&typeof parts[0]==="string"&&(String(opts?.type||"").includes("javascript")||parts[0].includes("onmessage")||parts[0].includes("onconnect"))){args=[[_wShim,...parts],opts];}}catch(_){}return Reflect.construct(target,args,newTarget);}});'
         '}}catch(_){}\n'
     )
@@ -1615,12 +1621,6 @@ def _normalize_ig_set_cookie(cookie_val: str, host: str) -> str:
 
 
 def _select_curl_impersonate(ua: str) -> str:
-    if not ua:
-        return "chrome131"
-    if ("iPad" in ua or "iPhone" in ua or "Mobile/" in ua) and "AppleWebKit" in ua and "Android" not in ua:
-        return "safari17_2_ios"
-    if "Macintosh" in ua and "Safari/" in ua and "Chrome/" not in ua and "Chromium/" not in ua:
-        return "safari18_0"
     return "chrome131"
 
 
@@ -2054,11 +2054,12 @@ async def _handle_ig_caa_login(
                 flush=True,
             )
 
-            # If v1 did not authenticate/2FA/checkpoint, also attempt native /api/graphql
+            # If v1 did not return a valid JSON response (e.g. non-200 or empty), attempt native /api/graphql
             # (which uses #PWD_BROWSER) in case the account requires CAA/FETA GraphQL login,
             # while suppressing 1675004 rate-limit errors.
             if (
-                not v1_json.get("authenticated")
+                (v1_status != 200 or not v1_json)
+                and not v1_json.get("authenticated")
                 and not v1_json.get("two_factor_required")
                 and not v1_json.get("checkpoint_url")
                 and v1_json.get("message") not in ("checkpoint_required", "challenge_required")
@@ -2136,8 +2137,12 @@ async def _handle_ig_caa_login(
             ["access-control-allow-origin", "https://www.instagram.com"],
             ["access-control-allow-credentials", "true"],
         ]
+        cookie_uid = ""
         for k, v in raw_multi:
             if k.lower() == "set-cookie":
+                m_duid = re.search(r"(?:^|[;\s])ds_user_id=([^;\s]+)", v)
+                if m_duid and m_duid.group(1).strip():
+                    cookie_uid = m_duid.group(1).strip()
                 out_headers.append(["set-cookie", _normalize_ig_set_cookie(v, "www.instagram.com")])
 
         caa_payload: dict[str, object] = {
@@ -2170,12 +2175,11 @@ async def _handle_ig_caa_login(
         }
 
         if v1_json.get("authenticated") is True:
-            uid = str(v1_json.get("userId") or "")
+            uid = str(v1_json.get("userId") or cookie_uid or "1")
             nonce = str(v1_json.get("trustedDeviceNonce") or "")
             caa_payload["ig_authenticated"] = True
             caa_payload["redirect_uri"] = next_uri
-            if uid:
-                caa_payload["crypted_uid"] = uid
+            caa_payload["crypted_uid"] = uid
             if uid and nonce:
                 caa_payload["ig_trusted_device_nonce_refresh"] = {"uid": uid, "nonce": nonce}
         elif v1_json.get("two_factor_required") is True:
@@ -2252,6 +2256,18 @@ async def ig_http_relay(request: Request):
             break
         url = _strip_dollar_query(url)
         parsed = urlparse(url)
+        if (
+            parsed.hostname
+            and parsed.hostname.lower().rstrip(".") in ("www.instagram.com", "instagram.com")
+            and parsed.path.rstrip("/") == "/accounts/login"
+            and parsed.query
+        ):
+            qs_login = parse_qs(parsed.query, keep_blank_values=True)
+            if "mtn" in qs_login:
+                qs_login.pop("mtn", None)
+                new_q = urlencode(qs_login, doseq=True)
+                url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", new_q, ""))
+                parsed = urlparse(url)
     except Exception:
         return Response(b"bad url", status_code=400)
 
@@ -2306,8 +2322,12 @@ async def ig_http_relay(request: Request):
             continue
         if kl == "user-agent":
             seen_ua = True
-            v = v.replace("HeadlessChrome/", "Chrome/")
+            v = _DESKTOP_CHROME_UA
             client_ua = v
+        elif kl == "sec-ch-ua-mobile":
+            v = "?0"
+        elif kl == "sec-ch-ua-platform":
+            v = '"Windows"'
         elif kl == "accept-language":
             seen_al = True
         req_headers.append((k, v))
@@ -2329,9 +2349,6 @@ async def ig_http_relay(request: Request):
         header_dict["Cookie"] = cookie_str
 
     impersonate_profile = _select_curl_impersonate(client_ua)
-    if impersonate_profile.startswith("safari"):
-        for k_del in [k for k in header_dict if k.lower().startswith("sec-ch-ua")]:
-            header_dict.pop(k_del, None)
 
     # Inject standard Sec-Fetch-* headers when missing so Instagram's SSR and GraphQL endpoints
     # treat requests identically to direct browser navigation/XHR.
@@ -2579,7 +2596,7 @@ async def ig_http_relay(request: Request):
                 ["access-control-allow-origin", "https://www.instagram.com"],
                 ["access-control-allow-credentials", "true"],
             ],
-            b'for (;;);{"__ar":1,"payload":{"enable_bulk_route_fetch":false,"payloads":{},"sr_payload":{}}}',
+            b'for (;;);{"__ar":1,"payload":{}}',
         )
     if status == 429 and req_path.startswith("/ajax/route-definition"):
         return _pack_relay_response(
@@ -2749,6 +2766,8 @@ def _js_literal(value: str) -> str:
 
 def _shell_html(initial_target: str) -> str:
     home_js = _js_literal(IG_HOME)
+    reels_js = _js_literal(IG_REELS)
+    explore_js = _js_literal(IG_EXPLORE)
     login_js = _js_literal(IG_LOGIN)
     initial_js = _js_literal(initial_target)
     wisp_override_js = _js_literal(SCRAMJET_WISP_URL)
@@ -2763,16 +2782,36 @@ def _shell_html(initial_target: str) -> str:
 <link rel="stylesheet" href="/design-system/m3.css">
 <script src="/design-system/m3.js"></script>
 <style>
-:root{{--bg:var(--md-sys-color-surface,#000000);--text:var(--md-sys-color-on-surface,#f5f5f5);--muted:var(--md-sys-color-on-surface-variant,#a8a8a8)}}
+:root{{--bg:var(--md-sys-color-surface,#000000);--text:var(--md-sys-color-on-surface,#f5f5f5);--muted:var(--md-sys-color-on-surface-variant,#a8a8a8);--nav-h:40px}}
 *{{box-sizing:border-box}}
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--md-sys-typescale-font-plain,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif)}}
-.stage{{position:fixed;inset:0;width:100%;height:100%;background:var(--md-sys-color-surface-dim,#000)}}
-#frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#000}}
-.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#000);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
+.ig-topbar{{position:fixed;top:0;left:0;right:0;height:var(--nav-h);z-index:20;display:flex;align-items:center;gap:6px;padding:0 10px;background:rgba(12,12,14,0.96);border-bottom:1px solid rgba(255,255,255,0.12);overflow-x:auto;scrollbar-width:none}}
+.ig-topbar::-webkit-scrollbar{{display:none}}
+.ig-brand{{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:700;color:#fff;white-space:nowrap;margin-right:4px}}
+.ig-nav-btn{{appearance:none;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.06);color:#e5e7eb;font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
+.ig-nav-btn:hover{{background:rgba(255,255,255,0.14);color:#fff}}
+.ig-nav-btn.active{{background:linear-gradient(135deg,#f58529,#dd2a7b,#8134af);border-color:transparent;color:#fff}}
+.ig-jump-form{{display:flex;align-items:center;gap:4px;margin-left:auto;min-width:140px;max-width:260px;flex:1}}
+.ig-jump-input{{width:100%;height:26px;padding:0 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.07);color:#fff;font-size:12px;outline:none}}
+.ig-jump-input:focus{{border-color:#dd2a7b;background:rgba(255,255,255,0.11)}}
+.stage{{position:fixed;top:var(--nav-h);left:0;right:0;bottom:0;width:100%;height:calc(100% - var(--nav-h));background:var(--md-sys-color-surface-dim,#000)}}
+#frame{{position:absolute;inset:0;display:block;width:100%;height:100%;border:0;background:#000}}
+.cover{{position:absolute;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#000);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
 .cover.hidden{{display:none}}
 </style>
 </head>
 <body>
+<header class="ig-topbar" role="navigation" aria-label="Instagram ナビゲーション">
+  <span class="ig-brand">📸 Instagram</span>
+  <button type="button" class="ig-nav-btn" data-ig-nav="home" id="btnNavHome">🏠 ホーム / ログイン</button>
+  <button type="button" class="ig-nav-btn" data-ig-nav="reels" id="btnNavReels">🎬 リール</button>
+  <button type="button" class="ig-nav-btn" data-ig-nav="explore" id="btnNavExplore">🧭 発見</button>
+  <form class="ig-jump-form" id="igJumpForm">
+    <input type="text" class="ig-jump-input" id="igJumpInput" placeholder="@ユーザー名 / #タグ / URL" autocomplete="off">
+    <button type="submit" class="ig-nav-btn">移動</button>
+  </form>
+  <button type="button" class="ig-nav-btn" id="btnNavReload" title="再読み込み">↻</button>
+</header>
 <main class="stage">
   <div class="cover" id="cover">Instagram を読み込んでいます…</div>
   <iframe id="frame" title="Instagram"
@@ -2788,6 +2827,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   "use strict";
 
   const HOME = {home_js};
+  const REELS_URL = {reels_js};
+  const EXPLORE_URL = {explore_js};
   const LOGIN_URL = {login_js};
   const AUTH_HOME = "https://www.instagram.com/";
   const INITIAL = {initial_js};
@@ -2805,7 +2846,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   const SW_GUARD = "schoolhub.instagram.sw-reload.v1";
   const MAX_RECOVERY = 3;
   const CONTROL_WAIT = 12000;
-  const HEALTH_DELAY = 22000;
+  const HEALTH_DELAY = 10000;
   const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
   let controller = null;
@@ -2824,6 +2865,50 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
+  const btnNavHome = document.getElementById("btnNavHome");
+  const btnNavReels = document.getElementById("btnNavReels");
+  const btnNavExplore = document.getElementById("btnNavExplore");
+  const btnNavReload = document.getElementById("btnNavReload");
+  const igJumpForm = document.getElementById("igJumpForm");
+  const igJumpInput = document.getElementById("igJumpInput");
+
+  function updateNavHighlight(urlStr) {{
+    try {{
+      const u = String(urlStr || "");
+      const isReels = u.includes("/reels") || u.includes("/reel/");
+      const isExplore = u.includes("/explore");
+      btnNavReels?.classList.toggle("active", isReels);
+      btnNavExplore?.classList.toggle("active", !isReels && isExplore);
+      btnNavHome?.classList.toggle("active", !isReels && !isExplore);
+    }} catch (_) {{}}
+  }}
+
+  function resolveUserTarget(raw) {{
+    const val = String(raw || "").trim();
+    if (!val) return HOME;
+    const low = val.toLowerCase();
+    if (low === "reels" || low === "reel" || low === "/reels" || low === "/reels/") return REELS_URL;
+    if (low === "explore" || low === "/explore" || low === "/explore/") return EXPLORE_URL;
+    if (low === "login" || low === "/login" || low === "/accounts/login" || low === "/accounts/login/") return LOGIN_URL;
+    if (val.startsWith("http://") || val.startsWith("https://")) {{
+      try {{
+        const u = new URL(val);
+        let h = u.hostname.toLowerCase().replace(/\\.$/, "");
+        if (h === "instagram.com") h = "www.instagram.com";
+        if (h.endsWith("instagram.com")) return "https://" + h + (u.pathname || "/") + (u.search || "");
+      }} catch (_) {{}}
+    }}
+    if (val.startsWith("@") && val.length > 1) {{
+      return "https://www.instagram.com/" + encodeURIComponent(val.slice(1).replace(/^\\/+|\\/+$/g, "")) + "/";
+    }}
+    if (val.startsWith("#") && val.length > 1) {{
+      return "https://www.instagram.com/explore/tags/" + encodeURIComponent(val.slice(1).replace(/^\\/+|\\/+$/g, "")) + "/";
+    }}
+    if (/^[a-zA-Z0-9._]{{1,30}}$/.test(val)) {{
+      return "https://www.instagram.com/" + encodeURIComponent(val) + "/";
+    }}
+    return "https://www.instagram.com/explore/tags/" + encodeURIComponent(val.replace(/^\\/+|\\/+$/g, "")) + "/";
+  }}
 
   async function withTimeout(promise, ms, label) {{
     let timer = 0;
@@ -2864,6 +2949,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     if (!url) return;
     const s = String(url);
     lastUrl = s;
+    updateNavHighlight(s);
     if (!hasAuthCookie() && (s.includes("/accounts/password/") || s.includes("/accounts/emailsignup") || s.includes("facebook.com/"))) {{
       return;
     }}
@@ -3037,7 +3123,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   }}
 
   function normalizeHeadersList(headers, targetUrl = "") {{
-    const effectiveUa = String(navigator.userAgent || DEFAULT_UA).replace(/HeadlessChrome\\//g, "Chrome/");
+    const effectiveUa = DEFAULT_UA;
     const list = Array.isArray(headers)
       ? headers.map(([k, v]) => [String(k), String(v)])
       : (headers && typeof headers === "object" ? Object.entries(headers).map(([k, v]) => [String(k), String(v)]) : []);
@@ -3046,8 +3132,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       list.push(["User-Agent", effectiveUa]);
     }} else {{
       for (let i = 0; i < list.length; i++) {{
-        if (list[i][0].toLowerCase() === "user-agent") {{
+        const kl = list[i][0].toLowerCase();
+        if (kl === "user-agent") {{
           list[i][1] = effectiveUa;
+        }} else if (kl === "sec-ch-ua-mobile") {{
+          list[i][1] = "?0";
+        }} else if (kl === "sec-ch-ua-platform") {{
+          list[i][1] = '"Windows"';
         }}
       }}
     }}
@@ -3385,17 +3476,12 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   function syncInputReactState(el) {{
     try {{
-      const rk = Object.keys(el).find((k) => k.startsWith("__reactProps$") || k.startsWith("__reactEventHandlers$"));
-      if (rk && typeof el[rk]?.onChange === "function") {{
-        el[rk].onChange({{
-          currentTarget: el,
-          target: el,
-          preventDefault() {{}},
-          stopPropagation() {{}},
-        }});
+      if (el._valueTracker && typeof el._valueTracker.setValue === "function") {{
+        el._valueTracker.setValue("");
       }}
-      el.dispatchEvent(new Event("input", {{ bubbles: true, composed: true }}));
-      el.dispatchEvent(new Event("change", {{ bubbles: true, composed: true }}));
+      const Evt = frameEl.contentWindow?.Event || Event;
+      el.dispatchEvent(new Evt("input", {{ bubbles: true, composed: true }}));
+      el.dispatchEvent(new Evt("change", {{ bubbles: true, composed: true }}));
     }} catch (_) {{}}
   }}
 
@@ -3410,34 +3496,38 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const loginInputs = doc.querySelectorAll("input[name='email'], input[name='pass'], input[name='username'], input[name='password'], input[type='text'], input[type='password']");
       for (let i = 0; i < loginInputs.length; i++) {{
         const inp = loginInputs[i];
-        const curVal = String(inp.value || "");
-        if (curVal !== (inp.dataset.shSyncedVal || "")) {{
-          inp.dataset.shSyncedVal = curVal;
-          syncInputReactState(inp);
-        }}
         if (!inp.dataset.shInputBound) {{
           inp.dataset.shInputBound = "1";
-          const onInputSync = () => {{
-            const v = String(inp.value || "");
-            if (v !== (inp.dataset.shSyncedVal || "")) {{
-              inp.dataset.shSyncedVal = v;
-              syncInputReactState(inp);
-            }}
+          const recordNativeVal = () => {{
+            inp.dataset.shSyncedVal = String(inp.value || "");
           }};
-          inp.addEventListener("input", onInputSync);
-          inp.addEventListener("change", onInputSync);
-          inp.addEventListener("blur", onInputSync);
+          inp.addEventListener("input", recordNativeVal);
+          inp.addEventListener("change", recordNativeVal);
           inp.addEventListener("keydown", (e) => {{
             if (e.key === "Enter") {{
-              onInputSync();
+              const cur = String(inp.value || "");
+              if (cur !== (inp.dataset.shSyncedVal || "")) {{
+                inp.dataset.shSyncedVal = cur;
+                syncInputReactState(inp);
+              }}
               const form = inp.closest("form");
               const submitBtn = (form || doc).querySelector("[data-testid='royal-login-button'], button[type='submit'], div[role='button'][aria-label='ログイン'], button[aria-label='ログイン']");
               if (submitBtn && submitBtn.getAttribute("aria-disabled") !== "true") {{
                 e.preventDefault();
+                try {{
+                  const MEvt = frameEl.contentWindow?.MouseEvent || MouseEvent;
+                  submitBtn.dispatchEvent(new MEvt("mousedown", {{ bubbles: true, cancelable: true }}));
+                  submitBtn.dispatchEvent(new MEvt("mouseup", {{ bubbles: true, cancelable: true }}));
+                }} catch (_) {{}}
                 submitBtn.click();
               }}
             }}
           }});
+        }}
+        const curVal = String(inp.value || "");
+        if (curVal !== (inp.dataset.shSyncedVal || "")) {{
+          inp.dataset.shSyncedVal = curVal;
+          syncInputReactState(inp);
         }}
       }}
 
@@ -3771,7 +3861,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const token = navigationToken;
       const snap = currentDocumentHealthy();
       if (snap.healthy) showHealthy();
-      else armHealthCheck(token, 12000);
+      else armHealthCheck(token, 10000);
     }});
     frameEl.addEventListener("error", () => {{ recover("iframe-error"); }});
     startFrameMonitor();
@@ -3794,6 +3884,20 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     frame.go(targetUrl);
     armHealthCheck(navigationToken, HEALTH_DELAY);
   }}
+
+  btnNavHome?.addEventListener("click", () => navigateTo(HOME));
+  btnNavReels?.addEventListener("click", () => navigateTo(REELS_URL));
+  btnNavExplore?.addEventListener("click", () => navigateTo(EXPLORE_URL));
+  btnNavReload?.addEventListener("click", () => {{
+    const t = readFrameTarget() || lastUrl || HOME;
+    navigateTo(t);
+  }});
+  igJumpForm?.addEventListener("submit", (e) => {{
+    e.preventDefault();
+    const raw = igJumpInput?.value || "";
+    const target = resolveUserTarget(raw);
+    if (target) navigateTo(target);
+  }});
 
   async function boot() {{
     clientLog("info", "boot-start", {{ userAgent: String(navigator.userAgent || "").slice(0, 300) }});

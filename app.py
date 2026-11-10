@@ -586,7 +586,11 @@ MEDIA_SERVICES = {
 
 
 @app.get("/{service}/sw.js", include_in_schema=False)
-async def isolated_service_worker(service: str):
+async def isolated_service_worker(service: str, request: Request):
+  if service == "instagram":
+    ig_mod = sys.modules.get("instagram_proxy")
+    if ig_mod and hasattr(ig_mod, "_ig_sw_override"):
+      return await ig_mod._ig_sw_override(request)
   cfg = MEDIA_SERVICES.get(service)
   if not cfg:
     return Response(status_code=404)
