@@ -427,15 +427,15 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       const isApple = /iPad|iPhone|iPod|Macintosh/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
       if (isApple) {
         // Apple WebKit VideoToolbox requires ~20ms jitter buffer to prevent hardware decoder starvation on iPad
-        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.02; } catch (_) {}
-        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 20; } catch (_) {}
+        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.025; } catch (_) {}
+        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 25; } catch (_) {}
         return;
       }
       try {
-        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0;
+        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.015;
       } catch (_) {}
       try {
-        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 0;
+        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 15;
       } catch (_) {}
     }
     if (typeof RTCPeerConnection !== 'undefined') {
@@ -629,13 +629,147 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     };
   } catch (_) {}
 
-  // 4. WebRTC DataChannel Kickout & AdBlock-Penalty Suppressor (Makes gameplay time truly UNLIMITED)
+  // 4. WebRTC DataChannel Heartbeat, Kickout Auto-Reconnect & AdBlock-Penalty Suppressor
+  const origFetch = window.fetch;
+
+  const getStoredSession = function() {
+    if (window.__cm_session && window.__cm_session.token) return window.__cm_session;
+    try {
+      const raw = sessionStorage.getItem('__cm_last_session') || localStorage.getItem('__cm_last_session');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.token) {
+          window.__cm_session = parsed;
+          return parsed;
+        }
+      }
+    } catch (_) {}
+    return window.__cm_session || null;
+  };
+
+  const saveStoredSession = function(sess) {
+    if (!sess || typeof sess !== 'object') return;
+    const merged = Object.assign({}, getStoredSession() || {}, sess);
+    window.__cm_session = merged;
+    try {
+      const s = JSON.stringify(merged);
+      sessionStorage.setItem('__cm_last_session', s);
+      localStorage.setItem('__cm_last_session', s);
+    } catch (_) {}
+  };
+
+  // Seamless Auto-Reconnect when server pod triggers 10-min kickout or WebRTC DataChannel drops
+  window.__cmAutoReconnect = async function(reason) {
+    if (window.__cm_intentional_exit || window.__cm_reconnecting) return;
+    if (!(window.location.pathname || '').startsWith('/run-site')) return;
+    window.__cm_reconnecting = true;
+    console.warn('[CloudMoon Unlimited] Auto-reconnecting session due to:', reason);
+
+    try {
+      let badge = document.getElementById('__cm_reconnect_badge');
+      if (!badge && document.body) {
+        badge = document.createElement('div');
+        badge.id = '__cm_reconnect_badge';
+        badge.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483647;background:rgba(15,23,42,0.92);color:#f8fafc;padding:8px 18px;border-radius:999px;font-size:13px;font-weight:600;box-shadow:0 4px 16px rgba(0,0,0,0.4);border:1px solid rgba(56,189,248,0.45);pointer-events:none;';
+        badge.textContent = 'プレイ時間を自動延長して再接続しています...';
+        document.body.appendChild(badge);
+      }
+    } catch (_) {}
+
+    try {
+      const sess = getStoredSession() || {};
+      let lastConn = {};
+      try {
+        lastConn = JSON.parse(localStorage.getItem('__cm_last_connect') || '{}') || {};
+      } catch (_) {}
+
+      const token = sess.token || lastConn.token || '';
+      const gamePkg = sess.game || sess.game_name || lastConn.game_name || lastConn.game || 'com.roblox.client';
+      const androidId = sess.android_id || lastConn.android_id || '';
+      const serverId = sess.server_id || lastConn.server_id || undefined;
+
+      if (token) {
+        // 1. Claim fresh upstream reward time first
+        try {
+          await origFetch('/cloudmoon/api/web/ad', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-User-Token': token
+            },
+            body: JSON.stringify({ game_name: gamePkg, game: gamePkg })
+          });
+        } catch (_) {}
+
+        // 2. Request a fresh SID for the same running Android instance via /phone/connect
+        if (androidId) {
+          const connectPayload = {
+            android_id: String(androidId),
+            game_name: String(gamePkg),
+            screen_res: '720x1280',
+            ad_unblock: true,
+            params: lastConn.params || []
+          };
+          if (serverId !== undefined && serverId !== null) {
+            connectPayload.server_id = serverId;
+          }
+          try {
+            const connResp = await origFetch('/cloudmoon/api/phone/connect', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-User-Token': token
+              },
+              body: JSON.stringify(connectPayload)
+            });
+            const connJson = await connResp.json();
+            if (connJson && connJson.code === 0 && connJson.data && connJson.data.enter_url) {
+              const enterUrl = new URL(connJson.data.enter_url, window.location.origin);
+              const newSid = enterUrl.searchParams.get('sid');
+              if (newSid) {
+                const quality = localStorage.getItem('quality') || new URLSearchParams(window.location.search).get('quality') || 'HD';
+                window.__cm_intentional_exit = true;
+                window.location.replace('/run-site/?sid=' + encodeURIComponent(newSid) + '&quality=' + encodeURIComponent(quality));
+                return;
+              }
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // Fallback: reload current page after brief pause
+    setTimeout(function() {
+      window.__cm_reconnecting = false;
+      try { window.location.reload(); } catch (_) {}
+    }, 800);
+  };
+
   try {
     if (typeof RTCPeerConnection !== 'undefined') {
       const origCreateDc = RTCPeerConnection.prototype.createDataChannel;
       RTCPeerConnection.prototype.createDataChannel = function(label, options) {
         const dc = origCreateDc.apply(this, arguments);
-        try { window.__cm_dc = dc; } catch (_) {}
+        try {
+          window.__cm_dc = dc;
+          window.__cm_dc_opened_at = 0;
+          dc.addEventListener('open', function() {
+            window.__cm_dc = dc;
+            window.__cm_dc_opened_at = Date.now();
+            window.__cm_reconnecting = false;
+            try { dc.send('adBlock>false'); } catch (_) {}
+          });
+          dc.addEventListener('close', function() {
+            // If DataChannel closes during active gameplay, auto-reconnect within 3.5s
+            if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
+              setTimeout(function() {
+                if (!window.__cm_dc || window.__cm_dc.readyState !== 'open') {
+                  window.__cmAutoReconnect('datachannel_closed');
+                }
+              }, 3500);
+            }
+          });
+        } catch (_) {}
         return dc;
       };
     }
@@ -645,6 +779,12 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     if (typeof RTCDataChannel !== 'undefined' && RTCDataChannel.prototype.send) {
       const origDcSend = RTCDataChannel.prototype.send;
       RTCDataChannel.prototype.send = function(data) {
+        try {
+          window.__cm_dc = this;
+          if (!window.__cm_dc_opened_at && this.readyState === 'open') {
+            window.__cm_dc_opened_at = Date.now();
+          }
+        } catch (_) {}
         if (typeof data === 'string' && data.startsWith('adBlock>')) {
           data = 'adBlock>false';
         }
@@ -653,13 +793,20 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     }
   } catch (_) {}
 
+  const handleKickoutSignal = function(msg) {
+    console.warn('[CloudMoon Unlimited] Intercepted kickout signal, triggering seamless reconnect:', msg);
+    setTimeout(function() {
+      window.__cmAutoReconnect(msg || 'kickout');
+    }, 100);
+  };
+
   const origAddEventListener = window.addEventListener;
   window.addEventListener = function(type, listener, options) {
     if (type === 'webrtc-dc-message') {
       const wrapped = function(e) {
         if (e && typeof e.detail === 'string') {
           if (e.detail.startsWith('kickout>') || e.detail.includes('kickout') || e.detail.startsWith('noTime') || e.detail.includes('time_up')) {
-            console.warn('[CloudMoon Unlimited] Blocked kickout signal:', e.detail);
+            handleKickoutSignal(e.detail);
             if (e.stopImmediatePropagation) e.stopImmediatePropagation();
             return;
           }
@@ -678,7 +825,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         set: function(fn) {
           const wrapped = function(ev) {
             if (ev && typeof ev.data === 'string' && (ev.data.startsWith('kickout>') || ev.data.includes('kickout'))) {
-              console.warn('[CloudMoon Unlimited] Dropped kickout DataChannel message:', ev.data);
+              handleKickoutSignal(ev.data);
               return;
             }
             return fn.apply(this, arguments);
@@ -697,7 +844,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       if (type === 'message') {
         const wrapped = function(ev) {
           if (ev && typeof ev.data === 'string' && (ev.data.startsWith('kickout>') || ev.data.includes('kickout'))) {
-            console.warn('[CloudMoon Unlimited] Dropped kickout DataChannel event listener message:', ev.data);
+            handleKickoutSignal(ev.data);
             return;
           }
           return listener.apply(this, arguments);
@@ -708,17 +855,16 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     };
   } catch (e) {}
 
-  // 5. Inactivity keepalive, interaction listener & periodic background reward refill
+  // 5. Inactivity keepalive, 5s adBlock>false pod heartbeat, video watchdog & 20s background reward refill
   try {
-    // 5a. Anti-AFK: ANY user interaction (keyboard, mouse, wheel, touch, pointer) keeps activity state fresh
-    // Throttle to at most once every 5 seconds to eliminate CPU saturation and main-thread freeze on iPad (120Hz ProMotion touchmove flood)
+    // 5a. Anti-AFK: ANY user interaction resets client-side inactivity timer (throttled to 5s)
     let lastActivityDispatch = 0;
     const reportActivity = function() {
       const now = Date.now();
       if (now - lastActivityDispatch > 5000) {
         lastActivityDispatch = now;
         try {
-          window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'touch>input_activity' }));
+          window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
         } catch (_) {}
       }
     };
@@ -726,30 +872,74 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       window.addEventListener(evType, reportActivity, { passive: true, capture: true });
     });
 
-    // 5b. Anti-AFK pulse: dispatch keepalive every 15 seconds to keep client-side inactivity timer reset
+    // 5b. 5-Second DataChannel `adBlock>false` Heartbeat to Android Pod (replaces Ce()/ge() disabled by showAD:false)
     setInterval(function() {
       try {
-        window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'touch>keepalive' }));
+        if (window.__cm_dc && window.__cm_dc.readyState === 'open') {
+          window.__cm_dc.send('adBlock>false');
+        }
+      } catch (_) {}
+    }, 5000);
+
+    // 5b-2. Anti-AFK pulse every 15 seconds to keep client-side inactivity timer reset
+    setInterval(function() {
+      try {
+        window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
       } catch (_) {}
     }, 15000);
 
-    // 5c. Periodic Background Free Playtime Refill:
-    // Pings /cloudmoon/api/web/ad with active session token so backend continuously claims upstream ad rewards
-    setInterval(function() {
+    // 5c. Periodic Background Free Playtime Refill (every 20 seconds with proper `game_name` field!)
+    const claimPlaytimeRefill = function() {
       try {
-        const s = window.__cm_session;
+        const s = getStoredSession();
         if (s && s.token) {
-          fetch('/cloudmoon/api/web/ad', {
+          const gamePkg = s.game || s.game_name || 'com.roblox.client';
+          origFetch('/cloudmoon/api/web/ad', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               'X-User-Token': s.token
             },
-            body: JSON.stringify({ game: s.game || 'com.roblox.client' })
+            body: JSON.stringify({ game_name: gamePkg, game: gamePkg })
           }).catch(function() {});
         }
       } catch (_) {}
-    }, 45000);
+    };
+    setInterval(claimPlaytimeRefill, 20000);
+    setTimeout(claimPlaytimeRefill, 3000);
+    setTimeout(claimPlaytimeRefill, 10000);
+
+    // 5c-2. Video & Audio Freeze Watchdog on /run-site
+    if ((window.location.pathname || '').startsWith('/run-site')) {
+      let lastVideoTime = -1;
+      let stalledTicks = 0;
+      setInterval(function() {
+        try {
+          const v = document.getElementById('remote-video');
+          const a = document.getElementById('remote-audio');
+          if (v && v.srcObject) {
+            if (v.paused) {
+              v.play().catch(function() {});
+            }
+            const ct = v.currentTime || 0;
+            if (ct > 0 && ct === lastVideoTime) {
+              stalledTicks++;
+              // If video is frozen and DataChannel is closed, trigger immediate reconnect
+              if (stalledTicks >= 2 && (!window.__cm_dc || window.__cm_dc.readyState !== 'open')) {
+                stalledTicks = 0;
+                window.__cmAutoReconnect('video_frozen_dc_closed');
+              }
+            } else {
+              stalledTicks = 0;
+              lastVideoTime = ct;
+            }
+          }
+          if (a && a.srcObject && a.paused) {
+            a.play().catch(function() {});
+          }
+        } catch (_) {}
+      }, 2500);
+    }
 
     // 5d. Intercept unprovoked navigation to Home on /run-site/ gameplay pages
     if ((window.location.pathname || '').startsWith('/run-site')) {
@@ -762,7 +952,8 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           window.location.assign = function(url) {
             const u = String(url || '');
             if (!isExitAllowed() && (u === '/' || u === '/cloudmoon/' || u.startsWith(window.location.origin + '/cloudmoon'))) {
-              console.warn('[CloudMoon Unlimited] Intercepted and blocked auto-navigation to home:', u);
+              console.warn('[CloudMoon Unlimited] Intercepted auto-navigation to home, reconnecting instead:', u);
+              window.__cmAutoReconnect('blocked_home_redirect');
               return;
             }
             return origAssign.apply(this, arguments);
@@ -775,7 +966,8 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           window.location.replace = function(url) {
             const u = String(url || '');
             if (!isExitAllowed() && (u === '/' || u === '/cloudmoon/' || u.startsWith(window.location.origin + '/cloudmoon'))) {
-              console.warn('[CloudMoon Unlimited] Intercepted and blocked auto-navigation to home:', u);
+              console.warn('[CloudMoon Unlimited] Intercepted auto-navigation to home, reconnecting instead:', u);
+              window.__cmAutoReconnect('blocked_home_redirect');
               return;
             }
             return origReplace.apply(this, arguments);
@@ -785,7 +977,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     }
   } catch (_) {}
 
-  // 5b. DOM Safeguard: Immediately dismiss any "Today's free game time has been used up" modal if ever rendered
+  // 5e. DOM Safeguard: Immediately dismiss any "Today's free game time has been used up" modal if ever rendered
   try {
     const NO_TIME_PATTERNS = [
       "Today's free game time has been used up",
@@ -861,7 +1053,6 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
   } catch (_) {}
 
   // 7. Global fetch interceptor (Redirects API calls, blocks ads, speeds up signaling, auto-refills server time, unlocks VIP)
-  const origFetch = window.fetch;
   const API_HOSTS = [
     'https://api.prod.cloudmoonapp.com',
     'https://api.cloudmoon.cloudbatata.com',
@@ -886,7 +1077,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       });
     }
 
-    // Instant 200 OK for ad-blocker probe / ad scripts so Ja() resolves in 0ms with isBlocked=false, showAD=false
+    // Instant 200 OK for ad-blocker probe / ad scripts so Xa()/Ja() resolves in 0ms with isBlocked=false, showAD=false
     if (isBlockedAdUrl(url)) {
       return new Response('/* ad blocked */', {
         status: 200,
@@ -922,6 +1113,22 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     }
 
     const doFetch = (r, i) => (i !== undefined ? origFetch.call(this, r, i) : origFetch.call(this, r));
+
+    // Capture /web/sid session details (token, android_id, game) for background reward refill & auto-reconnect
+    if (url.includes('/web/sid')) {
+      try {
+        const resp = await doFetch(resource, init);
+        const clone = resp.clone();
+        clone.json().then(function(json) {
+          if (json && json.code === 0 && json.data) {
+            saveStoredSession(json.data);
+          }
+        }).catch(function() {});
+        return resp;
+      } catch (err) {
+        throw err;
+      }
+    }
 
     // Forward /web/ad to our backend proxy so it claims real upstream reward time while returning showAD:false, unlimit:false
     if (url.includes('/web/ad')) {
@@ -961,12 +1168,30 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       });
     }
 
-    // Intercept /phone/connect to force ad_unblock: true while preserving native 720x1280 touch coordinate space
+    // Intercept /phone/connect to force ad_unblock: true while preserving native 720x1280 touch coordinate space & saving reconnect parameters
     if (url.includes('/phone/connect') && init && init.body && typeof init.body === 'string') {
       try {
         const parsedBody = JSON.parse(init.body);
         parsedBody.ad_unblock = true;
         parsedBody.screen_res = '720x1280';
+        let reqToken = '';
+        try {
+          if (init.headers) {
+            reqToken = init.headers['X-User-Token'] || init.headers['x-user-token'] || (typeof init.headers.get === 'function' ? (init.headers.get('X-User-Token') || init.headers.get('x-user-token')) : '') || '';
+          }
+        } catch (_) {}
+        try {
+          localStorage.setItem('__cm_last_connect', JSON.stringify(Object.assign({}, parsedBody, { token: reqToken })));
+        } catch (_) {}
+        if (reqToken || parsedBody.android_id || parsedBody.game_name) {
+          saveStoredSession({
+            token: reqToken || (getStoredSession() && getStoredSession().token) || '',
+            android_id: parsedBody.android_id,
+            game: parsedBody.game_name,
+            game_name: parsedBody.game_name,
+            server_id: parsedBody.server_id
+          });
+        }
         init = Object.assign({}, init, { body: JSON.stringify(parsedBody) });
       } catch (_) {}
     }
@@ -999,6 +1224,14 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         const data = await resp.json();
         if (data && data.code === 0 && data.data && Array.isArray(data.data.list)) {
           data.data.list = data.data.list.map(function(item) {
+            if (item && item.android_id) {
+              saveStoredSession({
+                android_id: item.android_id,
+                game: item.game_name || item.game || 'com.roblox.client',
+                game_name: item.game_name || item.game || 'com.roblox.client',
+                server_id: item.server_id
+              });
+            }
             return Object.assign({}, item, {
               expired_at: Math.max(item.expired_at || 0, 2147483647),
               level: 3,
@@ -1244,8 +1477,17 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         'u.err_code===30002?Ce(f()("alert.notice"),f()("alert.blockFree"),f()("alert.buy")):u.err_code===30003?Ce(f()("alert.notice"),f()("alert.noTimeContent"),f()("alert.noTimeBtn")):',
         "u.err_code===30002?void 0:u.err_code===30003?void 0:",
     )
-    # 5. Neutralize Ja() ad-block detector and prevent sending adBlock>true over WebRTC DataChannel in 2.C7CpNCnt.js
+    # 5. Neutralize Xa()/Ya()/Ja()/$a() ad-block detectors and prevent sending adBlock>true over WebRTC DataChannel in 2.D2AbakOU.js / 2.C7CpNCnt.js
+    js_text = js_text.replace(
+        "return r===`blocked`||t===`blocked`||t===`clear`&&n===`blocked`",
+        "return!1",
+    )
+    js_text = js_text.replace("async function Xa(){", "async function Xa(){return!1;")
     js_text = js_text.replace("async function Ja(){", "async function Ja(){return!1;")
+    js_text = js_text.replace(
+        "async function $a(){",
+        "async function $a(){return{status:`clear`,isBlocked:!1};",
+    )
     js_text = js_text.replace("Z?.send(`adBlock>true`)", "void 0")
     js_text = js_text.replace('Z?.send("adBlock>true")', "void 0")
     js_text = js_text.replace("Z?.send(`adBlock>${e}`)", "Z?.send(`adBlock>false`)")
@@ -1275,6 +1517,10 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'd("keydown",a,e=>{if(e.key==="Enter"){e.preventDefault();e.stopPropagation();return}e.key==="Escape"&&y()()})',
         )
         js_text = js_text.replace(
+            'closeInput(){this.inputTextShow=!1,this.prevInputTextStr=``,this.inputTextStr=``,Z.send(Or())}',
+            'closeInput(){this.inputTextShow=!1,this.isTypingMode=!1,this.prevInputTextStr=``,this.inputTextStr=``,Z.send(Or())}',
+        )
+        js_text = js_text.replace(
             'sendText(){if(this.inputTextShow){if(this.prevInputTextStr!==``&&this.inputTextStr===this.prevInputTextStr){Z.send(br(this.inputEnterType)),this.prevInputTextStr=``,this.inputTextStr=``;return}Z.send(yr(this.inputTextCnt++,this.inputTextStr)),this.prevInputTextStr=this.inputTextStr}}',
             'sendText(){if(this.inputTextShow){let _txt=this.inputTextStr||``;if(!_txt)return;Z.send(yr(this.inputTextCnt++,_txt));let _et=this.inputEnterType;this.prevInputTextStr=``;this.inputTextStr=``;setTimeout(()=>{try{Z.send(br(_et))}catch(_){}},35)}}',
         )
@@ -1286,19 +1532,28 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'if(this.isTypingMode){let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
             'if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];t!==void 0&&(e.preventDefault(),Z.send(Sr(1,t,0,0)));return}',
         )
+        js_text = js_text.replace(
+            'async handleGlobalKeyDown(e){if(this.isTypingMode){let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(0,t,0,n))}return}',
+            'async handleGlobalKeyDown(e){if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(0,t,0,n))}return}',
+        )
+        js_text = js_text.replace(
+            'async handleGlobalKeyUp(e){if(this.isTypingMode){let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(1,t,0,n))}return}',
+            'async handleGlobalKeyUp(e){if(this.isTypingMode){if(this.inputTextShow||e.key===`Enter`||e.code===`Enter`||e.code===`NumpadEnter`)return;let t=mr[e.code];if(t!==void 0){e.preventDefault();let n=this.getModifierMask(e);Z.send(Sr(1,t,0,n))}return}',
+        )
 
         # Initialize in-game quality state from localStorage ('HD' by default) instead of hardcoded 'SD'
         js_text = js_text.replace(
             "#F=e(`SD`);get quality(){return n(this.#F)}set quality(e){g(this.#F,e,!0)}#I=e(`SD`);",
             "#F=e(localStorage.getItem(`quality`)||`HD`);get quality(){return n(this.#F)}set quality(e){try{localStorage.setItem(`quality`,e)}catch{}g(this.#F,e,!0)}#I=e(localStorage.getItem(`quality`)||`HD`);",
         )
-        # Neutralize all server kickout signals in 2.C7CpNCnt.js (time_run_out, connection_too_long, manually_disconnect, etc.)
+        # On server kickout signals in 2.D2AbakOU.js / 2.C7CpNCnt.js (no_time, time_run_out, connection_too_long, etc.),
+        # immediately trigger seamless auto-reconnect instead of leaving a frozen video frame
         js_text = js_text.replace(
             "else if(n===`kickout`){",
-            'else if(n===`kickout`){console.warn("[CloudMoon Unlimited] Blocked server kickout:",r);return;',
+            'else if(n===`kickout`){console.warn("[CloudMoon Unlimited] Server kickout intercepted, auto-reconnecting:",r);window.__cmAutoReconnect?.(r);return;',
         )
 
-        # Neutralize client-side 4-minute AFK inactivity dialog & disconnect trigger in 2.C7CpNCnt.js
+        # Neutralize client-side 4-minute AFK inactivity dialog & disconnect trigger in 2.D2AbakOU.js
         js_text = js_text.replace(
             "te=setInterval(()=>{let e=Date.now()-n(k);L(Oe)===`READY`&&e>=24e4",
             "te=setInterval(()=>{let e=Date.now()-n(k);if(!1)L(Oe)===`READY`&&e>=24e4",
@@ -1310,17 +1565,10 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             "typeof t.detail==`string`",
         )
 
-        # Expose active user session for background playtime refill
+        # Expose active user session for background playtime refill & auto-reconnect
         js_text = js_text.replace(
             "if(!a)throw Error(Y(`session.invalid`));Ye.set(a)",
             "if(!a)throw Error(Y(`session.invalid`));(window.__cm_session=a,Ye.set(a))",
-        )
-
-        # Increase disconnect grace period from 5s to 60s (prevents brief school Wi-Fi jitter from triggering disconnect)
-        js_text = js_text.replace("}}},5e3)},x=e=>{cn(`msg`", "}}},6e4)},x=e=>{cn(`msg`")
-        js_text = js_text.replace(
-            "}}},5e3))},w=()=>{};return{subscribe:t,init:async()=>{i||(",
-            "}}},6e4))},w=()=>{};return{subscribe:t,init:async()=>{i||(",
         )
 
         # Keep sidebar explicit exit to /cloudmoon/ and flag intentional exit
@@ -1329,14 +1577,14 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             "}).catch(e=>{console.error(`Disconnect failed:`,e)}),window.__cm_intentional_exit=!0,window.location.href=`/cloudmoon/`}",
         )
 
-        # Suppress accidental kickout/error redirect navigations so users are NOT booted to home
+        # On unexpected disconnect / error redirect, trigger seamless auto-reconnect with fresh SID
         js_text = js_text.replace(
             "X.clear(),window.name=``,Z?.cleanup(),window.location.href=`/`",
-            'X.clear();console.warn("[CloudMoon] Reconnecting game session...");try{window.location.reload()}catch(_){}',
+            'X.clear();console.warn("[CloudMoon] Auto-reconnecting game session...");if(window.__cmAutoReconnect){window.__cmAutoReconnect("cleanup_redirect")}else{try{window.location.reload()}catch(_){}}',
         )
         js_text = js_text.replace(
             "X.clear(),window.name=``,window.location.href=`/`",
-            'X.clear();console.warn("[CloudMoon] Reconnecting game session...");try{window.location.reload()}catch(_){}',
+            'X.clear();console.warn("[CloudMoon] Auto-reconnecting game session...");if(window.__cmAutoReconnect){window.__cmAutoReconnect("redirect")}else{try{window.location.reload()}catch(_){}}',
         )
 
         # Disable background dual-canvas 60fps drawImage + dual 2.5Mbps MediaRecorder highlight recording (eliminates main-thread lag)
@@ -1350,16 +1598,8 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'localStorage.setItem("enableHighLight","false")',
         )
 
-        # Ultra-low-latency WebRTC playout delay (0..25ms with fast recovery),
-        # ICE candidate pre-gathering (iceCandidatePoolSize:4), and 1s low-latency ping HUD.
-        js_text = js_text.replace(
-            "prevDelayMs=15;prevPacketsReceived=0;prevPacketsLost=0;prevRetransmittedPacketsReceived=0;lastAppliedDelayMs=15;goodWindows=0;playoutDelayConfig={minDelayMs:15,maxDelayMs:100,degradationTau:.5,recoveryTau:4.5",
-            "prevDelayMs=0;prevPacketsReceived=0;prevPacketsLost=0;prevRetransmittedPacketsReceived=0;lastAppliedDelayMs=0;goodWindows=0;playoutDelayConfig={minDelayMs:0,maxDelayMs:25,degradationTau:1.0,recoveryTau:0.8",
-        )
-        js_text = js_text.replace(
-            "let n=Math.max(15,Math.min(100,e));",
-            "let n=Math.max(0,Math.min(25,e));",
-        )
+        # ICE candidate pre-gathering (iceCandidatePoolSize:4) and 1s low-latency ping HUD
+        # (Preserve CloudMoon's native minDelayMs:15..100ms playout delay so H.264 decoder never starves/freezes)
         js_text = js_text.replace(
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all"}',
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all",iceCandidatePoolSize:4}',
@@ -1596,6 +1836,62 @@ async def cloudmoon_index(request: Request) -> Response:
     return await _proxy_html_or_asset(target_url, request)
 
 
+_ACTIVE_CM_SESSIONS: Dict[str, dict] = {}
+_CM_REFILL_TASK: Optional[asyncio.Task] = None
+
+
+def _register_active_cm_session(req_headers: Dict[str, str], game_pkg: str = "") -> None:
+    token = req_headers.get("x-user-token") or ""
+    if not token:
+        return
+    now = time.time()
+    existing = _ACTIVE_CM_SESSIONS.get(token) or {}
+    _ACTIVE_CM_SESSIONS[token] = {
+        "headers": dict(req_headers),
+        "game_pkg": game_pkg or existing.get("game_pkg") or "com.roblox.client",
+        "last_seen": now,
+    }
+    # Prune sessions older than 45 minutes
+    if len(_ACTIVE_CM_SESSIONS) > 100:
+        cutoff = now - 2700.0
+        for k in [k for k, v in _ACTIVE_CM_SESSIONS.items() if v.get("last_seen", 0) < cutoff]:
+            _ACTIVE_CM_SESSIONS.pop(k, None)
+
+    global _CM_REFILL_TASK
+    try:
+        if _CM_REFILL_TASK is None or _CM_REFILL_TASK.done():
+            loop = asyncio.get_running_loop()
+            _CM_REFILL_TASK = loop.create_task(_background_cm_session_refill_loop())
+    except Exception:
+        pass
+
+
+async def _background_cm_session_refill_loop() -> None:
+    """Continuously claims upstream free playtime rewards every 20s for active sessions so the 10-min limit never expires."""
+    while True:
+        await asyncio.sleep(20.0)
+        now = time.time()
+        cutoff = now - 2400.0
+        active_items = [
+            (tok, info)
+            for tok, info in list(_ACTIVE_CM_SESSIONS.items())
+            if info.get("last_seen", 0) >= cutoff
+        ]
+        if not active_items:
+            continue
+        client = _get_http_client()
+        for _, info in active_items:
+            try:
+                await _auto_claim_upstream_reward(
+                    client,
+                    info["headers"],
+                    info.get("game_pkg") or "com.roblox.client",
+                    rounds=2,
+                )
+            except Exception:
+                pass
+
+
 async def _auto_claim_upstream_reward(
     client: httpx.AsyncClient,
     req_headers: Dict[str, str],
@@ -1605,14 +1901,17 @@ async def _auto_claim_upstream_reward(
     """Automatically claims server-side free playtime rewards on api.prod.cloudmoonapp.com for the user's token."""
     if not req_headers.get("x-user-token"):
         return
+    pkg = game_pkg or "com.roblox.client"
+    _register_active_cm_session(req_headers, pkg)
     headers = dict(req_headers)
     headers["Content-Type"] = "application/json"
     for _ in range(max(1, rounds)):
         try:
+            # Upstream /web/ad expects `game_name` (Hn in 2.D2AbakOU.js sends `{"game_name": t.gameName}`)
             ad_resp = await client.post(
                 f"{API_ORIGIN}/web/ad",
                 headers=headers,
-                content=json.dumps({"game": game_pkg or "com.roblox.client"}).encode("utf-8"),
+                content=json.dumps({"game_name": pkg, "game": pkg}).encode("utf-8"),
                 timeout=5.0,
             )
             if ad_resp.status_code == 200:
@@ -1672,23 +1971,27 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
     }
     if "x-user-token" in request.headers:
         req_headers["x-user-token"] = request.headers["x-user-token"]
+        _register_active_cm_session(req_headers)
     if "x-user-language" in request.headers:
         req_headers["x-user-language"] = request.headers["x-user-language"]
     if "x-user-locale" in request.headers:
         req_headers["x-user-locale"] = request.headers["x-user-locale"]
 
     # 2. On /web/ad: Claim real upstream free-time reward in background while returning showAD:False, unlimit:False
-    #    (unlimit MUST be False so 2.C7CpNCnt.js never starts the 5s adBlock>true DataChannel interval!)
+    #    (unlimit MUST be False so 2.D2AbakOU.js never starts the 5s adBlock>true DataChannel interval!)
     if clean_path == "web/ad":
         game_pkg = "com.roblox.client"
         if body:
             try:
                 parsed = json.loads(body.decode("utf-8", errors="replace"))
-                if isinstance(parsed, dict) and parsed.get("game"):
-                    game_pkg = str(parsed["game"])
+                if isinstance(parsed, dict):
+                    g = parsed.get("game_name") or parsed.get("game")
+                    if g:
+                        game_pkg = str(g)
             except Exception:
                 pass
         if req_headers.get("x-user-token"):
+            _register_active_cm_session(req_headers, game_pkg)
             asyncio.create_task(_auto_claim_upstream_reward(client, req_headers, game_pkg, rounds=2))
         return JSONResponse(
             content={
@@ -1710,7 +2013,15 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
     # 3. On /ad/gpt_reward: Claim upstream reward & return 60 minutes credited
     if clean_path == "ad/gpt_reward":
         if req_headers.get("x-user-token"):
-            asyncio.create_task(_auto_claim_upstream_reward(client, req_headers, "com.roblox.client", rounds=2))
+            sess_info = _ACTIVE_CM_SESSIONS.get(req_headers["x-user-token"]) or {}
+            asyncio.create_task(
+                _auto_claim_upstream_reward(
+                    client,
+                    req_headers,
+                    sess_info.get("game_pkg") or "com.roblox.client",
+                    rounds=2,
+                )
+            )
         return JSONResponse(
             content={"code": 0, "message": "Success", "data": {"reward_min": 60}},
             headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-store"},
@@ -1760,12 +2071,14 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
                 if isinstance(conn_payload, dict):
                     conn_payload["ad_unblock"] = True
                     conn_payload["screen_res"] = "720x1280"
-                    if conn_payload.get("game"):
-                        connect_game_pkg = str(conn_payload["game"])
+                    g = conn_payload.get("game_name") or conn_payload.get("game")
+                    if g:
+                        connect_game_pkg = str(g)
                     body = json.dumps(conn_payload).encode("utf-8")
             except Exception:
                 pass
         if req_headers.get("x-user-token"):
+            _register_active_cm_session(req_headers, connect_game_pkg)
             asyncio.create_task(_auto_claim_upstream_reward(client, req_headers, connect_game_pkg, rounds=2))
 
     try:
@@ -1785,6 +2098,20 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
 
     status_code = upstream.status_code
     content = upstream.content
+
+    # Register active session token + game from /web/sid response so server-side refill loop keeps /run-site sessions alive
+    if clean_path == "web/sid" and status_code == 200:
+        try:
+            sid_json = upstream.json()
+            sid_data = sid_json.get("data") if isinstance(sid_json, dict) else None
+            if isinstance(sid_data, dict) and sid_data.get("token"):
+                sid_headers = dict(req_headers)
+                sid_headers["x-user-token"] = str(sid_data["token"])
+                sid_game = str(sid_data.get("game") or sid_data.get("game_name") or "com.roblox.client")
+                _register_active_cm_session(sid_headers, sid_game)
+                asyncio.create_task(_auto_claim_upstream_reward(client, sid_headers, sid_game, rounds=2))
+        except Exception:
+            pass
 
     # If /phone/connect returned an out-of-time error code (30002, 30003, 30004, 10005), claim more reward time and retry once!
     if clean_path == "phone/connect" and status_code == 200:
