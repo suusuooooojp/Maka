@@ -6,3 +6,6 @@ beautifulsoup4==4.15.0
 curl_cffi==0.16.2
 yt-dlp>=2025.1.15
 psycopg[binary]>=3.2,<4
+requests>=2.31.0
+cryptography>=41.0.0
+qrcode>=7.4.2

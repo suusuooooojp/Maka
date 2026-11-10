@@ -211,6 +211,17 @@ _SERVICE_META = [
         },
     ),
     (
+        "line",
+        {
+            "category": "Watch",
+            "icon": "LN",
+            "icon_key": "message-circle",
+            "description": "LINE メッセンジャー (QRログイン・トーク・E2EE対応・OkLine搭載)",
+            "keywords": "line ライン トーク チャット メッセージ qrログイン スタンプ 通話 友だち グループ okline sns watch",
+            "accent": "#06c755",
+        },
+    ),
+    (
         "x",
         {
             "category": "Watch",
@@ -237,6 +248,9 @@ def _match_meta(name: str, path: str = "") -> dict:
     for key, meta in _SERVICE_META:
         if key == "x":
             if nl == "x" or pl.startswith("/x"):
+                return meta
+        elif key == "line":
+            if nl == "line" or pl.startswith("/line"):
                 return meta
         elif key in nl or key in pl:
             return meta

@@ -18,7 +18,8 @@ def bootstrap():
         return
 
     py_minor = sys.version_info.minor
-    marker_file = os.path.join(vendor_dir, f".extracted_py3_{py_minor}")
+    whl_files = sorted(glob.glob(os.path.join(wheels_dir, "*.whl")))
+    marker_file = os.path.join(vendor_dir, f".extracted_py3_{py_minor}_{len(whl_files)}")
 
     if os.path.exists(marker_file) and os.path.isdir(vendor_dir):
         return
@@ -27,7 +28,6 @@ def bootstrap():
     os.makedirs(vendor_dir, exist_ok=True)
 
     v_tag = f"cp3{py_minor}"
-    whl_files = sorted(glob.glob(os.path.join(wheels_dir, "*.whl")))
     extracted_count = 0
 
     for whl in whl_files:
