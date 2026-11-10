@@ -441,9 +441,8 @@ def _get_online_count() -> int:
 
 
 def _calculate_tripcode(trip_key: str) -> str:
-    """Return the trip string to display after ◆, stripped of leading # and ◆."""
-    s = str(trip_key or "").strip().lstrip("#").lstrip("◆").strip()
-    return s[:24]
+    """Never expose raw password or trip string in chat display."""
+    return ""
 
 
 def _calculate_id_from_trip(trip_key: str) -> str:
@@ -489,29 +488,19 @@ def _calculate_id_from_ip(norm_ip: str) -> str:
 def _get_ip_id(scope_or_req, client_id: str = "", ip_token: str = "", trip_key: str = "", custom_name: str = "") -> str:
     """Generate an individual 8-character ID deterministically from client ID or IP.
     Enforces distinct IDs across users while maintaining identical ID across tabs on a device.
-    Name is fixed to this individual ID. Only trip is changeable.
     """
     cid = (client_id or "").strip()
-    trip = (trip_key or "").strip()
     if scope_or_req:
         try:
             headers = getattr(scope_or_req, "headers", None) or {}
             if not cid:
                 cid = headers.get("x-openchat-client-id", "")
-            if not trip:
-                trip = headers.get("x-openchat-trip-key", "")
             if not cid:
                 query = getattr(scope_or_req, "query_params", None)
                 if query:
                     cid = query.get("cid", "")
-            if not trip:
-                query = getattr(scope_or_req, "query_params", None)
-                if query:
-                    trip = query.get("trip", "")
             if not cid:
                 cid = _extract_cookie_val(scope_or_req, "sh_openchat_cid")
-            if not trip:
-                trip = _extract_cookie_val(scope_or_req, "sh_openchat_trip")
         except Exception:
             pass
 
@@ -560,20 +549,10 @@ def _add_fixed_id_cookie(response: Response, sid: str, cid: str = "", trip: str 
             samesite="lax",
             httponly=False,
         )
-    if trip:
-        response.set_cookie(
-            key="sh_openchat_trip",
-            value=trip,
-            max_age=31536000,
-            path="/",
-            samesite="lax",
-            httponly=False,
-        )
-    elif trip == "":
-        response.delete_cookie(
-            key="sh_openchat_trip",
-            path="/",
-        )
+    response.delete_cookie(
+        key="sh_openchat_trip",
+        path="/",
+    )
     response.delete_cookie(
         key="sh_openchat_name",
         path="/",
@@ -1108,10 +1087,9 @@ for _d in (_MEDIA_TMP_DIR, _MEDIA_PERSIST_DIR):
 
 def _sign_auth_token(username: str, trip: str = "") -> str:
     u_clean = _clean_str(username, 24)
-    t_clean = _clean_str(trip, 24).lstrip("#").lstrip("◆").strip()
     if not u_clean:
         return ""
-    payload_str = json.dumps({"u": u_clean, "t": t_clean, "v": 1}, ensure_ascii=False, separators=(",", ":"))
+    payload_str = json.dumps({"u": u_clean, "v": 1}, ensure_ascii=False, separators=(",", ":"))
     b64 = base64.urlsafe_b64encode(payload_str.encode("utf-8")).decode("ascii").rstrip("=")
     sig = hmac.new(_AUTH_SIGN_SECRET, b64.encode("ascii"), hashlib.sha256).hexdigest()[:20]
     return f"{b64}.{sig}"
@@ -1134,7 +1112,7 @@ def _verify_auth_token(token: str) -> dict | None:
         if isinstance(obj, dict) and obj.get("u"):
             return {
                 "username": _clean_str(obj.get("u"), 24),
-                "tripKey": _clean_str(obj.get("t") or "", 24),
+                "tripKey": "",
             }
     except Exception:
         pass
@@ -1240,8 +1218,11 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
             if item.get("name") and not ex.get("name"):
                 ex["name"] = _clean_str(item.get("name"), 24)
                 updated = True
-            if item.get("trip") and not ex.get("trip"):
-                ex["trip"] = _clean_str(item.get("trip"), 16)
+            if "trip" in ex:
+                ex.pop("trip", None)
+                updated = True
+            if "tripKey" in ex:
+                ex.pop("tripKey", None)
                 updated = True
             if video and not ex.get("video"):
                 ex["video"] = video
@@ -1268,8 +1249,6 @@ def _merge_messages(new_msgs: list[dict]) -> bool:
         }
         if item.get("name"):
             clean_msg["name"] = _clean_str(item.get("name"), 24)
-        if item.get("trip"):
-            clean_msg["trip"] = _clean_str(item.get("trip"), 16)
         if image:
             clean_msg["image"] = image
         if video:
@@ -1310,6 +1289,8 @@ def _load_history():
                             if isinstance(m, dict):
                                 m_ts = float(m.get("ts") or 0.0)
                                 if m_ts > _RESET_EPOCH_TS:
+                                    m.pop("trip", None)
+                                    m.pop("tripKey", None)
                                     m["time"] = _format_time_hms(m.get("time", ""), m_ts)
                                     cid = _clean_str(m.get("clientId"), 64)
                                     m["senderId"] = _canonicalize_sid(_format_display_name(m.get("senderId") or "ANON0000"), cid)
@@ -1331,6 +1312,8 @@ def _load_history():
         pass
     for m in _MESSAGES:
         if isinstance(m, dict):
+            m.pop("trip", None)
+            m.pop("tripKey", None)
             cid = _clean_str(m.get("clientId"), 64)
             m["senderId"] = _canonicalize_sid(_format_display_name(m.get("senderId") or "ANON0000"), cid)
             if isinstance(m.get("replyTo"), dict):
@@ -2000,9 +1983,8 @@ async def login_openchat(request: Request):
         _NAME_OWNERS[norm] = cid or "registered"
         _save_chat_users()
         _save_names()
-    auth_token = _sign_auth_token(username, password)
-    my_id = _get_ip_id(request, client_id=cid, ip_token=tok, trip_key=password, custom_name=username)
-    trip_code = _calculate_tripcode(password) if password else ""
+    auth_token = _sign_auth_token(username)
+    my_id = _get_ip_id(request, client_id=cid, ip_token=tok, custom_name=username)
     signed_token = _sign_id(my_id)
     resp = JSONResponse(
         {
@@ -2013,7 +1995,7 @@ async def login_openchat(request: Request):
             "myId": my_id,
             "name": username,
             "token": signed_token,
-            "trip": trip_code,
+            "trip": "",
             "onlineCount": _get_online_count(),
         },
         headers=_CORS_HEADERS,
@@ -2033,7 +2015,7 @@ async def login_openchat(request: Request):
         secure=is_https,
         httponly=False,
     )
-    _add_fixed_id_cookie(resp, my_id, cid=cid, trip=password)
+    _add_fixed_id_cookie(resp, my_id, cid=cid, trip="")
     return resp
 
 
@@ -2042,6 +2024,7 @@ async def logout_openchat(request: Request):
         return Response(status_code=204, headers=_CORS_HEADERS)
     resp = JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
     resp.delete_cookie(key="sh_openchat_auth", path="/")
+    resp.delete_cookie(key="sh_openchat_trip", path="/")
     return resp
 
 
@@ -2051,15 +2034,13 @@ async def auth_status_openchat(request: Request):
     auth_user = _extract_auth_user(request)
     if not auth_user:
         return JSONResponse({"ok": True, "loggedIn": False}, headers=_CORS_HEADERS)
-    trip_key = auth_user.get("tripKey") or ""
-    trip_code = _calculate_tripcode(trip_key) if trip_key else ""
     return JSONResponse(
         {
             "ok": True,
             "loggedIn": True,
             "username": auth_user.get("username"),
-            "trip": trip_code,
-            "authToken": _sign_auth_token(auth_user.get("username") or "", trip_key),
+            "trip": "",
+            "authToken": _sign_auth_token(auth_user.get("username") or ""),
         },
         headers=_CORS_HEADERS,
     )
@@ -2277,6 +2258,8 @@ def _get_clean_messages() -> list[dict]:
         if m.get("service") == "System" or m.get("senderId") == "SYS" or str(m.get("id", "")).startswith("sys_"):
             continue
         item = dict(m)
+        item.pop("trip", None)
+        item.pop("tripKey", None)
         sid = _canonicalize_sid(item.get("senderId") or "ANON0000", str(item.get("clientId") or ""))
         item["senderId"] = sid
         if not item.get("name"):
@@ -3008,51 +2991,35 @@ _CLIENT_JS = r"""
 
   const CANONICAL_ID_MAP = {};
 
+  // Purge any previously stored trip/password from cookies and localStorage
+  try {
+    document.cookie = 'sh_openchat_trip=; path=/; max-age=0; SameSite=Lax';
+    localStorage.removeItem('sh_openchat_trip');
+    localStorage.removeItem('sh_openchat_trip_code');
+  } catch (_) {}
+
   function getStoredTripKey() {
-    let trip = '';
-    try {
-      const m = document.cookie.match(/(?:^|;\s*)sh_openchat_trip=([^;]+)/);
-      if (m && m[1]) trip = decodeURIComponent(m[1]).trim();
-    } catch (_) {}
-    if (!trip) {
-      try { trip = (localStorage.getItem('sh_openchat_trip') || '').trim(); } catch (_) {}
-    }
-    return trip;
+    return '';
   }
 
   function setStoredTripKey(trip) {
-    trip = String(trip || '').trim();
     try {
-      if (trip) {
-        document.cookie = 'sh_openchat_trip=' + encodeURIComponent(trip) + '; path=/; max-age=31536000; SameSite=Lax';
-        localStorage.setItem('sh_openchat_trip', trip);
-      } else {
-        document.cookie = 'sh_openchat_trip=; path=/; max-age=0; SameSite=Lax';
-        localStorage.removeItem('sh_openchat_trip');
-      }
+      document.cookie = 'sh_openchat_trip=; path=/; max-age=0; SameSite=Lax';
+      localStorage.removeItem('sh_openchat_trip');
     } catch (_) {}
   }
 
   function getStoredTripCode() {
-    let code = '';
-    try {
-      code = (localStorage.getItem('sh_openchat_trip_code') || '').trim();
-    } catch (_) {}
-    return code;
+    return '';
   }
 
   function setStoredTripCode(code) {
-    code = String(code || '').trim();
     try {
-      if (code) {
-        localStorage.setItem('sh_openchat_trip_code', code);
-      } else {
-        localStorage.removeItem('sh_openchat_trip_code');
-      }
+      localStorage.removeItem('sh_openchat_trip_code');
     } catch (_) {}
   }
 
-  let currentTripCode = getStoredTripCode();
+  let currentTripCode = '';
 
   function getStoredCustomName() {
     let name = '';
@@ -4993,14 +4960,14 @@ _CLIENT_JS = r"""
       if (m && m[1]) return decodeURIComponent(m[1]).trim();
     } catch (_) {}
     try {
-      return (localStorage.getItem('sh_openchat_auth') || '').trim();
+      return (localStorage.getItem('sh_openchat_auth') || localStorage.getItem('schoolhub_chat_token') || '').trim();
     } catch (_) {}
     return '';
   }
 
   function getStoredAuthUsername() {
     try {
-      return (localStorage.getItem('sh_openchat_auth_user') || '').trim();
+      return (localStorage.getItem('sh_openchat_auth_user') || localStorage.getItem('schoolhub_chat_user') || '').trim();
     } catch (_) {}
     return '';
   }
@@ -5011,21 +4978,26 @@ _CLIENT_JS = r"""
   function setAuthState(token, username, tripCode) {
     currentAuthToken = String(token || '').trim();
     currentAuthUser = String(username || '').trim();
+    currentTripCode = '';
+    setStoredTripKey('');
+    setStoredTripCode('');
     try {
       if (currentAuthToken) {
         document.cookie = 'sh_openchat_auth=' + encodeURIComponent(currentAuthToken) + '; path=/; max-age=31536000; SameSite=Lax';
         localStorage.setItem('sh_openchat_auth', currentAuthToken);
-        if (currentAuthUser) localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
+        localStorage.setItem('schoolhub_chat_token', currentAuthToken);
+        if (currentAuthUser) {
+          localStorage.setItem('sh_openchat_auth_user', currentAuthUser);
+          localStorage.setItem('schoolhub_chat_user', currentAuthUser);
+        }
       } else {
         document.cookie = 'sh_openchat_auth=; path=/; max-age=0; SameSite=Lax';
         localStorage.removeItem('sh_openchat_auth');
         localStorage.removeItem('sh_openchat_auth_user');
+        localStorage.removeItem('schoolhub_chat_token');
+        localStorage.removeItem('schoolhub_chat_user');
       }
     } catch (_) {}
-    if (tripCode !== undefined) {
-      currentTripCode = String(tripCode || '').trim();
-      setStoredTripCode(currentTripCode);
-    }
     updateAuthUi();
   }
 
@@ -5036,11 +5008,10 @@ _CLIENT_JS = r"""
   function updateAuthUi() {
     const logged = isLoggedIn();
     const displayUser = currentAuthUser || currentSenderId || 'ログイン済';
-    const tripSuffix = currentTripCode ? '◆' + currentTripCode : '';
     if (loginGateBar && loginGateText && loginOpenBtn) {
       if (logged) {
         loginGateBar.classList.add('is-logged-in');
-        loginGateText.textContent = 'ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        loginGateText.textContent = 'ログイン中: ' + displayUser + ' (メッセージ・動画投稿OK)';
         loginOpenBtn.textContent = 'ログアウト';
         loginOpenBtn.className = 'sh-logout-action-btn';
       } else {
@@ -5053,7 +5024,7 @@ _CLIENT_JS = r"""
     if (hubLoginGateBar && hubLoginGateText && hubLoginOpenBtn) {
       if (logged) {
         hubLoginGateBar.classList.add('is-logged-in');
-        hubLoginGateText.textContent = 'ログイン中: ' + displayUser + tripSuffix + ' (メッセージ・動画投稿OK)';
+        hubLoginGateText.textContent = 'ログイン中: ' + displayUser + ' (メッセージ・動画投稿OK)';
         hubLoginOpenBtn.textContent = 'ログアウト';
         hubLoginOpenBtn.className = 'sh-logout-action-btn';
       } else {
@@ -5205,11 +5176,16 @@ _CLIENT_JS = r"""
           }
           return;
         }
-        if (upass) setStoredTripKey(upass);
+        setStoredTripKey('');
+        setStoredTripCode('');
+        if (loginPasswordInput) {
+          loginPasswordInput.value = '';
+          loginPasswordInput.type = 'password';
+        }
         setStoredCustomName(data.username || uname);
-        setAuthState(data.authToken, data.username || uname, data.trip || '');
+        setAuthState(data.authToken, data.username || uname, '');
         if (data.myId) {
-          applyServerMyId(data.myId, data.token, data.trip);
+          applyServerMyId(data.myId, data.token, '');
         }
         closeLoginModal();
         appendSystemNotice((data.username || uname) + ' としてログインしました。チャット・動画投稿が可能です。');
@@ -5688,29 +5664,26 @@ _CLIENT_JS = r"""
         document.cookie = 'sh_openchat_ip_id=' + encodeURIComponent(currentIpToken) + '; path=/; max-age=31536000; SameSite=Lax';
       } catch (_) {}
     }
-    if (newTrip !== undefined) {
-      currentTripCode = String(newTrip || '').trim();
-      setStoredTripCode(currentTripCode);
-    }
+    currentTripCode = '';
+    setStoredTripCode('');
     try {
       localStorage.setItem('sh_openchat_ip_id', currentSenderId);
     } catch (_) {}
-    const tripHtmlBadge = currentTripCode ? ' <span class="sh-2ch-trip">◆' + escapeHtml(currentTripCode) + '</span>' : '';
     const displayLabel = isLoggedIn() && currentAuthUser ? escapeHtml(currentAuthUser) + ' (ID:' + escapeHtml(currentSenderId) + ')' : 'ID:' + escapeHtml(currentSenderId);
     if (myIdBadge) {
-      myIdBadge.innerHTML = displayLabel + tripHtmlBadge;
+      myIdBadge.innerHTML = displayLabel;
       myIdBadge.style.color = getIdColor(currentSenderId);
       myIdBadge.style.cursor = 'pointer';
-      myIdBadge.title = 'クリックでログイン・トリップ設定';
+      myIdBadge.title = 'クリックでログイン設定';
     }
     if (hubIdBadge) {
-      hubIdBadge.innerHTML = displayLabel + tripHtmlBadge;
+      hubIdBadge.innerHTML = displayLabel;
       hubIdBadge.style.color = getIdColor(currentSenderId);
       hubIdBadge.style.cursor = 'pointer';
-      hubIdBadge.title = 'クリックでログイン・トリップ設定';
+      hubIdBadge.title = 'クリックでログイン設定';
     }
     if (modalCurrIdVal) {
-      modalCurrIdVal.innerHTML = escapeHtml(currentSenderId) + tripHtmlBadge;
+      modalCurrIdVal.innerHTML = escapeHtml(currentSenderId);
       modalCurrIdVal.style.color = getIdColor(currentSenderId);
     }
     updateAuthUi();
@@ -5769,28 +5742,7 @@ _CLIENT_JS = r"""
   }
 
   function openIdModal() {
-    if (!idModal) return;
-    const curTrip = getStoredTripKey() || currentTripCode;
-    if (modalFixedIdDisplay) {
-      modalFixedIdDisplay.textContent = currentSenderId;
-      modalFixedIdDisplay.style.color = getIdColor(currentSenderId);
-    }
-    if (modalTripInput) modalTripInput.value = curTrip;
-    function updatePreview() {
-      const pTrip = modalTripInput ? modalTripInput.value.trim().replace(/^#+/, '').replace(/^◆+/, '') : '';
-      const displayId = currentSenderId;
-      const tripBadge = pTrip ? ' <span class="sh-2ch-trip">◆' + escapeHtml(pTrip) + '</span>' : '';
-      if (modalCurrIdVal) {
-        modalCurrIdVal.innerHTML = escapeHtml(displayId) + tripBadge;
-        modalCurrIdVal.style.color = getIdColor(displayId);
-      }
-    }
-    updatePreview();
-    if (modalTripInput) {
-      modalTripInput.oninput = updatePreview;
-      modalTripInput.focus();
-    }
-    idModal.classList.add('open');
+    openLoginModal();
   }
 
   function closeIdModal() {
@@ -5801,11 +5753,7 @@ _CLIENT_JS = r"""
     myIdBadge.style.cursor = 'pointer';
     myIdBadge.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (!isLoggedIn()) {
-        openLoginModal();
-      } else {
-        openIdModal();
-      }
+      openLoginModal();
     });
   }
 
@@ -5813,11 +5761,7 @@ _CLIENT_JS = r"""
     hubIdBadge.style.cursor = 'pointer';
     hubIdBadge.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (!isLoggedIn()) {
-        openLoginModal();
-      } else {
-        openIdModal();
-      }
+      openLoginModal();
     });
   }
 
@@ -6608,11 +6552,20 @@ _CLIENT_JS = r"""
       if (raw) {
         const list = JSON.parse(raw);
         if (Array.isArray(list)) {
+          let scrubbed = false;
           list.forEach(m => {
+            if (m && (m.trip || m.tripKey)) {
+              delete m.trip;
+              delete m.tripKey;
+              scrubbed = true;
+            }
             if (!currentResetEpoch || !m.ts || Number(m.ts) > currentResetEpoch) {
               appendMessage(m, true, true);
             }
           });
+          if (scrubbed) {
+            saveLocalCache();
+          }
         }
       }
     } catch (_) {}
@@ -6888,7 +6841,7 @@ _CLIENT_JS = r"""
     el.className = 'sh-chat-msg' + (isSelf ? ' is-self' : '');
     el.dataset.mid = msg.id;
     el.dataset.senderNorm = senderNorm;
-    el.dataset.trip = (msg.trip && String(msg.trip).trim()) || '';
+    el.dataset.trip = '';
     el.dataset.name = (msg.name && String(msg.name).trim()) || '';
     el.dataset.service = rawSvc;
     const idColor = getIdColor(cleanSender);
@@ -6896,14 +6849,12 @@ _CLIENT_JS = r"""
     const sTime = escapeHtml(formatMsgTime(msg));
     const customName = (msg.name && String(msg.name).trim() && cleanIdDisplay(msg.name) !== cleanSender) ? String(msg.name).trim() : '';
     const sName = customName ? `${escapeHtml(customName)} (${escapeHtml(cleanSender)})` : escapeHtml(cleanSender);
-    const sTrip = escapeHtml(msg.trip && String(msg.trip).trim() ? String(msg.trip).trim() : '');
-    const tripHtml = sTrip ? `<span class="sh-2ch-trip">◆${sTrip}</span>` : '';
 
     el.innerHTML = `
       <div class="sh-chat-msg-head">
         <span class="sh-2ch-no" title="クリックで >>${resNo} に返信">${resNo}</span>
         <span>：</span>
-        <span class="sh-2ch-name" style="color:${idColor};">${sName}</span>${tripHtml}<span class="sh-2ch-svc">＠${sSvc}</span>
+        <span class="sh-2ch-name" style="color:${idColor};">${sName}</span><span class="sh-2ch-svc">＠${sSvc}</span>
         <span>：</span>
         <span class="sh-chat-time">${sTime}</span>
         <span class="sh-2ch-self-mark" style="display:${isSelf ? 'inline' : 'none'};">(自)</span>
@@ -6941,7 +6892,6 @@ _CLIENT_JS = r"""
     }
     const nextResNo = container.querySelectorAll('.sh-chat-entry').length + 1;
     const senderNorm = normalizeName(msg.senderId || '--------');
-    const msgTrip = (msg.trip && String(msg.trip).trim()) || '';
     const msgName = (msg.name && String(msg.name).trim()) || '';
     const msgSvc = formatServiceBadge(msg.service);
     const lastGroup = container.lastElementChild;
@@ -6949,7 +6899,6 @@ _CLIENT_JS = r"""
       lastGroup &&
       lastGroup.classList.contains('sh-chat-msg') &&
       lastGroup.dataset.senderNorm === senderNorm &&
-      (lastGroup.dataset.trip || '') === msgTrip &&
       (lastGroup.dataset.name || '') === msgName &&
       (lastGroup.dataset.service || '') === msgSvc
     ) {
@@ -6995,19 +6944,22 @@ _CLIENT_JS = r"""
 
   function updateExistingMessage(msg) {
     if (!msg || !msg.id) return;
+    delete msg.trip;
+    delete msg.tripKey;
     const cached = localMessageCache.find(m => m && m.id === msg.id);
     if (!cached) return;
     let changed = false;
+    if (cached.trip || cached.tripKey) {
+      delete cached.trip;
+      delete cached.tripKey;
+      changed = true;
+    }
     if (msg.senderId) {
       const cleanSid = cleanIdDisplay(msg.senderId);
       if (cleanIdDisplay(cached.senderId) !== cleanSid) {
         cached.senderId = cleanSid;
         changed = true;
       }
-    }
-    if (msg.trip && cached.trip !== msg.trip) {
-      cached.trip = msg.trip;
-      changed = true;
     }
     if (msg.name && cached.name !== msg.name) {
       cached.name = msg.name;
@@ -7029,6 +6981,8 @@ _CLIENT_JS = r"""
 
   function appendMessage(msg, isInitial, fromCache) {
     if (!msg || !msg.id) return;
+    delete msg.trip;
+    delete msg.tripKey;
     if (msg.service === 'System' || msg.senderId === 'SYS' || String(msg.id || '').startsWith('sys_') || msg.name === 'システム') {
       const isMine = Boolean(msg.isLocal || (msg.clientId && msg.clientId === currentClientId) || (msg.senderId && msg.senderId === currentSenderId && msg.senderId !== 'SYS'));
       if (!isMine) return;

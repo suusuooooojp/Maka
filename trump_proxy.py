@@ -1749,8 +1749,8 @@ let currentRoom = null;
 let currentPid = localStorage.getItem("schoolhub_trump_pid") || ("p_" + Math.random().toString(36).slice(2, 10));
 localStorage.setItem("schoolhub_trump_pid", currentPid);
 
-let authToken = localStorage.getItem("schoolhub_chat_token") || "";
-let currentUsername = localStorage.getItem("schoolhub_chat_user") || "ゲスト";
+let authToken = localStorage.getItem("schoolhub_chat_token") || localStorage.getItem("sh_openchat_auth") || "";
+let currentUsername = localStorage.getItem("schoolhub_chat_user") || localStorage.getItem("sh_openchat_auth_user") || "ゲスト";
 let currentUserRate = 1500;
 
 let socket = null;
@@ -1821,6 +1821,7 @@ async function checkAuthStatus() {
     } else {
       authToken = "";
       localStorage.removeItem("schoolhub_chat_token");
+      localStorage.removeItem("sh_openchat_auth");
       updateAuthDisplay("ゲスト", 1500);
     }
   } catch(e) {
@@ -1887,8 +1888,13 @@ async function submitAuth() {
       authToken = data.token;
       currentUsername = data.username;
       currentUserRate = data.rate;
+      document.getElementById("authPasswordInput").value = "";
+      document.getElementById("authPasswordInput").type = "password";
       localStorage.setItem("schoolhub_chat_token", authToken);
       localStorage.setItem("schoolhub_chat_user", currentUsername);
+      localStorage.setItem("sh_openchat_auth", authToken);
+      localStorage.setItem("sh_openchat_auth_user", currentUsername);
+      document.cookie = "sh_openchat_auth=" + encodeURIComponent(authToken) + "; path=/; max-age=31536000; SameSite=Lax";
       updateAuthDisplay(currentUsername, currentUserRate);
       closeAuthModal();
       showToast(`ようこそ、${currentUsername}さん！ (⭐️ ${currentUserRate} R)`);
