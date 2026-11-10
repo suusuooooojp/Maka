@@ -51,7 +51,13 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 5000)
+            curl.setopt(connect_timeout_ms, 15000)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -2143,20 +2149,26 @@ async def x_http_relay(request: Request):
         else:
             active_session = None
 
+        used_curl = False
         if active_session is not None:
-            upstream = await active_session.request(
-                method=method,
-                url=url,
-                headers=header_dict,
-                data=req_body if req_body else None,
-                allow_redirects=False,
-                timeout=22,
-            )
-            status = int(upstream.status_code)
-            status_text = str(getattr(upstream, "reason", "") or "OK")
-            resp_body = bytes(upstream.content or b"")
-            raw_multi = upstream.headers.multi_items()
-        else:
+            try:
+                upstream = await active_session.request(
+                    method=method,
+                    url=url,
+                    headers=header_dict,
+                    data=req_body if req_body else None,
+                    allow_redirects=False,
+                    timeout=22,
+                )
+                status = int(upstream.status_code)
+                status_text = str(getattr(upstream, "reason", "") or "OK")
+                resp_body = bytes(upstream.content or b"")
+                raw_multi = upstream.headers.multi_items()
+                used_curl = True
+            except Exception:
+                used_curl = False
+
+        if not used_curl:
             client = await _get_media_http_client()
             upstream = await client.request(
                 method=method,

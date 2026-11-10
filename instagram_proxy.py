@@ -39,6 +39,9 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
+_DNS_RESOLVE_MAP: dict[str, bytes] = {}
+
+
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
@@ -49,9 +52,18 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+            resolve_opt = getattr(CurlOpt, "RESOLVE", None)
+            if resolve_opt is not None and _DNS_RESOLVE_MAP:
+                curl.setopt(resolve_opt, list(_DNS_RESOLVE_MAP.values()))
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 5000)
+            curl.setopt(connect_timeout_ms, 15000)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -93,11 +105,7 @@ if CurlAsyncSession is not None:
             except Exception:
                 pass
             try:
-                try:
-                    return await super().request(method, url, *args, **kwargs)
-                except Exception:
-                    self._force_fresh = True
-                    return await super().request(method, url, *args, **kwargs)
+                return await super().request(method, url, *args, **kwargs)
             finally:
                 try:
                     self._cookies.clear()
@@ -117,7 +125,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261110-ig-v8"
+RUNTIME_REV = "20261110-ig-v9"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -1148,15 +1156,27 @@ async def _get_curl_session():
     return _CURL_SESSION
 
 
+async def _reset_curl_session(failed_session=None) -> None:
+    global _CURL_SESSION
+    async with _CURL_SESSION_LOCK:
+        if _CURL_SESSION is not None and (failed_session is None or _CURL_SESSION is failed_session):
+            old = _CURL_SESSION
+            _CURL_SESSION = None
+            try:
+                await old.close()
+            except Exception:
+                pass
+
+
 async def _get_media_http_client() -> httpx.AsyncClient:
-    """Shared cookieless persistent IPv4 client for Instagram images and Reel videos."""
+    """Shared cookieless persistent IPv4 client for Instagram images, Reel videos, and HTTP relay fallback."""
     global _MEDIA_HTTP_CLIENT
     if _MEDIA_HTTP_CLIENT is not None and not _MEDIA_HTTP_CLIENT.is_closed:
         return _MEDIA_HTTP_CLIENT
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
-            limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
-            timeout = httpx.Timeout(connect=7.0, read=45.0, write=10.0, pool=10.0)
+            limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
+            timeout = httpx.Timeout(connect=15.0, read=45.0, write=15.0, pool=15.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
                     local_address="0.0.0.0",
@@ -1226,19 +1246,20 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
         "apple.com",
         "cdn-apple.com",
     )
-    if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
-        _PUBLIC_HOST_CACHE[key] = now
-        return
+    is_trusted = any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes)
     if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
         loop = asyncio.get_running_loop()
+        infos = []
         try:
             infos = await loop.run_in_executor(
                 None, lambda: socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
             )
         except Exception:
-            infos = await loop.run_in_executor(
-                None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-            )
+            if not is_trusted:
+                infos = await loop.run_in_executor(
+                    None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+                )
+        ipv4_addrs: list[str] = []
         for _, _, _, _, sockaddr in infos:
             ip_text = sockaddr[0]
             try:
@@ -1251,7 +1272,15 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
                 or ip.is_link_local
                 or ip.is_multicast
             ):
-                raise PermissionError(f"non-public address {ip_text}")
+                if not is_trusted:
+                    raise PermissionError(f"non-public address {ip_text}")
+                continue
+            if isinstance(ip, ipaddress.IPv4Address) and ip_text not in ipv4_addrs:
+                ipv4_addrs.append(ip_text)
+        if ipv4_addrs:
+            if len(_DNS_RESOLVE_MAP) > 256:
+                _DNS_RESOLVE_MAP.clear()
+            _DNS_RESOLVE_MAP[f"{host}:{port}"] = f"{host}:{port}:{','.join(ipv4_addrs[:6])}".encode("ascii")
     _PUBLIC_HOST_CACHE[key] = now
 
 
@@ -1675,6 +1704,174 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
     return patched.encode("utf-8")
 
 
+async def _ig_raw_single_request(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes | None,
+    *,
+    timeout: float,
+    use_httpx: bool,
+    fresh_curl: bool,
+    impersonate_profile: str,
+) -> tuple[int, str, bytes, list[tuple[str, str]]]:
+    if not use_httpx and StatelessCurlSession is not None:
+        ephemeral: StatelessCurlSession | None = None
+        session = None
+        try:
+            if fresh_curl:
+                ephemeral = StatelessCurlSession(
+                    impersonate=impersonate_profile,
+                    default_headers=False,
+                    allow_redirects=False,
+                    timeout=max(int(timeout) + 3, 20),
+                    max_clients=4,
+                )
+                session = ephemeral
+            else:
+                session = await _get_curl_session()
+            upstream = await session.request(
+                method=method,
+                url=url,
+                headers=headers,
+                data=body if body else None,
+                allow_redirects=False,
+                timeout=timeout,
+            )
+            status = int(upstream.status_code)
+            reason = getattr(upstream, "reason", "")
+            status_text = str(reason.strip() if hasattr(reason, "strip") else (reason or "OK")) or "OK"
+            resp_body = bytes(upstream.content or b"")
+            raw_multi = list(upstream.headers.multi_items())
+            return status, status_text, resp_body, raw_multi
+        except Exception:
+            if not fresh_curl and session is not None:
+                try:
+                    asyncio.create_task(_reset_curl_session(session))
+                except Exception:
+                    pass
+            raise
+        finally:
+            if ephemeral is not None:
+                try:
+                    await ephemeral.close()
+                except Exception:
+                    pass
+
+    client = await _get_media_http_client()
+    upstream = await client.request(
+        method=method,
+        url=url,
+        headers=headers,
+        content=body if body else None,
+        follow_redirects=False,
+    )
+    status = int(upstream.status_code)
+    status_text = str(upstream.reason_phrase or "OK")
+    resp_body = bytes(upstream.content or b"")
+    raw_multi = list(upstream.headers.multi_items())
+    return status, status_text, resp_body, raw_multi
+
+
+async def _ig_upstream_request(
+    method: str,
+    url: str,
+    headers: dict[str, str],
+    body: bytes | None = None,
+    *,
+    timeout: float = 22.0,
+    prefer_httpx: bool = False,
+    fresh_curl: bool = False,
+    impersonate_profile: str = "chrome131",
+) -> tuple[int, str, bytes, list[tuple[str, str]]]:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if host:
+        try:
+            await _ensure_public_host(host, port)
+        except PermissionError:
+            raise
+        except Exception:
+            pass
+
+    used_httpx = prefer_httpx or (StatelessCurlSession is None)
+    try:
+        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+            method,
+            url,
+            headers,
+            body,
+            timeout=timeout,
+            use_httpx=used_httpx,
+            fresh_curl=fresh_curl,
+            impersonate_profile=impersonate_profile,
+        )
+    except Exception:
+        used_httpx = not used_httpx
+        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+            method,
+            url,
+            headers,
+            body,
+            timeout=timeout,
+            use_httpx=used_httpx,
+            fresh_curl=fresh_curl,
+            impersonate_profile=impersonate_profile,
+        )
+
+    if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
+        m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
+        if m_rd:
+            rd_path = m_rd.group(1).decode("utf-8", "ignore")
+            rd_headers = dict(headers)
+            rd_headers["Sec-Fetch-Dest"] = "empty"
+            rd_headers["Sec-Fetch-Mode"] = "cors"
+            rd_headers["Sec-Fetch-Site"] = "same-origin"
+            rd_headers["Origin"] = f"https://{host}"
+            rd_headers["Referer"] = url
+            try:
+                _, _, _, rd_multi = await _ig_raw_single_request(
+                    "POST",
+                    f"https://{host}{rd_path}",
+                    rd_headers,
+                    None,
+                    timeout=12.0,
+                    use_httpx=used_httpx,
+                    fresh_curl=False,
+                    impersonate_profile=impersonate_profile,
+                )
+                extra_set_cookies: list[tuple[str, str]] = []
+                rd_cookie_pairs: list[str] = []
+                for rk, rv in rd_multi:
+                    if rk.lower() == "set-cookie":
+                        extra_set_cookies.append((rk, rv))
+                        c_nv = rv.split(";", 1)[0].strip()
+                        if c_nv:
+                            rd_cookie_pairs.append(c_nv)
+                retry_headers = dict(headers)
+                if rd_cookie_pairs:
+                    cur_c = retry_headers.get("Cookie", "")
+                    retry_headers["Cookie"] = (
+                        f"{cur_c}; {'; '.join(rd_cookie_pairs)}" if cur_c else "; ".join(rd_cookie_pairs)
+                    )
+                status, status_text, resp_body, retry_multi = await _ig_raw_single_request(
+                    method,
+                    url,
+                    retry_headers,
+                    body,
+                    timeout=timeout,
+                    use_httpx=used_httpx,
+                    fresh_curl=False,
+                    impersonate_profile=impersonate_profile,
+                )
+                raw_multi = extra_set_cookies + retry_multi
+            except Exception:
+                pass
+
+    return status, status_text, resp_body, raw_multi
+
+
 async def _handle_ig_account_recovery_search(
     req_body: bytes,
     header_dict: dict[str, str],
@@ -1734,45 +1931,15 @@ async def _handle_ig_account_recovery_search(
         }
         v1_body = urlencode({"email_or_username": search_query}).encode("utf-8")
         v1_url = "https://www.instagram.com/api/v1/web/accounts/account_recovery_send_ajax/"
-        ephemeral: StatelessCurlSession | None = None
-        try:
-            if StatelessCurlSession is not None:
-                ephemeral = StatelessCurlSession(
-                    impersonate=impersonate_profile,
-                    default_headers=False,
-                    allow_redirects=False,
-                    timeout=25,
-                    max_clients=2,
-                )
-                upstream = await ephemeral.request(
-                    method="POST",
-                    url=v1_url,
-                    headers=v1_headers,
-                    data=v1_body,
-                    allow_redirects=False,
-                    timeout=20,
-                )
-                v1_status = int(upstream.status_code)
-                v1_resp_bytes = bytes(upstream.content or b"")
-                raw_multi = list(upstream.headers.multi_items())
-            else:
-                client = await _get_media_http_client()
-                upstream = await client.request(
-                    method="POST",
-                    url=v1_url,
-                    headers=v1_headers,
-                    content=v1_body,
-                    follow_redirects=False,
-                )
-                v1_status = int(upstream.status_code)
-                v1_resp_bytes = bytes(upstream.content or b"")
-                raw_multi = list(upstream.headers.multi_items())
-        finally:
-            if ephemeral is not None:
-                try:
-                    await ephemeral.close()
-                except Exception:
-                    pass
+        v1_status, _, v1_resp_bytes, raw_multi = await _ig_upstream_request(
+            "POST",
+            v1_url,
+            v1_headers,
+            v1_body,
+            timeout=20.0,
+            fresh_curl=True,
+            impersonate_profile=impersonate_profile,
+        )
 
         v1_json = {}
         try:
@@ -1972,160 +2139,94 @@ async def _handle_ig_caa_login(
             v1_headers["X-Mid"] = ig_mid
 
         v1_url = "https://www.instagram.com/api/v1/web/accounts/login/ajax/"
-        ephemeral: StatelessCurlSession | None = None
-        gql_fallback_resp: Response | None = None
+        v1_status, _, v1_resp_bytes, raw_multi = await _ig_upstream_request(
+            "POST",
+            v1_url,
+            v1_headers,
+            v1_body,
+            timeout=22.0,
+            fresh_curl=True,
+            impersonate_profile=impersonate_profile,
+        )
+
+        v1_json = {}
         try:
-            if StatelessCurlSession is not None:
-                ephemeral = StatelessCurlSession(
-                    impersonate=impersonate_profile,
-                    default_headers=False,
-                    allow_redirects=False,
-                    timeout=25,
-                    max_clients=2,
-                )
-                upstream = await ephemeral.request(
-                    method="POST",
-                    url=v1_url,
-                    headers=v1_headers,
-                    data=v1_body,
-                    allow_redirects=False,
-                    timeout=22,
-                )
-                v1_status = int(upstream.status_code)
-                v1_resp_bytes = bytes(upstream.content or b"")
-                raw_multi = list(upstream.headers.multi_items())
-                if v1_status == 403 and b"/__rd_verify_" in v1_resp_bytes:
-                    m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", v1_resp_bytes)
-                    if m_rd:
-                        rd_path = m_rd.group(1).decode("utf-8", "ignore")
-                        rd_resp = await ephemeral.request(
-                            method="POST",
-                            url="https://www.instagram.com" + rd_path,
-                            headers=v1_headers,
-                            allow_redirects=False,
-                            timeout=12,
-                        )
-                        rd_cookies: list[str] = []
-                        for rk, rv in rd_resp.headers.multi_items():
-                            if rk.lower() == "set-cookie":
-                                raw_multi.append((rk, rv))
-                                c_nv = rv.split(";", 1)[0].strip()
-                                if c_nv:
-                                    rd_cookies.append(c_nv)
-                        if rd_cookies:
-                            v1_headers["Cookie"] = v1_headers["Cookie"] + "; " + "; ".join(rd_cookies)
-                        upstream2 = await ephemeral.request(
-                            method="POST",
-                            url=v1_url,
-                            headers=v1_headers,
-                            data=v1_body,
-                            allow_redirects=False,
-                            timeout=22,
-                        )
-                        v1_status = int(upstream2.status_code)
-                        v1_resp_bytes = bytes(upstream2.content or b"")
-                        raw_multi.extend(upstream2.headers.multi_items())
-            else:
-                client = await _get_media_http_client()
-                upstream = await client.request(
-                    method="POST",
-                    url=v1_url,
-                    headers=v1_headers,
-                    content=v1_body,
-                    follow_redirects=False,
-                )
-                v1_status = int(upstream.status_code)
-                v1_resp_bytes = bytes(upstream.content or b"")
-                raw_multi = list(upstream.headers.multi_items())
+            parsed_v1 = json.loads(v1_resp_bytes.decode("utf-8", "ignore"))
+            if isinstance(parsed_v1, dict):
+                v1_json = parsed_v1
+        except Exception:
+            pass
 
-            v1_json = {}
+        print(
+            f"[IG-LOGIN] v1_status={v1_status} status={v1_json.get('status')} "
+            f"auth={v1_json.get('authenticated')} user={v1_json.get('user')} "
+            f"2fa={v1_json.get('two_factor_required')} chk={bool(v1_json.get('checkpoint_url'))} "
+            f"err_type={v1_json.get('error_type')} msg={str(v1_json.get('message') or '')[:80]}",
+            flush=True,
+        )
+
+        # If v1 did not return a valid JSON response (e.g. non-200 or empty), attempt native /api/graphql
+        # (which uses #PWD_BROWSER) in case the account requires CAA/FETA GraphQL login,
+        # while suppressing 1675004 rate-limit errors.
+        if (
+            (v1_status != 200 or not v1_json)
+            and not v1_json.get("authenticated")
+            and not v1_json.get("two_factor_required")
+            and not v1_json.get("checkpoint_url")
+            and v1_json.get("message") not in ("checkpoint_required", "challenge_required")
+        ):
             try:
-                parsed_v1 = json.loads(v1_resp_bytes.decode("utf-8", "ignore"))
-                if isinstance(parsed_v1, dict):
-                    v1_json = parsed_v1
-            except Exception:
-                pass
-
-            print(
-                f"[IG-LOGIN] v1_status={v1_status} status={v1_json.get('status')} "
-                f"auth={v1_json.get('authenticated')} user={v1_json.get('user')} "
-                f"2fa={v1_json.get('two_factor_required')} chk={bool(v1_json.get('checkpoint_url'))} "
-                f"err_type={v1_json.get('error_type')} msg={str(v1_json.get('message') or '')[:80]}",
-                flush=True,
-            )
-
-            # If v1 did not return a valid JSON response (e.g. non-200 or empty), attempt native /api/graphql
-            # (which uses #PWD_BROWSER) in case the account requires CAA/FETA GraphQL login,
-            # while suppressing 1675004 rate-limit errors.
-            if (
-                (v1_status != 200 or not v1_json)
-                and not v1_json.get("authenticated")
-                and not v1_json.get("two_factor_required")
-                and not v1_json.get("checkpoint_url")
-                and v1_json.get("message") not in ("checkpoint_required", "challenge_required")
-                and ephemeral is not None
-            ):
-                try:
-                    gql_headers = dict(header_dict)
-                    gql_headers["Cookie"] = v1_headers["Cookie"]
-                    gql_headers["X-CSRFToken"] = csrf_token
-                    gql_headers["X-IG-App-ID"] = "936619743392459"
-                    gql_headers["Origin"] = "https://www.instagram.com"
-                    gql_headers["Referer"] = "https://www.instagram.com/"
-                    gql_headers["Sec-Fetch-Dest"] = "empty"
-                    gql_headers["Sec-Fetch-Mode"] = "cors"
-                    gql_headers["Sec-Fetch-Site"] = "same-origin"
-                    gql_up = await ephemeral.request(
-                        method="POST",
-                        url="https://www.instagram.com/api/graphql",
-                        headers=gql_headers,
-                        data=req_body,
-                        allow_redirects=False,
-                        timeout=18,
+                gql_headers = dict(header_dict)
+                gql_headers["Cookie"] = v1_headers["Cookie"]
+                gql_headers["X-CSRFToken"] = csrf_token
+                gql_headers["X-IG-App-ID"] = "936619743392459"
+                gql_headers["Origin"] = "https://www.instagram.com"
+                gql_headers["Referer"] = "https://www.instagram.com/"
+                gql_headers["Sec-Fetch-Dest"] = "empty"
+                gql_headers["Sec-Fetch-Mode"] = "cors"
+                gql_headers["Sec-Fetch-Site"] = "same-origin"
+                _, _, gql_bytes, gql_multi = await _ig_upstream_request(
+                    "POST",
+                    "https://www.instagram.com/api/graphql",
+                    gql_headers,
+                    req_body,
+                    timeout=18.0,
+                    fresh_curl=True,
+                    impersonate_profile=impersonate_profile,
+                )
+                gql_j = json.loads(gql_bytes.decode("utf-8", "ignore"))
+                caa_w = (
+                    gql_j.get("data", {}).get("caa_login_web")
+                    if isinstance(gql_j, dict) and isinstance(gql_j.get("data"), dict)
+                    else None
+                )
+                if isinstance(caa_w, dict) and (
+                    caa_w.get("ig_authenticated") is True
+                    or caa_w.get("redirect_uri")
+                    or caa_w.get("two_factor_result")
+                    or (
+                        isinstance(caa_w.get("stop_deletion_payload"), dict)
+                        and caa_w["stop_deletion_payload"].get("stop_deletion_nonce")
                     )
-                    gql_bytes = bytes(gql_up.content or b"")
-                    gql_j = json.loads(gql_bytes.decode("utf-8", "ignore"))
-                    caa_w = (
-                        gql_j.get("data", {}).get("caa_login_web")
-                        if isinstance(gql_j, dict) and isinstance(gql_j.get("data"), dict)
-                        else None
+                ):
+                    print(
+                        f"[IG-LOGIN] gql_fallback succeeded: auth={caa_w.get('ig_authenticated')} "
+                        f"redir={caa_w.get('redirect_uri')}",
+                        flush=True,
                     )
-                    if isinstance(caa_w, dict) and (
-                        caa_w.get("ig_authenticated") is True
-                        or caa_w.get("redirect_uri")
-                        or caa_w.get("two_factor_result")
-                        or (
-                            isinstance(caa_w.get("stop_deletion_payload"), dict)
-                            and caa_w["stop_deletion_payload"].get("stop_deletion_nonce")
-                        )
-                    ):
-                        print(
-                            f"[IG-LOGIN] gql_fallback succeeded: auth={caa_w.get('ig_authenticated')} "
-                            f"redir={caa_w.get('redirect_uri')}",
-                            flush=True,
-                        )
-                        gql_out_headers: list[list[str]] = [
-                            ["content-type", "application/json; charset=utf-8"],
-                            ["access-control-allow-origin", "https://www.instagram.com"],
-                            ["access-control-allow-credentials", "true"],
-                        ]
-                        for k, v in raw_multi + list(gql_up.headers.multi_items()):
-                            if k.lower() == "set-cookie":
-                                gql_out_headers.append(
-                                    ["set-cookie", _normalize_ig_set_cookie(v, "www.instagram.com")]
-                                )
-                        gql_fallback_resp = _pack_relay_response(200, "OK", gql_out_headers, gql_bytes)
-                except Exception as gql_exc:
-                    print(f"[IG-LOGIN] gql_fallback check exception: {gql_exc}", flush=True)
-        finally:
-            if ephemeral is not None:
-                try:
-                    await ephemeral.close()
-                except Exception:
-                    pass
-
-        if gql_fallback_resp is not None:
-            return gql_fallback_resp
+                    gql_out_headers: list[list[str]] = [
+                        ["content-type", "application/json; charset=utf-8"],
+                        ["access-control-allow-origin", "https://www.instagram.com"],
+                        ["access-control-allow-credentials", "true"],
+                    ]
+                    for k, v in raw_multi + gql_multi:
+                        if k.lower() == "set-cookie":
+                            gql_out_headers.append(
+                                ["set-cookie", _normalize_ig_set_cookie(v, "www.instagram.com")]
+                            )
+                    return _pack_relay_response(200, "OK", gql_out_headers, gql_bytes)
+            except Exception as gql_exc:
+                print(f"[IG-LOGIN] gql_fallback check exception: {gql_exc}", flush=True)
 
         if not v1_json:
             return None
@@ -2479,111 +2580,30 @@ async def ig_http_relay(request: Request):
             _, c_status, c_text, c_headers, c_body = cached
             return _pack_relay_response(c_status, c_text, c_headers, c_body)
 
-    ephemeral_session: StatelessCurlSession | None = None
-    extra_set_cookies: list[tuple[str, str]] = []
     try:
-        if StatelessCurlSession is not None:
-            is_credential_login = (
-                method == "POST"
-                and host in ("www.instagram.com", "instagram.com")
-                and req_path.startswith(("/accounts/login", "/api/v1/web/accounts/login"))
-            )
-            if is_credential_login:
-                ephemeral_session = StatelessCurlSession(
-                    impersonate=impersonate_profile,
-                    default_headers=False,
-                    allow_redirects=False,
-                    timeout=25,
-                    max_clients=4,
-                )
-                active_session = ephemeral_session
-            else:
-                active_session = await _get_curl_session()
-        else:
-            active_session = None
-
-        if active_session is not None:
-            upstream = await active_session.request(
-                method=method,
-                url=url,
-                headers=header_dict,
-                data=req_body if req_body else None,
-                allow_redirects=False,
-                timeout=22,
-            )
-            status = int(upstream.status_code)
-            status_text = str(getattr(upstream, "reason", "") or "OK")
-            resp_body = bytes(upstream.content or b"")
-            raw_multi = list(upstream.headers.multi_items())
-
-            # Automatically solve Instagram's 403 /__rd_verify_* JS challenge on the server
-            # so navigation/requests never fail or hang on a blank 403 challenge page.
-            if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
-                m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
-                if m_rd:
-                    rd_path = m_rd.group(1).decode("utf-8", "ignore")
-                    rd_headers = dict(header_dict)
-                    rd_headers["Sec-Fetch-Dest"] = "empty"
-                    rd_headers["Sec-Fetch-Mode"] = "cors"
-                    rd_headers["Sec-Fetch-Site"] = "same-origin"
-                    rd_headers["Origin"] = f"https://{host}"
-                    rd_headers["Referer"] = url
-                    rd_resp = await active_session.request(
-                        method="POST",
-                        url=f"https://{host}{rd_path}",
-                        headers=rd_headers,
-                        allow_redirects=False,
-                        timeout=12,
-                    )
-                    rd_cookie_pairs: list[str] = []
-                    for rk, rv in rd_resp.headers.multi_items():
-                        if rk.lower() == "set-cookie":
-                            extra_set_cookies.append((rk, rv))
-                            c_nv = rv.split(";", 1)[0].strip()
-                            if c_nv:
-                                rd_cookie_pairs.append(c_nv)
-                    if rd_cookie_pairs:
-                        cur_c = header_dict.get("Cookie", "")
-                        header_dict["Cookie"] = (cur_c + "; " + "; ".join(rd_cookie_pairs)) if cur_c else "; ".join(rd_cookie_pairs)
-                    upstream_retry = await active_session.request(
-                        method=method,
-                        url=url,
-                        headers=header_dict,
-                        data=req_body if req_body else None,
-                        allow_redirects=False,
-                        timeout=22,
-                    )
-                    status = int(upstream_retry.status_code)
-                    status_text = str(getattr(upstream_retry.reason if hasattr(upstream_retry, "reason") else "", "strip", lambda: "OK")() or "OK")
-                    resp_body = bytes(upstream_retry.content or b"")
-                    raw_multi = extra_set_cookies + list(upstream_retry.headers.multi_items())
-        else:
-            client = await _get_media_http_client()
-            upstream = await client.request(
-                method=method,
-                url=url,
-                headers=header_dict,
-                content=req_body if req_body else None,
-                follow_redirects=False,
-            )
-            status = int(upstream.status_code)
-            status_text = str(upstream.reason_phrase or "OK")
-            resp_body = bytes(upstream.content or b"")
-            raw_multi = list(upstream.headers.multi_items())
+        is_credential_login = (
+            method == "POST"
+            and host in ("www.instagram.com", "instagram.com")
+            and req_path.startswith(("/accounts/login", "/api/v1/web/accounts/login"))
+        )
+        status, status_text, resp_body, raw_multi = await _ig_upstream_request(
+            method=method,
+            url=url,
+            headers=header_dict,
+            body=req_body if req_body else None,
+            timeout=22.0,
+            prefer_httpx=is_media_cdn,
+            fresh_curl=is_credential_login,
+            impersonate_profile=impersonate_profile,
+        )
     except Exception as exc:
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
-        return _pack_relay_response(
-            502,
-            "Bad Gateway",
-            [["content-type", "text/plain; charset=utf-8"]],
+        return Response(
             err_msg,
+            status_code=502,
+            media_type="text/plain; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
         )
-    finally:
-        if ephemeral_session is not None:
-            try:
-                await ephemeral_session.close()
-            except Exception:
-                pass
 
     # If Instagram returns 429 on /ajax/bulk-route-definitions/ or /ajax/route-definition/,
     # return valid Comet responses so client-side navigation falls back to clean full-page load.
@@ -3303,7 +3323,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         frameBuf.set(metaBytes, 4);
         frameBuf.set(bodyBytes, 4 + metaBytes.byteLength);
 
-        const resp = await fetch(RELAY_ENDPOINT, {{
+        let resp = await fetch(RELAY_ENDPOINT, {{
           method: "POST",
           credentials: "omit",
           cache: "no-store",
@@ -3311,6 +3331,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           body: frameBuf,
           signal,
         }});
+        if (!resp.ok) {{
+          await new Promise((r) => setTimeout(r, 350));
+          resp = await fetch(RELAY_ENDPOINT, {{
+            method: "POST",
+            credentials: "omit",
+            cache: "no-store",
+            headers: {{ "content-type": "application/octet-stream" }},
+            body: frameBuf,
+            signal,
+          }});
+        }}
         if (!resp.ok) throw new Error("HTTP relay status " + resp.status);
         const rawBuf = await resp.arrayBuffer();
         if (rawBuf.byteLength < 4) throw new Error("HTTP relay short buffer");
@@ -3319,11 +3350,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         const metaJson = new TextDecoder().decode(new Uint8Array(rawBuf, 4, metaLen));
         const meta = JSON.parse(metaJson);
         const payloadBytes = new Uint8Array(rawBuf, 4 + metaLen);
+        const statusNum = Number(meta.status || 200);
+        if (statusNum === 502 && payloadBytes.byteLength < 512) {{
+          const errPreview = new TextDecoder().decode(payloadBytes);
+          if (errPreview.startsWith("upstream error:")) {{
+            throw new Error(errPreview);
+          }}
+        }}
         const respBody = (m === "HEAD" || meta.status === 204 || meta.status === 304)
           ? new ArrayBuffer(0)
           : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
         const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
-        const statusNum = Number(meta.status || 200);
         const setCookieEntries = [];
         for (const [k, v] of respHeaders) {{
           if (k && k.toLowerCase() === "set-cookie" && v) {{
@@ -3655,20 +3692,27 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const href = String(win?.location?.href || "");
       const doc = frameEl.contentDocument;
       if (!doc || href === "about:blank") {{
-        return {{ healthy: false, loading: false }};
+        return {{ healthy: false, loading: false, errorPage: false }};
       }}
       const body = doc.body;
       const title = String(doc.title || "").trim();
       const text = String(body?.innerText || "").replace(/\\s+/g, " ").trim();
+      if (
+        text.startsWith("upstream error:") ||
+        text.startsWith("Internal Service Worker Error") ||
+        text.startsWith("Service Worker route required")
+      ) {{
+        return {{ healthy: false, loading: false, errorPage: true }};
+      }}
       const hasIgRoot = Boolean(
         doc.querySelector("main, input[name='email'], input[name='username'], video, img[src*='media-relay'], a[href*='/accounts/login']")
       );
       const isProxied = href.includes(PREFIX);
       const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive");
       const healthy = Boolean(isProxied && (hasIgRoot || text.length > 24 || title.length > 1));
-      return {{ healthy, loading }};
+      return {{ healthy, loading, errorPage: false }};
     }} catch (_) {{
-      return {{ healthy: false, loading: false }};
+      return {{ healthy: false, loading: false, errorPage: false }};
     }}
   }}
 
@@ -3842,6 +3886,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     pollTimer = setInterval(() => {{
       if (!ready || !frame) return;
       const snap = currentDocumentHealthy();
+      if (snap.errorPage) {{
+        recover("upstream-error-page");
+        return;
+      }}
       if (snap.healthy) {{
         const target = readFrameTarget();
         if (!cover.classList.contains("hidden")) {{

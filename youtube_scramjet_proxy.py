@@ -80,7 +80,13 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 5000)
+            curl.setopt(connect_timeout_ms, 15000)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -4091,44 +4097,50 @@ async def youtube_http_relay(request: Request):
         else:
             session = None
 
+        used_curl = False
         if session is not None:
-            upstream = await session.request(
-                method=method,
-                url=url,
-                headers=header_dict,
-                data=req_body if req_body else None,
-                allow_redirects=False,
-                timeout=22,
-            )
-            status = int(upstream.status_code)
-            status_text = str(getattr(upstream, "reason", "") or "OK")
-            resp_body = bytes(upstream.content or b"")
-            raw_multi = upstream.headers.multi_items()
-            if (
-                is_yt_host
-                and not has_user_auth_cookie
-                and status in (302, 303)
-                and any(
-                    k.lower() == "location" and "/sorry/" in v
-                    for k, v in raw_multi
+            try:
+                upstream = await session.request(
+                    method=method,
+                    url=url,
+                    headers=header_dict,
+                    data=req_body if req_body else None,
+                    allow_redirects=False,
+                    timeout=22,
                 )
-            ):
-                anon_hdr = await _get_anon_visitor_cookie_header(force_refresh=True)
-                if anon_hdr:
-                    header_dict["Cookie"] = f"{anon_hdr}; PREF=f6=400&hl=ja&gl=JP"
-                    upstream = await session.request(
-                        method=method,
-                        url=url,
-                        headers=header_dict,
-                        data=req_body if req_body else None,
-                        allow_redirects=False,
-                        timeout=22,
+                status = int(upstream.status_code)
+                status_text = str(getattr(upstream, "reason", "") or "OK")
+                resp_body = bytes(upstream.content or b"")
+                raw_multi = upstream.headers.multi_items()
+                if (
+                    is_yt_host
+                    and not has_user_auth_cookie
+                    and status in (302, 303)
+                    and any(
+                        k.lower() == "location" and "/sorry/" in v
+                        for k, v in raw_multi
                     )
-                    status = int(upstream.status_code)
-                    status_text = str(getattr(upstream, "reason", "") or "OK")
-                    resp_body = bytes(upstream.content or b"")
-                    raw_multi = upstream.headers.multi_items()
-        else:
+                ):
+                    anon_hdr = await _get_anon_visitor_cookie_header(force_refresh=True)
+                    if anon_hdr:
+                        header_dict["Cookie"] = f"{anon_hdr}; PREF=f6=400&hl=ja&gl=JP"
+                        upstream = await session.request(
+                            method=method,
+                            url=url,
+                            headers=header_dict,
+                            data=req_body if req_body else None,
+                            allow_redirects=False,
+                            timeout=22,
+                        )
+                        status = int(upstream.status_code)
+                        status_text = str(getattr(upstream, "reason", "") or "OK")
+                        resp_body = bytes(upstream.content or b"")
+                        raw_multi = upstream.headers.multi_items()
+                used_curl = True
+            except Exception:
+                used_curl = False
+
+        if not used_curl:
             client = await _get_media_http_client()
             upstream = await client.request(
                 method=method,
