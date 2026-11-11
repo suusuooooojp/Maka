@@ -81,8 +81,9 @@ async function ensurePython() {
     process.exit(1);
   }
 
+  const linejsVendor = path.join(__dirname, 'linejs_vendor.mjs');
   const linejsPkg = path.join(__dirname, 'node_modules', '@evex-dev', 'linejs', 'package.json');
-  if (!fs.existsSync(linejsPkg)) {
+  if (!fs.existsSync(linejsVendor) && !fs.existsSync(linejsPkg)) {
     try {
       console.log('[SchoolHub Launcher] Installing Node dependencies (@evex-dev/linejs)...');
       execSync('npm install --omit=dev --no-audit --no-fund', { cwd: __dirname, stdio: 'inherit' });

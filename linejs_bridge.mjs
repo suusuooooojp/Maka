@@ -14,9 +14,29 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
-import { Agent, EnvHttpProxyAgent } from "undici";
-import { BaseClient } from "@evex-dev/linejs/base";
-import { MemoryStorage } from "@evex-dev/linejs/storage";
+import { BaseClient, MemoryStorage } from "./linejs_vendor.mjs";
+
+let SHARED_UNDICI_DISPATCHER = undefined;
+try {
+  const { Agent, EnvHttpProxyAgent } = await import("undici");
+  const hasEnvProxy = Boolean(
+    process.env.HTTPS_PROXY ||
+      process.env.HTTP_PROXY ||
+      process.env.https_proxy ||
+      process.env.http_proxy
+  );
+  SHARED_UNDICI_DISPATCHER = hasEnvProxy
+    ? new EnvHttpProxyAgent({
+        connectTimeout: 20_000,
+        headersTimeout: 190_000,
+        bodyTimeout: 190_000,
+      })
+    : new Agent({
+        connectTimeout: 20_000,
+        headersTimeout: 190_000,
+        bodyTimeout: 190_000,
+      });
+} catch {}
 
 const SUPPORTED_DEVICES = new Set([
   "ANDROIDSECONDARY",
@@ -41,24 +61,7 @@ function normalizeDevice(dev) {
   return DEFAULT_DEVICE;
 }
 
-const HAS_ENV_PROXY = Boolean(
-  process.env.HTTPS_PROXY ||
-    process.env.HTTP_PROXY ||
-    process.env.https_proxy ||
-    process.env.http_proxy
-);
-
-const SHARED_FETCH_DISPATCHER = HAS_ENV_PROXY
-  ? new EnvHttpProxyAgent({
-      connectTimeout: 20_000,
-      headersTimeout: 190_000,
-      bodyTimeout: 190_000,
-    })
-  : new Agent({
-      connectTimeout: 20_000,
-      headersTimeout: 190_000,
-      bodyTimeout: 190_000,
-    });
+const SHARED_FETCH_DISPATCHER = SHARED_UNDICI_DISPATCHER;
 
 function createProxySafeFetch(abortSignal) {
   return async function customFetch(input, init) {
@@ -100,13 +103,16 @@ function createProxySafeFetch(abortSignal) {
       finalSignal = reqSignal ? AbortSignal.any([reqSignal, abortSignal]) : abortSignal;
     }
 
-    return fetch(url, {
+    const fetchOpts = {
       method,
       headers: headersObj,
       body,
       signal: finalSignal,
-      dispatcher: SHARED_FETCH_DISPATCHER,
-    });
+    };
+    if (SHARED_FETCH_DISPATCHER) {
+      fetchOpts.dispatcher = SHARED_FETCH_DISPATCHER;
+    }
+    return fetch(url, fetchOpts);
   };
 }
 
