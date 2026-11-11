@@ -168,8 +168,9 @@ def _spawn_bridge_sync() -> str:
     if not os.path.exists(_BRIDGE_SCRIPT):
         raise RuntimeError(f"Bridge script missing: {_BRIDGE_SCRIPT}")
 
+    linejs_vendor = os.path.join(_APP_DIR, "linejs_vendor.mjs")
     linejs_pkg = os.path.join(_APP_DIR, "node_modules", "@evex-dev", "linejs", "package.json")
-    if not os.path.exists(linejs_pkg):
+    if not os.path.exists(linejs_vendor) and not os.path.exists(linejs_pkg):
         npm_bin = shutil.which("npm") or "/usr/bin/npm"
         if os.path.exists(npm_bin):
             subprocess.run(
@@ -2233,6 +2234,15 @@ async function handleMediaUpload(ev) {
   reader.readAsDataURL(file);
 }
 
+function replyToMsgById(msgId) {
+  closeModal();
+  const st = currentChatMid && chatHistoryMap[currentChatMid];
+  const m = st && st.byId ? st.byId.get(String(msgId)) : null;
+  if (m) {
+    setReply(String(m.id), m.senderName || "", m.text || "");
+  }
+}
+
 function openMessageActionModal(m) {
   const box = document.getElementById("modalContent");
   box.innerHTML = `
@@ -2245,7 +2255,7 @@ function openMessageActionModal(m) {
       <button class="btn-ghost" onclick="reactMsg('${escapeHtml(m.id)}', 5)">😮 すごい</button>
     </div>
     <div style="display:flex;flex-direction:column;gap:8px;">
-      <button class="btn-primary" onclick="closeModal();setReply('${escapeHtml(m.id)}','${escapeHtml(m.senderName)}','${escapeHtml(m.text)}')">↩ このメッセージに返信</button>
+      <button class="btn-primary" onclick="replyToMsgById('${escapeHtml(m.id)}')">↩ このメッセージに返信</button>
       ${m.isMe ? `<button class="btn-ghost" style="color:#fca5a5;justify-content:center;" onclick="unsendMsg('${escapeHtml(m.id)}')">🗑️ 送信取消 (Unsend)</button>` : ""}
       <button class="btn-ghost" style="justify-content:center;" onclick="closeModal()">キャンセル</button>
     </div>
@@ -2511,6 +2521,17 @@ async function logoutLine() {
 </body>
 </html>
 """
+
+
+@router.on_event("startup")
+async def _prewarm_linejs_bridge() -> None:
+    async def _warm() -> None:
+        try:
+            await _ensure_bridge_url()
+        except Exception:
+            pass
+
+    asyncio.create_task(_warm())
 
 
 @router.get("/line", response_class=HTMLResponse)

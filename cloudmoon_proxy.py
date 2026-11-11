@@ -316,6 +316,8 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     window.__adshieldLoaded = true;
     window.__adshieldLoading = false;
     window.__rampLoaded = true;
+    window.dataLayer = window.dataLayer || [];
+    window.gtag = window.gtag || function() {};
     window.adsbygoogle = window.adsbygoogle || { loaded: true, push: function() {} };
     if (typeof window.adsbygoogle.push !== 'function') {
       window.adsbygoogle.push = function() {};
@@ -1527,6 +1529,8 @@ def _transform_html(html: str) -> str:
     html = re.sub(r'<script[^>]*src=["\'][^"\']*prebid[^"\']*["\'][^>]*>\s*</script>', "", html, flags=re.IGNORECASE)
     html = re.sub(r'<script[^>]*src=["\'][^"\']*cm-compat\.js[^"\']*["\'][^>]*>\s*</script>', "", html, flags=re.IGNORECASE)
     html = re.sub(r'<script[^>]*src=["\'][^"\']*ramp-helper\.js[^"\']*["\'][^>]*>\s*</script>', "", html, flags=re.IGNORECASE)
+    html = re.sub(r'<script[^>]*src=["\'][^"\']*googletagmanager\.com/gtag/js[^"\']*["\'][^>]*>\s*</script>', "", html, flags=re.IGNORECASE)
+    html = re.sub(r'<script[^>]*src=["\'][^"\']*cloudflareinsights\.com/beacon\.min\.js[^"\']*["\'][^>]*>\s*</script>', "", html, flags=re.IGNORECASE)
 
     # Ensure relative run-site assets resolve properly even if loaded via /run-site?sid=... without trailing slash
     html = html.replace('href="./main.css"', 'href="/run-site/main.css"')
@@ -1564,6 +1568,11 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
     js_text = js_text.replace(
         "function xe(){return new Promise",
         "function xe(){return Promise.resolve(!1);return new Promise",
+    )
+    js_text = re.sub(
+        r'function ([A-Za-z_$][\w$]*)\(\)\{return new Promise\((?=[A-Za-z_$][\w$]*=>\{[^}]{0,220}pub_300x250)',
+        r"function \1(){return Promise.resolve(!1);return new Promise(",
+        js_text,
     )
     # 2. Force ad_unblock: true in Pe() (/phone/connect request payload in DU-wofq6.js) while keeping screen_res:"720x1280"
     js_text = re.sub(r"\bad_unblock:![A-Za-z_$][\w$]*\b", "ad_unblock:!0", js_text)
@@ -1800,6 +1809,10 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         )
         if old_nn in js_text:
             js_text = js_text.replace(old_nn, new_nn)
+        js_text = js_text.replace(
+            "n(b).paused&&await n(b).play(),n(C).paused&&await n(C).play(),F=!1,v()(!1),!0",
+            "n(b).paused&&await n(b).play(),n(C).paused&&await Promise.race([n(C).play(),new Promise(_r=>setTimeout(_r,600))]).catch(()=>{try{n(C).muted=!0;n(C).play().catch(()=>{})}catch{}}),F=!1,v()(!1),!0",
+        )
     else:
         # Preserve Japanese UI locale when SvelteKit matches /cloudmoon/... as params.lang="cloudmoon"
         js_text = js_text.replace('i.includes(n)||(n="en")', 'i.includes(n)||(n="ja")')
@@ -1811,6 +1824,14 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'let r=z.lang||"en";',
             'let r=(z.lang==="cloudmoon"?"ja":z.lang)||"ja";',
         )
+        js_text = js_text.replace("; domain=.cloudmoonapp.com; Secure; SameSite=None", "; SameSite=Lax")
+        js_text = re.sub(
+            r'function ([A-Za-z_$][\w$]*)\(\)\{(?=const [A-Za-z_$][\w$]*=document\.documentElement;let [A-Za-z_$][\w$]*=0;const [A-Za-z_$][\w$]*=document\.querySelectorAll\("div, iframe"\))',
+            r"function \1(){return;",
+            js_text,
+        )
+        js_text = js_text.replace("r.observe(document.body,{childList:!0,subtree:!0,attributes:!0})", "void 0")
+        js_text = js_text.replace("https://securepubads.g.doubleclick.net/tag/js/gpt.js", "data:text/javascript,")
         # Disable background 34-category prefetch loop regardless of minified identifier names
         js_text = js_text.replace("async function je(){if(!J){", "async function je(){return;if(!J){")
         js_text = re.sub(
@@ -2211,14 +2232,27 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
     q = f"?{request.url.query}" if request.url.query else ""
     target_url = f"{API_ORIGIN}/{clean_path}{q}"
 
-    # Short TTL cache for public read-only game catalog endpoints
+    # Short TTL cache for public read-only game catalog endpoints (strip volatile query_uuid & device_id)
     is_cacheable_api = request.method == "GET" and (
-        clean_path.startswith(("web/MustPlay", "web/page_info", "web/tags", "web/topics", "web/tag_games", "web/topic_games"))
+        clean_path in (
+            "game/category",
+            "game/category_info",
+            "game/simple_list",
+            "game/guest_list",
+            "game/server_list",
+        )
+        or clean_path.startswith(("web/MustPlay", "web/page_info", "web/tags", "web/topics", "web/tag_games", "web/topic_games"))
     )
-    api_cache_key = f"{clean_path}{q}"
+    norm_qp = "&".join(
+        f"{k}={v}"
+        for k, v in sorted(request.query_params.multi_items())
+        if k not in ("query_uuid", "device_id")
+    )
+    lang_hdr = (req_headers.get("x-user-language") or req_headers.get("X-User-Language") or "ja").lower()
+    api_cache_key = f"{lang_hdr}:{clean_path}?{norm_qp}"
     if is_cacheable_api and api_cache_key in _API_CACHE:
         cached_ts, cached_bytes, cached_status = _API_CACHE[api_cache_key]
-        if time.time() - cached_ts < 180.0:
+        if time.time() - cached_ts < 300.0:
             return Response(
                 content=cached_bytes,
                 status_code=cached_status,
@@ -2227,7 +2261,7 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
                     "Access-Control-Allow-Origin": "*",
                     "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
                     "Access-Control-Allow-Headers": "*",
-                    "Cache-Control": "public, max-age=120",
+                    "Cache-Control": "public, max-age=180",
                 },
             )
 
@@ -2580,7 +2614,7 @@ async def cloudmoon_runsite_proxy(request: Request, path: str) -> Response:
             media_type=ct,
             headers={
                 "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache" if clean_path.endswith(".js") else "public, max-age=300",
+                "Cache-Control": "public, max-age=3600",
             },
         )
 
@@ -2625,9 +2659,9 @@ async def cloudmoon_runsite_proxy(request: Request, path: str) -> Response:
         headers={
             "Access-Control-Allow-Origin": "*",
             "Cache-Control": (
-                "no-cache"
-                if clean_path.endswith(".js")
-                else ("no-store" if "text/html" in ct else "public, max-age=86400")
+                "public, max-age=3600"
+                if is_immutable
+                else ("no-cache" if clean_path.endswith(".js") else ("no-store" if "text/html" in ct else "public, max-age=86400"))
             ),
         },
     )
@@ -2718,6 +2752,8 @@ async def cloudmoon_assets_proxy(request: Request, path: str) -> Response:
     if request.method == "OPTIONS":
         return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
 
+    clean_path = path.lstrip("/")
+    is_immutable = clean_path.startswith("immutable/")
     cache_key = f"_app/{path}"
     if request.method == "GET" and cache_key in _CACHE:
         content = _CACHE[cache_key]
@@ -2727,11 +2763,9 @@ async def cloudmoon_assets_proxy(request: Request, path: str) -> Response:
             media_type=ct,
             headers={
                 "Access-Control-Allow-Origin": "*",
-                "Cache-Control": "no-cache" if path.endswith(".js") else "public, max-age=300",
+                "Cache-Control": "public, max-age=3600" if is_immutable else ("no-cache" if path.endswith(".js") else "public, max-age=300"),
             },
         )
-
-    clean_path = path.lstrip("/")
     q = f"?{request.url.query}" if request.url.query else ""
     target_url = f"{TARGET_ORIGIN}/_app/{clean_path}{q}"
 
@@ -2761,7 +2795,7 @@ async def cloudmoon_assets_proxy(request: Request, path: str) -> Response:
         media_type=ct.split(";")[0],
         headers={
             "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache" if path.endswith(".js") else "public, max-age=300",
+            "Cache-Control": "public, max-age=3600" if is_immutable else ("no-cache" if path.endswith(".js") else "public, max-age=300"),
         },
     )
 
@@ -2781,3 +2815,51 @@ async def cloudmoon_proxy_relay(request: Request, url_path: str) -> Response:
         sep = "&" if "?" in target else "?"
         target = f"{target}{sep}{request.url.query}"
     return await _proxy_html_or_asset(target, request)
+
+
+async def _prewarm_cloudmoon_assets() -> None:
+    try:
+        client = _get_http_client()
+        ja_resp, rs_resp = await asyncio.gather(
+            client.get(f"{TARGET_ORIGIN}/ja/"),
+            client.get(f"{TARGET_ORIGIN}/run-site/"),
+            return_exceptions=True,
+        )
+        tasks = []
+        if not isinstance(ja_resp, Exception) and ja_resp.status_code == 200:
+            for m in re.finditer(r'/_app/(immutable/[^"\'\s<>]+\.(?:js|css))', ja_resp.text):
+                rel = m.group(1)
+                ck = f"_app/{rel}"
+                if ck not in _CACHE:
+                    async def _fetch_app(r=rel, k=ck):
+                        try:
+                            u = await client.get(f"{TARGET_ORIGIN}/_app/{r}")
+                            if u.status_code == 200:
+                                b = _transform_js(u.text, is_runsite=False).encode("utf-8") if r.endswith(".js") else u.content
+                                _CACHE[k] = b
+                        except Exception:
+                            pass
+                    tasks.append(_fetch_app())
+        if not isinstance(rs_resp, Exception) and rs_resp.status_code == 200:
+            for m in re.finditer(r'_app/(immutable/[^"\'\s<>]+\.(?:js|css))', rs_resp.text):
+                rel = m.group(1)
+                ck = f"run-site/_app/{rel}"
+                if ck not in _CACHE:
+                    async def _fetch_rs(r=rel, k=ck):
+                        try:
+                            u = await client.get(f"{TARGET_ORIGIN}/run-site/_app/{r}")
+                            if u.status_code == 200:
+                                b = _transform_js(u.text, is_runsite=True).encode("utf-8") if r.endswith(".js") else u.content
+                                _CACHE[k] = b
+                        except Exception:
+                            pass
+                    tasks.append(_fetch_rs())
+        if tasks:
+            await asyncio.gather(*tasks[:32], return_exceptions=True)
+    except Exception:
+        pass
+
+
+@router.on_event("startup")
+async def _cloudmoon_startup_prewarm() -> None:
+    asyncio.create_task(_prewarm_cloudmoon_assets())

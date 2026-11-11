@@ -14,7 +14,14 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
-import { BaseClient, MemoryStorage } from "./linejs_vendor.mjs";
+let BaseClient;
+let MemoryStorage;
+try {
+  ({ BaseClient } = await import("@evex-dev/linejs/base"));
+  ({ MemoryStorage } = await import("@evex-dev/linejs/storage"));
+} catch {
+  ({ BaseClient, MemoryStorage } = await import("./linejs_vendor.mjs"));
+}
 
 let SHARED_UNDICI_DISPATCHER = undefined;
 try {
@@ -1319,13 +1326,20 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
 
   if (beforeMessageId && /^\d+$/.test(String(beforeMessageId))) {
     // Pagination cursor (older messages)
+    let resolvedBeforeTime = Number(beforeTime) || 0;
+    if (!resolvedBeforeTime) {
+      const cachedMsg =
+        entry.messagesCacheByChat?.get(chatMid)?.find?.((x) => String(x?.id) === String(beforeMessageId)) ||
+        entry.opMessagesByChat?.get(chatMid)?.get?.(String(beforeMessageId));
+      resolvedBeforeTime = Number(cachedMsg?.deliveredTime || cachedMsg?.createdTime || 0) || Date.now();
+    }
     try {
       const prev = await entry.base.talk.getPreviousMessagesV2WithRequest({
         request: {
           messageBoxId: chatMid,
           endMessageId: {
             messageId: BigInt(beforeMessageId),
-            deliveredTime: BigInt(beforeTime || Date.now()),
+            deliveredTime: BigInt(resolvedBeforeTime),
           },
           messagesCount: count,
           withReadCount: true,
@@ -1358,21 +1372,33 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
 
     if (rawById.size < Math.min(count, 20)) {
       try {
-        let boxes = await entry.base.talk
-          .getMessageBoxes({
-            messageBoxListRequest: {
-              activeOnly: false,
-              messageBoxCountLimit: 200,
-              lastMessagesPerMessageBoxCount: 2,
-            },
-          })
-          .catch(() => null);
-        let box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid);
+        let box = null;
+        if (typeof entry.base.talk.getMessageBoxesByIds === "function") {
+          const byIds = await entry.base.talk
+            .getMessageBoxesByIds({
+              messageBoxIds: [chatMid],
+            })
+            .catch(() => null);
+          const byIdBoxes = Array.isArray(byIds) ? byIds : byIds?.messageBoxes || [];
+          box = byIdBoxes.find((b) => b?.id === chatMid) || byIdBoxes[0] || null;
+        }
         if (!box) {
-          boxes = await entry.base.talk
+          const boxes = await entry.base.talk
+            .getMessageBoxes({
+              messageBoxListRequest: {
+                activeOnly: false,
+                messageBoxCountLimit: 200,
+                lastMessagesPerMessageBoxCount: 2,
+              },
+            })
+            .catch(() => null);
+          box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid) || null;
+        }
+        if (!box) {
+          const boxes = await entry.base.talk
             .getMessageBoxes({ messageBoxListRequest: {} })
             .catch(() => null);
-          box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid);
+          box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid) || null;
         }
         if (box) {
           for (const lm of box.lastMessages || []) {
