@@ -211,6 +211,17 @@ _SERVICE_META = [
         },
     ),
     (
+        "tver",
+        {
+            "category": "Watch",
+            "icon": "TV",
+            "icon_key": "tv",
+            "description": "民放公式テレビ配信 (見逃し配信・リアルタイム配信)",
+            "keywords": "tver ティーバー テレビ ドラマ バラエティ アニメ ニュース 見逃し配信 リアルタイム配信 民放 公式 動画 watch tv",
+            "accent": "#00b2ff",
+        },
+    ),
+    (
         "line",
         {
             "category": "Watch",
@@ -251,6 +262,9 @@ def _match_meta(name: str, path: str = "") -> dict:
                 return meta
         elif key == "line":
             if nl == "line" or pl.startswith("/line"):
+                return meta
+        elif key == "tver":
+            if nl == "tver" or pl.startswith("/tver"):
                 return meta
         elif key in nl or key in pl:
             return meta

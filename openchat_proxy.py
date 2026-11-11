@@ -2898,6 +2898,8 @@ _PREFIXES = [
     "/kazwire/openchat",
     "/instagram/openchat",
     "/x/openchat",
+    "/tver/openchat",
+    "/line/openchat",
 ]
 async def openchat_ws_http_fallback(request: Request):
     return Response(status_code=204, headers=_CORS_HEADERS)
@@ -3168,6 +3170,8 @@ _CLIENT_JS = r"""
     if (p.startsWith('/twitch') || h.includes('twitch')) return 'Twitch(安定)';
     if (p.startsWith('/spotify') || h.includes('spotify')) return 'Spotify';
     if (p.startsWith('/instagram') || h.includes('instagram')) return 'Instagram';
+    if (p === '/tver' || p.startsWith('/tver/') || h.includes('tver.jp')) return 'TVer';
+    if (p === '/line' || p.startsWith('/line/')) return 'LINE';
     if (p === '/x' || p.startsWith('/x/') || p.startsWith('/twitter') || h.includes('twitter')) return 'X';
     if (p.startsWith('/florr') || h.includes('florr')) return 'Florr.io';
     if (

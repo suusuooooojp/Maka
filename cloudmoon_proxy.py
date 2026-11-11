@@ -2354,21 +2354,64 @@ async def cloudmoon_subpath_proxy(request: Request, path: str) -> Response:
     if request.method == "OPTIONS":
         return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
     clean_path = path.lstrip("/")
+    q = f"?{request.url.query}" if request.url.query else ""
     if clean_path in ("run-site", "run-site/"):
         pkg = request.query_params.get("pkg", "").strip()
         sid = request.query_params.get("sid", "").strip()
         if pkg:
-            return RedirectResponse(url=f"/cloudmoon/ja/game/{pkg}", status_code=302)
+            return RedirectResponse(url=f"/ja/game/{pkg}", status_code=302)
         if sid:
-            q = f"?{request.url.query}" if request.url.query else ""
             return RedirectResponse(url=f"/run-site/{q}", status_code=302)
         return RedirectResponse(url="/cloudmoon/", status_code=302)
-    if clean_path in ("", "ja", "ja/"):
+    if clean_path in ("ja", "ja/"):
+        return RedirectResponse(url=f"/ja/{q}", status_code=307)
+    if clean_path.startswith("ja/"):
+        return RedirectResponse(url=f"/{clean_path}{q}", status_code=307)
+    if clean_path == "":
         target_url = f"{TARGET_ORIGIN}/ja/"
+    elif clean_path.startswith(("game/", "list/", "h5/")):
+        target_url = f"{TARGET_ORIGIN}/ja/{clean_path}"
     else:
         target_url = f"{TARGET_ORIGIN}/{clean_path}"
-    q = f"?{request.url.query}" if request.url.query else ""
     return await _proxy_html_or_asset(f"{target_url}{q}", request)
+
+
+@router.api_route(
+    "/ja",
+    methods=["GET", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def cloudmoon_ja_no_slash(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
+    q = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/ja/{q}", status_code=307)
+
+
+@router.api_route(
+    "/ja/",
+    methods=["GET", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def cloudmoon_ja_root(request: Request) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
+    q = f"?{request.url.query}" if request.url.query else ""
+    return await _proxy_html_or_asset(f"{TARGET_ORIGIN}/ja/{q}", request)
+
+
+@router.api_route(
+    "/ja/{path:path}",
+    methods=["GET", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def cloudmoon_ja_proxy(request: Request, path: str) -> Response:
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
+    clean_path = path.lstrip("/")
+    q = f"?{request.url.query}" if request.url.query else ""
+    target_url = f"{TARGET_ORIGIN}/ja/{clean_path}{q}"
+    return await _proxy_html_or_asset(target_url, request)
 
 
 @router.api_route(

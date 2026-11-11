@@ -64,6 +64,8 @@ _CANONICAL_SERVICES = frozenset({
     "TikTok",
     "Twitch(安定)",
     "Spotify",
+    "TVer",
+    "LINE",
     "トランプ (大富豪・ポーカー)",
     "トランプ (大富豪・ババ抜き)",
 })
@@ -299,6 +301,10 @@ def _detect_service_from_path(path: str) -> str:
         return "X"
     if p.startswith("/instagram"):
         return "Instagram"
+    if p == "/tver" or p.startswith("/tver/"):
+        return "TVer"
+    if p == "/line" or p.startswith("/line/"):
+        return "LINE"
     if (
         p.startswith("/wakame")
         or p.startswith("/watch")
@@ -357,6 +363,10 @@ def _normalize_service_name(service: str, path: str = "") -> str:
         return "TikTok"
     if "spotify" in sl:
         return "Spotify"
+    if sl == "tver" or "tver" in sl or "ティーバー" in sl:
+        return "TVer"
+    if sl == "line" or "okline" in sl or "ライン" in sl:
+        return "LINE"
     if sl in ("florr.io", "florr") or "florr" in sl:
         return "Florr.io"
     if "youtube(beta)" in sl or "youtube-beta" in sl or ("youtube" in sl and "beta" in sl):

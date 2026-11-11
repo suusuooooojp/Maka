@@ -269,4 +269,6 @@ wisp_index = next(
 )
 if wisp_index is not None:
     app.router.routes.insert(wisp_index, WebSocketRoute("/wisp/", buffered_wisp_endpoint))
+    app.router.routes.insert(0, WebSocketRoute("/interstellar/wisp/", buffered_wisp_endpoint))
+    app.router.routes.insert(0, WebSocketRoute("/interstellar/wisp", buffered_wisp_endpoint))
     print("[Interstellar] Buffered Wisp priority route installed", flush=True)

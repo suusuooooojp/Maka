@@ -16,10 +16,12 @@ for _np_var in ("NO_PROXY", "no_proxy", "GLOBAL_AGENT_NO_PROXY"):
         )
 
 import asyncio
+import base64
 import importlib
 import ipaddress
 import re
 import socket
+import ssl
 import struct
 import urllib.parse
 from urllib.parse import urlparse
@@ -580,6 +582,7 @@ MEDIA_SERVICES = {
     "youtube": {"scope": "/youtube/", "prefix": "/youtube/~/sj/"},
     "instagram": {"scope": "/instagram/", "prefix": "/instagram/~/sj/"},
     "x": {"scope": "/x/", "prefix": "/x/~/sj/"},
+    "tver": {"scope": "/tver/", "prefix": "/tver/~/sj/"},
     # Florr uses the same isolated Scramjet service-worker path.  Without
     # this entry, /florr/sw.js is caught by this generic route and returns
     # 404 before florr_proxy.py can provide its launcher.
@@ -594,6 +597,14 @@ async def isolated_service_worker(service: str, request: Request):
     ig_mod = sys.modules.get("instagram_proxy")
     if ig_mod and hasattr(ig_mod, "_ig_sw_override"):
       return await ig_mod._ig_sw_override(request)
+  if service == "x":
+    x_mod = sys.modules.get("x_proxy")
+    if x_mod and hasattr(x_mod, "_x_sw_override"):
+      return await x_mod._x_sw_override(request)
+  if service == "tver":
+    tv_mod = sys.modules.get("tver_proxy")
+    if tv_mod and hasattr(tv_mod, "_tver_sw_override"):
+      return await tv_mod._tver_sw_override(request)
   cfg = MEDIA_SERVICES.get(service)
   if not cfg:
     return Response(status_code=404)
@@ -1120,8 +1131,144 @@ def wisp_extensions(payload: bytes):
   return extensions
 
 
+def _is_non_public_ip(ip_text: str) -> bool:
+  ip = ipaddress.ip_address(ip_text)
+  return bool(
+      ip.is_private
+      or ip.is_loopback
+      or ip.is_link_local
+      or ip.is_reserved
+      or ip.is_multicast
+      or ip.is_unspecified
+  )
+
+
+def _select_tcp_proxy_url(hostname: str, port: int) -> str:
+  no_proxy_raw = os.getenv("NO_PROXY") or os.getenv("no_proxy") or ""
+  if no_proxy_raw:
+    for entry in no_proxy_raw.split(","):
+      pat = entry.strip().lower().rstrip(".")
+      if not pat:
+        continue
+      if pat == "*":
+        return ""
+      if ":" in pat and not pat.startswith("["):
+        pat = pat.rsplit(":", 1)[0]
+      pat_clean = pat.lstrip(".")
+      if hostname == pat_clean or hostname.endswith("." + pat_clean):
+        return ""
+  if port == 80:
+    candidates = ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy")
+  else:
+    candidates = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy")
+  for key in candidates:
+    val = (os.getenv(key) or "").strip()
+    if val:
+      return val
+  return ""
+
+
+async def _open_http_connect_tunnel(proxy_url: str, hostname: str, port: int):
+  parsed = urllib.parse.urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
+  scheme = (parsed.scheme or "http").lower()
+  proxy_host = parsed.hostname
+  if not proxy_host:
+    raise OSError("invalid proxy URL")
+  proxy_port = parsed.port or (443 if scheme == "https" else 8080)
+  ssl_ctx = ssl.create_default_context() if scheme == "https" else None
+
+  reader, writer = await asyncio.wait_for(
+      asyncio.open_connection(proxy_host, proxy_port, ssl=ssl_ctx),
+      WISP_CONNECT_TIMEOUT,
+  )
+  try:
+    try:
+      sock = writer.get_extra_info("socket")
+      if sock is not None:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    except Exception:
+      pass
+
+    target_host = f"[{hostname}]" if (":" in hostname and not hostname.startswith("[")) else hostname
+    authority = f"{target_host}:{port}"
+    lines = [
+        f"CONNECT {authority} HTTP/1.1",
+        f"Host: {authority}",
+        "Proxy-Connection: keep-alive",
+    ]
+    if parsed.username is not None:
+      user = urllib.parse.unquote(parsed.username)
+      pwd = urllib.parse.unquote(parsed.password or "")
+      token = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
+      lines.append(f"Proxy-Authorization: Basic {token}")
+    req_bytes = ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1")
+    writer.write(req_bytes)
+    await asyncio.wait_for(writer.drain(), WISP_CONNECT_TIMEOUT)
+
+    async def _read_connect_response():
+      status_line = await reader.readline()
+      if not status_line:
+        raise OSError("proxy closed connection before CONNECT response")
+      parts = status_line.decode("latin-1", "replace").strip().split(" ", 2)
+      if len(parts) < 2 or not parts[1].isdigit():
+        raise OSError(f"invalid CONNECT status line: {status_line!r}")
+      code = int(parts[1])
+      for _ in range(64):
+        hdr_line = await reader.readline()
+        if hdr_line in (b"\r\n", b"\n", b""):
+          break
+      if code != 200:
+        reason = parts[2] if len(parts) > 2 else ""
+        raise OSError(f"HTTP CONNECT rejected ({code} {reason})".strip())
+
+    await asyncio.wait_for(_read_connect_response(), WISP_CONNECT_TIMEOUT)
+    return reader, writer
+  except Exception:
+    try:
+      writer.close()
+      await writer.wait_closed()
+    except Exception:
+      pass
+    raise
+
+
 async def public_tcp(hostname: str, port: int):
+  hostname = (hostname or "").strip().strip("[]").rstrip(".").lower()
+  if not hostname or not (1 <= int(port) <= 65535):
+    raise OSError("invalid destination")
+  if (
+      hostname in ("localhost", "metadata.google.internal", "metadata")
+      or hostname.endswith((".localhost", ".local", ".internal"))
+  ):
+    raise OSError("non-public destination blocked")
+  try:
+    if _is_non_public_ip(hostname):
+      raise OSError("non-public IP destination blocked")
+  except ValueError:
+    pass
+
   loop = asyncio.get_running_loop()
+  proxy_url = _select_tcp_proxy_url(hostname, port)
+  if proxy_url:
+    try:
+      infos = await loop.run_in_executor(
+          None, lambda: socket.getaddrinfo(hostname, port, 0, socket.SOCK_STREAM)
+      )
+    except Exception:
+      infos = []
+    if infos:
+      has_public = False
+      for _, _, _, _, sockaddr in infos:
+        try:
+          if not _is_non_public_ip(sockaddr[0]):
+            has_public = True
+            break
+        except ValueError:
+          continue
+      if not has_public:
+        raise OSError("no public destination")
+    return await _open_http_connect_tunnel(proxy_url, hostname, port)
+
   infos = await loop.run_in_executor(
       None, lambda: socket.getaddrinfo(hostname, port, 0, socket.SOCK_STREAM)
   )
@@ -1135,14 +1282,7 @@ async def public_tcp(hostname: str, port: int):
       continue
     seen.add(key)
     try:
-      ip = ipaddress.ip_address(ip_text)
-      if (
-          ip.is_private
-          or ip.is_loopback
-          or ip.is_link_local
-          or ip.is_reserved
-          or ip.is_multicast
-      ):
+      if _is_non_public_ip(ip_text):
         continue
     except ValueError:
       continue

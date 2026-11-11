@@ -103,6 +103,14 @@ def _save_persisted_sessions() -> None:
         pass
 
 
+def _sync_my_mid(api: OkLine, mid: Optional[str]) -> str:
+    clean_mid = str(mid or getattr(api.transport.tokens, "mid", "") or getattr(api.e2ee, "my_mid", "") or "").strip()
+    if clean_mid:
+        api.transport.tokens.mid = clean_mid
+        api.e2ee.my_mid = clean_mid
+    return clean_mid
+
+
 def _build_okline_from_session_data(session_data: Dict[str, Any]) -> OkLine:
     access_token = str(session_data.get("accessToken") or "").strip()
     if not access_token:
@@ -113,8 +121,6 @@ def _build_okline_from_session_data(session_data: Dict[str, Any]) -> OkLine:
         refresh_token=str(refresh_token).strip() if refresh_token else None,
         auto_refresh_schedule=True,
     )
-    if session_data.get("mid"):
-        api.transport.tokens.mid = str(session_data["mid"])
     if session_data.get("certificate"):
         api.transport.tokens.certificate = str(session_data["certificate"])
     e2ee_data = session_data.get("e2ee")
@@ -123,6 +129,7 @@ def _build_okline_from_session_data(session_data: Dict[str, Any]) -> OkLine:
             api.e2ee.load_from_export(e2ee_data)
         except Exception:
             pass
+    _sync_my_mid(api, session_data.get("mid") or (e2ee_data.get("mid") if isinstance(e2ee_data, dict) else None))
     return api
 
 
@@ -135,11 +142,14 @@ def _export_session_data(api: OkLine, fallback: Optional[Dict[str, Any]] = None)
         base["refreshToken"] = tokens.refresh_token
     if tokens.certificate:
         base["certificate"] = tokens.certificate
-    if tokens.mid:
-        base["mid"] = tokens.mid
+    mid = _sync_my_mid(api, base.get("mid"))
+    if mid:
+        base["mid"] = mid
     if api.e2ee.is_ready():
         try:
-            base["e2ee"] = api.e2ee.export_keys()
+            exported = api.e2ee.export_keys()
+            if exported and exported.get("keys"):
+                base["e2ee"] = exported
         except Exception:
             pass
     base["exportedAt"] = int(time.time())
@@ -153,8 +163,19 @@ def _get_or_restore_session(
     with _LOCK:
         if session_id and session_id in _SESSIONS:
             entry = _SESSIONS[session_id]
+            api = entry["api"]
+            prof_mid = (entry.get("profile") or {}).get("mid")
+            _sync_my_mid(api, prof_mid or (session_data or {}).get("mid"))
+            if not api.e2ee.is_ready() and isinstance(session_data, dict):
+                e2ee_in = session_data.get("e2ee")
+                if isinstance(e2ee_in, dict) and e2ee_in.get("keys"):
+                    try:
+                        api.e2ee.load_from_export(e2ee_in)
+                        _sync_my_mid(api, prof_mid or e2ee_in.get("mid"))
+                    except Exception:
+                        pass
             entry["updatedAt"] = time.time()
-            entry["sessionData"] = _export_session_data(entry["api"], entry.get("sessionData"))
+            entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
             return session_id, entry
 
         if isinstance(session_data, dict) and session_data.get("accessToken"):
@@ -211,50 +232,205 @@ def _generate_qr_svg(data: str) -> str:
         )
 
 
-def _serialize_profile(p: Any) -> Dict[str, Any]:
+def _serialize_profile(p: Any, fallback_mid: str = "") -> Dict[str, Any]:
     if not p:
         return {}
     if isinstance(p, dict):
+        if isinstance(p.get("contact"), dict):
+            p = p["contact"]
+        mid = str(p.get("mid") or p.get("userMid") or fallback_mid or "")
+        display_name = str(
+            p.get("displayNameOverridden")
+            or p.get("displayName")
+            or p.get("name")
+            or (f"LINE User ({mid[:6]})" if mid else "LINE User")
+        )
         return {
-            "mid": str(p.get("mid") or ""),
-            "displayName": str(p.get("displayName") or p.get("name") or "LINE User"),
+            "mid": mid,
+            "displayName": display_name,
             "statusMessage": str(p.get("statusMessage") or ""),
             "picturePath": str(p.get("picturePath") or p.get("pictureStatus") or ""),
             "userid": str(p.get("userid") or ""),
         }
     raw = getattr(p, "raw", {}) or {}
+    mid = str(getattr(p, "mid", "") or raw.get("mid") or fallback_mid or "")
     return {
-        "mid": str(getattr(p, "mid", "") or raw.get("mid") or ""),
-        "displayName": str(getattr(p, "display_name", "") or raw.get("displayName") or "LINE User"),
+        "mid": mid,
+        "displayName": str(
+            getattr(p, "display_name", "")
+            or raw.get("displayNameOverridden")
+            or raw.get("displayName")
+            or "LINE User"
+        ),
         "statusMessage": str(getattr(p, "status_message", "") or raw.get("statusMessage") or ""),
         "picturePath": str(getattr(p, "picture_path", "") or raw.get("picturePath") or raw.get("pictureStatus") or ""),
         "userid": str(raw.get("userid") or ""),
     }
 
 
+def _extract_contacts_list(res: Any) -> List[Dict[str, Any]]:
+    """Normalize OkLine get_contacts / getContactsV2 response into serialized contact dicts."""
+    out: List[Dict[str, Any]] = []
+    if not res:
+        return out
+    if isinstance(res, dict):
+        cmap = res.get("contacts")
+        if isinstance(cmap, dict):
+            for mid_k, wrapper in cmap.items():
+                info = _serialize_profile(wrapper, fallback_mid=str(mid_k))
+                if info.get("mid"):
+                    out.append(info)
+            return out
+        if isinstance(cmap, list):
+            for item in cmap:
+                info = _serialize_profile(item)
+                if info.get("mid"):
+                    out.append(info)
+            return out
+        info = _serialize_profile(res)
+        if info.get("mid"):
+            out.append(info)
+        return out
+    if isinstance(res, list):
+        for item in res:
+            info = _serialize_profile(item)
+            if info.get("mid"):
+                out.append(info)
+    return out
+
+
+def _extract_chats_list(res: Any, invited_set: Optional[set] = None) -> List[Dict[str, Any]]:
+    """Normalize OkLine get_chats / getChats response into group/chat info dicts."""
+    out: List[Dict[str, Any]] = []
+    inv = invited_set or set()
+    raw_list: List[Any] = []
+    if isinstance(res, dict):
+        if isinstance(res.get("chats"), list):
+            raw_list = res["chats"]
+        elif isinstance(res.get("chat"), dict):
+            raw_list = [res["chat"]]
+        elif res.get("chatMid"):
+            raw_list = [res]
+    elif isinstance(res, list):
+        raw_list = res
+    elif res is not None:
+        raw_list = [res]
+
+    for g in raw_list:
+        if isinstance(g, dict):
+            raw_g = g
+            g_mid = str(raw_g.get("chatMid") or raw_g.get("mid") or "")
+            chat_name = str(raw_g.get("chatName") or raw_g.get("name") or "")
+        else:
+            raw_g = getattr(g, "raw", {}) if isinstance(getattr(g, "raw", None), dict) else {}
+            g_mid = str(getattr(g, "chat_mid", "") or raw_g.get("chatMid") or "")
+            chat_name = str(getattr(g, "chat_name", "") or raw_g.get("chatName") or "")
+        if not g_mid:
+            continue
+        extra = raw_g.get("extra") or {}
+        peer_extra = (extra.get("groupExtra") if isinstance(extra, dict) else None) or {}
+        member_map = peer_extra.get("memberMids") if isinstance(peer_extra, dict) else None
+        invitee_map = peer_extra.get("inviteeMids") if isinstance(peer_extra, dict) else None
+        if isinstance(member_map, dict):
+            member_mids = list(member_map.keys())
+        elif isinstance(member_map, list):
+            member_mids = [str(x) for x in member_map]
+        elif isinstance(raw_g.get("contacts"), list):
+            member_mids = [str(c.get("mid")) for c in raw_g["contacts"] if isinstance(c, dict) and c.get("mid")]
+        else:
+            member_mids = list(getattr(g, "member_mids", None) or [])
+        invitee_mids = list(invitee_map.keys()) if isinstance(invitee_map, dict) else []
+        if not chat_name:
+            chat_name = f"グループ ({len(member_mids)})" if member_mids else "グループ"
+        out.append(
+            {
+                "chatMid": g_mid,
+                "chatName": chat_name,
+                "picturePath": str(raw_g.get("picturePath") or raw_g.get("pictureStatus") or ""),
+                "memberCount": len(member_mids),
+                "memberMids": member_mids,
+                "inviteeMids": invitee_mids,
+                "isInvited": g_mid in inv,
+            }
+        )
+    return out
+
+
+def _coerce_message_dict(msg: Any) -> Dict[str, Any]:
+    if isinstance(msg, dict):
+        out = dict(msg)
+    else:
+        raw = getattr(msg, "raw", None)
+        if isinstance(raw, dict) and raw:
+            out = dict(raw)
+        else:
+            out = {}
+        if getattr(msg, "id", None) is not None:
+            out.setdefault("id", getattr(msg, "id"))
+        if getattr(msg, "from_mid", None) is not None:
+            out.setdefault("from", getattr(msg, "from_mid"))
+        if getattr(msg, "to", None) is not None:
+            out.setdefault("to", getattr(msg, "to"))
+        if getattr(msg, "text", None) is not None:
+            out.setdefault("text", getattr(msg, "text"))
+        if getattr(msg, "content_type", None) is not None:
+            out.setdefault("contentType", getattr(msg, "content_type"))
+        if getattr(msg, "content_metadata", None) is not None:
+            out.setdefault("contentMetadata", dict(getattr(msg, "content_metadata") or {}))
+        if getattr(msg, "chunks", None) is not None:
+            out.setdefault("chunks", list(getattr(msg, "chunks") or []))
+        if getattr(msg, "created_time", None) is not None:
+            out.setdefault("createdTime", getattr(msg, "created_time"))
+    if not out.get("from"):
+        alt_from = out.get("_from") or out.get("fromMid")
+        if alt_from:
+            out["from"] = alt_from
+    if not out.get("to"):
+        alt_to = out.get("toMid")
+        if alt_to:
+            out["to"] = alt_to
+    return out
+
+
 def _decrypt_and_serialize_message(
     api: OkLine,
-    msg: Message,
+    msg: Any,
     sender_map: Optional[Dict[str, Dict[str, Any]]] = None,
     my_mid: str = "",
 ) -> Dict[str, Any]:
-    m = msg
-    was_encrypted = bool(m.chunks) or bool((m.content_metadata or {}).get("e2eeVersion"))
+    my_mid = _sync_my_mid(api, my_mid)
+    m = _coerce_message_dict(msg)
+    orig_chunks = m.get("chunks") or []
+    orig_meta = m.get("contentMetadata") or {}
+    was_encrypted = bool(orig_chunks) or bool(orig_meta.get("e2eeVersion"))
     decrypted_ok = False
-    try:
-        if was_encrypted and api.e2ee.is_ready():
-            m = api.decrypt_message(m)
-            if m.text is not None or (m.content_metadata and "keyMaterial" in m.content_metadata):
-                decrypted_ok = True
-    except Exception:
-        pass
+    decrypt_err = ""
+    if was_encrypted and api.e2ee.is_ready():
+        try:
+            dm = api.decrypt_message(m)
+            if isinstance(dm, dict):
+                m = dm
+                d_meta = m.get("contentMetadata") or {}
+                if (
+                    m.get("_decrypted")
+                    or m.get("text") is not None
+                    or "ENC_KM" in d_meta
+                    or "keyMaterial" in d_meta
+                    or m.get("location") is not None
+                ):
+                    decrypted_ok = True
+        except Exception as exc:
+            decrypt_err = str(exc)
 
-    meta = dict(m.content_metadata or {})
-    ct = int(m.content_type or 0)
-    sender_mid = str(m.from_mid or "")
+    meta = dict(m.get("contentMetadata") or {})
+    ct = int(m.get("contentType") or 0)
+    sender_mid = str(m.get("from") or m.get("_from") or m.get("fromMid") or "")
+    to_mid = str(m.get("to") or m.get("toMid") or "")
+    if not sender_mid and my_mid and not to_mid.startswith(("c", "r")):
+        # Sent message payload returned by sendMessage often omits `from`
+        sender_mid = my_mid
     sender_info = (sender_map or {}).get(sender_mid) or {}
 
-    # Content type labels & sticker info
     sticker_url = None
     sticker_anim_url = None
     if ct == 7:  # STICKER
@@ -263,7 +439,7 @@ def _decrypt_and_serialize_message(
             sticker_url = f"https://stickershop.line-scdn.net/stickershop/v1/sticker/{stk_id}/iPhone/sticker@2x.png"
             sticker_anim_url = f"https://stickershop.line-scdn.net/stickershop/v1/sticker/{stk_id}/iPhone/sticker_animation@2x.png"
 
-    text = m.text
+    text = m.get("text")
     if text is None:
         if ct == 7:
             text = meta.get("STKTXT") or "[スタンプ]"
@@ -276,18 +452,28 @@ def _decrypt_and_serialize_message(
         elif ct == 14:
             text = f"[ファイル] {meta.get('FILE_NAME', '')}".strip()
         elif ct == 15:
-            text = "[位置情報]"
+            loc = m.get("location") if isinstance(m.get("location"), dict) else {}
+            loc_title = loc.get("title") or loc.get("address") or ""
+            text = f"[位置情報] {loc_title}".strip()
         elif ct == 6:
             text = "[通話]"
-        elif ct == 18:
-            text = "[ノート/アルバム]"
+        elif ct == 13:
+            text = f"[連絡先] {meta.get('displayName', '')}".strip()
+        elif ct in (16, 17, 18):
+            loc_key = meta.get("LOC_KEY") or ""
+            if loc_key:
+                text = "[グループ通知]"
+            else:
+                text = "[ノート/アルバム]"
         elif was_encrypted and not decrypted_ok:
-            text = "🔒 [Letter Sealing 暗号化メッセージ]"
+            if not api.e2ee.is_ready():
+                text = "🔒 [暗号化メッセージ — QRコードで再ログインすると復号できます]"
+            else:
+                text = "🔒 [Letter Sealing 暗号化メッセージ]"
         else:
             text = ""
 
-    raw_msg = m.raw if isinstance(m.raw, dict) else {}
-    reactions_raw = raw_msg.get("reactions") or []
+    reactions_raw = m.get("reactions") or []
     reactions = []
     if isinstance(reactions_raw, list):
         for r in reactions_raw:
@@ -303,26 +489,33 @@ def _decrypt_and_serialize_message(
                     }
                 )
 
-    created_ms = int(m.created_time or 0)
+    raw_created = int(m.get("createdTime") or 0)
+    raw_delivered = int(m.get("deliveredTime") or 0)
+    created_ms = raw_created or raw_delivered
     if created_ms and created_ms < 10_000_000_000:
         created_ms *= 1000
+    delivered_ms = raw_delivered or created_ms
+    if delivered_ms and delivered_ms < 10_000_000_000:
+        delivered_ms *= 1000
 
     return {
-        "id": str(m.id or ""),
+        "id": str(m.get("id") or ""),
         "fromMid": sender_mid,
-        "toMid": str(m.to or ""),
+        "toMid": to_mid,
         "isMe": bool(my_mid and sender_mid == my_mid),
-        "senderName": sender_info.get("displayName") or ("自分" if (my_mid and sender_mid == my_mid) else sender_mid[:8]),
+        "senderName": sender_info.get("displayName") or ("自分" if (my_mid and sender_mid == my_mid) else (sender_mid[:8] or "LINE")),
         "senderPicture": sender_info.get("picturePath") or "",
         "text": str(text or ""),
         "contentType": ct,
         "createdTime": created_ms,
+        "deliveredTime": delivered_ms,
         "contentMetadata": meta,
         "wasEncrypted": was_encrypted,
         "decryptedOk": decrypted_ok,
+        "decryptError": decrypt_err if (was_encrypted and not decrypted_ok and decrypt_err) else "",
         "stickerUrl": sticker_url,
         "stickerAnimUrl": sticker_anim_url,
-        "relatedMessageId": str(raw_msg.get("relatedMessageId") or raw_msg.get("21") or ""),
+        "relatedMessageId": str(m.get("relatedMessageId") or m.get("21") or ""),
         "reactions": reactions,
         "hasMedia": ct in (1, 2, 3, 14),
     }
@@ -420,7 +613,8 @@ def _qr_login_worker(login_id: str) -> None:
 
         # Phase 3: Finalize qrLoginV2 & unwrap E2EE keychain
         res = api.auth.qr_login_v2(auth_session_id, system_name="CHROMEOS")
-        meta = (res.raw or {}).get("metaData") if isinstance(res.raw, dict) else None
+        raw_res = res.raw if isinstance(getattr(res, "raw", None), dict) else (res if isinstance(res, dict) else {})
+        meta = raw_res.get("metaData") or raw_res.get("metadata")
         if isinstance(meta, dict) and meta.get("publicKey") and meta.get("encryptedKeyChain"):
             try:
                 api.e2ee.load_from_login(curve_key_id, meta)
@@ -433,8 +627,7 @@ def _qr_login_worker(login_id: str) -> None:
         except Exception:
             pass
         profile_dict = _serialize_profile(profile_obj)
-        if profile_dict.get("mid") and not api.transport.tokens.mid:
-            api.transport.tokens.mid = profile_dict["mid"]
+        _sync_my_mid(api, profile_dict.get("mid") or getattr(res, "mid", None))
 
         sid = f"ln_{uuid.uuid4().hex[:16]}"
         sdata = _export_session_data(api)
@@ -476,21 +669,36 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
                 _EMAIL_LOGINS[login_id]["pinCode"] = str(pin)
 
     try:
-        api.auth.email_login_ladder(
+        if certificate:
+            api.transport.tokens.certificate = certificate
+            api.auth.email_certificates[email] = certificate
+        res = api.auth.email_login_ladder(
             email=email,
             password=password,
-            certificate=certificate,
             confirm_device=True,
             on_pin=_on_pin,
         )
+        email_e2ee = getattr(api.auth, "last_email_e2ee", None) or {}
+        key_handles = email_e2ee.get("key_handles")
+        if isinstance(key_handles, list) and key_handles:
+            api.e2ee.my_keys.clear()
+            api.e2ee._export_blobs.clear()
+            for h in key_handles:
+                try:
+                    kid = int(api.transport.bridge.e2ee_get_key_id(h))
+                    api.e2ee.my_keys[kid] = int(h)
+                except Exception:
+                    continue
+            if api.e2ee.my_keys:
+                api.e2ee.latest_key_id = max(api.e2ee.my_keys)
+
         profile_obj = None
         try:
             profile_obj = api.get_profile()
         except Exception:
             pass
         profile_dict = _serialize_profile(profile_obj)
-        if profile_dict.get("mid") and not api.transport.tokens.mid:
-            api.transport.tokens.mid = profile_dict["mid"]
+        _sync_my_mid(api, profile_dict.get("mid") or getattr(res, "mid", None))
 
         sid = f"ln_{uuid.uuid4().hex[:16]}"
         sdata = _export_session_data(api)
@@ -744,8 +952,7 @@ async def line_auth_restore(request: Request) -> JSONResponse:
         api: OkLine = entry["api"]
         profile_obj = api.get_profile()
         profile_dict = _serialize_profile(profile_obj)
-        if profile_dict.get("mid") and not api.transport.tokens.mid:
-            api.transport.tokens.mid = profile_dict["mid"]
+        _sync_my_mid(api, profile_dict.get("mid"))
         entry["profile"] = profile_dict
         entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
         _save_persisted_sessions()
@@ -756,7 +963,7 @@ async def line_auth_restore(request: Request) -> JSONResponse:
                 "sessionData": entry["sessionData"],
                 "profile": profile_dict,
                 "e2eeReady": api.e2ee.is_ready(),
-                "e2eeKeyCount": len(api.e2ee._keys) if hasattr(api.e2ee, "_keys") else 0,
+                "e2eeKeyCount": len(api.e2ee.my_keys),
             }
         )
     except Exception as exc:
@@ -803,25 +1010,25 @@ async def line_overview(request: Request) -> JSONResponse:
         profile_dict = entry.get("profile") or {}
         if not profile_dict.get("mid"):
             profile_dict = _serialize_profile(api.get_profile())
-            if profile_dict.get("mid") and not api.transport.tokens.mid:
-                api.transport.tokens.mid = profile_dict["mid"]
             entry["profile"] = profile_dict
-        my_mid = str(profile_dict.get("mid") or api.transport.tokens.mid or "")
+        my_mid = _sync_my_mid(api, profile_dict.get("mid"))
 
         # 2. Contacts
         contacts_map: Dict[str, Dict[str, Any]] = {}
         contacts_list: List[Dict[str, Any]] = []
         try:
             contact_ids = api.get_all_contact_ids() or []
+            if isinstance(contact_ids, dict):
+                contact_ids = list(contact_ids.get("contactIds") or contact_ids.get("mids") or [])
             if contact_ids:
-                # Batch up to 200 contacts at a time
-                for i in range(0, min(len(contact_ids), 400), 200):
-                    batch = contact_ids[i : i + 200]
-                    c_objs = api.get_contacts(batch) or []
-                    for c in c_objs:
-                        c_info = _serialize_profile(c)
-                        if c_info.get("mid"):
-                            contacts_map[c_info["mid"]] = c_info
+                for i in range(0, min(len(contact_ids), 600), 200):
+                    batch = [str(x) for x in contact_ids[i : i + 200] if x]
+                    if not batch:
+                        continue
+                    for c_info in _extract_contacts_list(api.get_contacts(batch)):
+                        cmid = c_info.get("mid")
+                        if cmid and cmid not in contacts_map:
+                            contacts_map[cmid] = c_info
                             contacts_list.append(c_info)
         except Exception:
             pass
@@ -832,92 +1039,103 @@ async def line_overview(request: Request) -> JSONResponse:
         invited_groups_list: List[Dict[str, Any]] = []
         try:
             all_chat_mids = api.get_all_chat_mids() or {}
-            member_mids = list(all_chat_mids.get("memberChatMids") or [])
-            invited_mids = list(all_chat_mids.get("invitedChatMids") or [])
+            if not isinstance(all_chat_mids, dict):
+                all_chat_mids = getattr(all_chat_mids, "raw", {}) or {}
+            member_mids = [str(x) for x in (all_chat_mids.get("memberChatMids") or []) if x]
+            invited_mids = [str(x) for x in (all_chat_mids.get("invitedChatMids") or []) if x]
+            invited_set = set(invited_mids)
             combined_mids = list(dict.fromkeys(member_mids + invited_mids))
             if combined_mids:
-                for i in range(0, min(len(combined_mids), 200), 100):
+                for i in range(0, min(len(combined_mids), 300), 100):
                     batch = combined_mids[i : i + 100]
-                    chat_objs = api.get_chats(batch, with_members=True, with_invitees=True) or []
-                    for g in chat_objs:
-                        raw_g = g.raw if isinstance(g.raw, dict) else {}
-                        g_mid = str(g.chat_mid or raw_g.get("chatMid") or "")
-                        if not g_mid:
-                            continue
-                        extra = raw_g.get("extra") or {}
-                        peer_extra = (extra.get("groupExtra") if isinstance(extra, dict) else None) or {}
-                        member_map = peer_extra.get("memberMids") if isinstance(peer_extra, dict) else {}
-                        invitee_map = peer_extra.get("inviteeMids") if isinstance(peer_extra, dict) else {}
-                        g_info = {
-                            "chatMid": g_mid,
-                            "chatName": str(g.chat_name or raw_g.get("chatName") or "グループ"),
-                            "picturePath": str(raw_g.get("picturePath") or ""),
-                            "memberCount": len(member_map) if isinstance(member_map, dict) else len(g.member_mids or []),
-                            "memberMids": list(member_map.keys()) if isinstance(member_map, dict) else list(g.member_mids or []),
-                            "inviteeMids": list(invitee_map.keys()) if isinstance(invitee_map, dict) else [],
-                            "isInvited": g_mid in invited_mids,
-                        }
+                    for g_info in _extract_chats_list(
+                        api.get_chats(batch, with_members=True, with_invitees=True),
+                        invited_set=invited_set,
+                    ):
+                        g_mid = g_info["chatMid"]
                         groups_map[g_mid] = g_info
-                        if g_mid in invited_mids:
+                        if g_info["isInvited"]:
                             invited_groups_list.append(g_info)
                         else:
                             groups_list.append(g_info)
         except Exception:
             pass
 
-        # 4. Talk / Message Boxes
+        # 4. Talk / Message Boxes (merge active + inactive so all talk rooms appear)
         chats_list: List[Dict[str, Any]] = []
         missing_user_mids: List[str] = []
         missing_group_mids: List[str] = []
-        raw_boxes: List[Dict[str, Any]] = []
-        try:
-            mb_res = api.get_message_boxes(limit=100, last_messages_per_box=1)
-            raw_boxes = (mb_res.raw or {}).get("messageBoxes") or []
-        except Exception:
-            raw_boxes = []
+        missing_room_mids: List[str] = []
+        boxes_by_id: Dict[str, Dict[str, Any]] = {}
+
+        for active_flag in (False, True):
+            try:
+                mb_res = api.get_message_boxes(
+                    limit=100,
+                    active_only=active_flag,
+                    last_messages_per_box=3,
+                    unread_only=False,
+                )
+                mb_dict = (
+                    mb_res
+                    if isinstance(mb_res, dict)
+                    else (getattr(mb_res, "raw", None) if isinstance(getattr(mb_res, "raw", None), dict) else {})
+                )
+                box_items = mb_dict.get("messageBoxes") if isinstance(mb_dict, dict) else (mb_res if isinstance(mb_res, list) else [])
+                for b in box_items or []:
+                    if isinstance(b, dict) and b.get("id"):
+                        bid = str(b["id"])
+                        prev = boxes_by_id.get(bid)
+                        if not prev or (b.get("lastMessages") and not prev.get("lastMessages")):
+                            boxes_by_id[bid] = b
+            except Exception:
+                continue
+
+        raw_boxes: List[Dict[str, Any]] = list(boxes_by_id.values())
 
         for box in raw_boxes:
-            if not isinstance(box, dict):
-                continue
             mid = str(box.get("id") or "")
             if not mid:
                 continue
             if mid.startswith("u") and mid not in contacts_map and mid != my_mid:
                 missing_user_mids.append(mid)
-            elif mid.startswith(("c", "r")) and mid not in groups_map:
+            elif mid.startswith("c") and mid not in groups_map:
                 missing_group_mids.append(mid)
+            elif mid.startswith("r") and mid not in groups_map:
+                missing_room_mids.append(mid)
 
         if missing_user_mids:
             try:
-                for c in api.get_contacts(missing_user_mids[:100]) or []:
-                    c_info = _serialize_profile(c)
-                    if c_info.get("mid"):
-                        contacts_map[c_info["mid"]] = c_info
+                unique_u = list(dict.fromkeys(missing_user_mids))
+                for i in range(0, min(len(unique_u), 200), 100):
+                    for c_info in _extract_contacts_list(api.get_contacts(unique_u[i : i + 100])):
+                        if c_info.get("mid"):
+                            contacts_map[c_info["mid"]] = c_info
             except Exception:
                 pass
 
         if missing_group_mids:
             try:
-                for g in api.get_chats(missing_group_mids[:50], with_members=True) or []:
-                    raw_g = g.raw if isinstance(g.raw, dict) else {}
-                    g_mid = str(g.chat_mid or raw_g.get("chatMid") or "")
-                    if g_mid:
-                        groups_map[g_mid] = {
-                            "chatMid": g_mid,
-                            "chatName": str(g.chat_name or raw_g.get("chatName") or "グループ"),
-                            "picturePath": str(raw_g.get("picturePath") or ""),
-                            "memberCount": len(g.member_mids or []),
-                            "memberMids": list(g.member_mids or []),
-                        }
+                unique_g = list(dict.fromkeys(missing_group_mids))[:100]
+                for g_info in _extract_chats_list(api.get_chats(unique_g, with_members=True)):
+                    groups_map[g_info["chatMid"]] = g_info
             except Exception:
                 pass
 
+        if missing_room_mids:
+            try:
+                unique_r = list(dict.fromkeys(missing_room_mids))[:50]
+                for r_info in _extract_chats_list(api.get_rooms(unique_r)):
+                    groups_map[r_info["chatMid"]] = r_info
+            except Exception:
+                pass
+
+        seen_chat_mids = set()
         for box in raw_boxes:
-            if not isinstance(box, dict):
-                continue
             chat_mid = str(box.get("id") or "")
             if not chat_mid:
                 continue
+            seen_chat_mids.add(chat_mid)
 
             is_group = chat_mid.startswith(("c", "r"))
             if is_group:
@@ -935,16 +1153,30 @@ async def line_overview(request: Request) -> JSONResponse:
             last_msg_serialized = None
             if isinstance(last_msgs, list) and last_msgs:
                 try:
-                    msg_obj = Message.from_dict(last_msgs[0])
-                    last_msg_serialized = _decrypt_and_serialize_message(api, msg_obj, contacts_map, my_mid)
+                    dict_msgs = [x for x in last_msgs if isinstance(x, dict)]
+                    newest_raw = (
+                        max(
+                            dict_msgs,
+                            key=lambda x: int(x.get("createdTime") or x.get("deliveredTime") or 0),
+                        )
+                        if dict_msgs
+                        else last_msgs[0]
+                    )
+                    last_msg_serialized = _decrypt_and_serialize_message(api, newest_raw, contacts_map, my_mid)
                 except Exception:
                     pass
 
             unread_count = int(box.get("unreadCount") or 0)
-            last_time = (
-                (last_msg_serialized or {}).get("createdTime")
-                or int(box.get("lastDeliveredMessageTime") or 0)
-            )
+            raw_box_time = int(box.get("lastDeliveredMessageTime") or 0)
+            if raw_box_time and raw_box_time < 10_000_000_000:
+                raw_box_time *= 1000
+            last_time = (last_msg_serialized or {}).get("createdTime") or raw_box_time
+
+            ls_id = box.get("lastSeenMessageId")
+            if isinstance(ls_id, dict):
+                ls_id_str = str(ls_id.get("messageId") or "")
+            else:
+                ls_id_str = str(ls_id or "")
 
             chats_list.append(
                 {
@@ -956,9 +1188,27 @@ async def line_overview(request: Request) -> JSONResponse:
                     "unreadCount": unread_count,
                     "lastTime": last_time,
                     "lastMessage": last_msg_serialized,
-                    "lastSeenMessageId": str((box.get("lastSeenMessageId") or {}) if not isinstance(box.get("lastSeenMessageId"), str) else box.get("lastSeenMessageId")),
+                    "lastSeenMessageId": ls_id_str,
                 }
             )
+
+        # Also ensure joined groups appear in talk list even if messageBox wasn't returned yet
+        for g_info in groups_list:
+            g_mid = g_info.get("chatMid") or ""
+            if g_mid and g_mid not in seen_chat_mids:
+                chats_list.append(
+                    {
+                        "chatMid": g_mid,
+                        "title": g_info.get("chatName") or f"グループ ({g_mid[:8]})",
+                        "picturePath": g_info.get("picturePath") or "",
+                        "isGroup": True,
+                        "memberCount": g_info.get("memberCount") or 0,
+                        "unreadCount": 0,
+                        "lastTime": 0,
+                        "lastMessage": None,
+                        "lastSeenMessageId": "",
+                    }
+                )
 
         chats_list.sort(key=lambda x: x.get("lastTime") or 0, reverse=True)
         contacts_list.sort(key=lambda x: (x.get("displayName") or "").lower())
@@ -977,7 +1227,7 @@ async def line_overview(request: Request) -> JSONResponse:
                 "profile": profile_dict,
                 "e2ee": {
                     "ready": api.e2ee.is_ready(),
-                    "keyCount": len(api.e2ee._keys) if hasattr(api.e2ee, "_keys") else 0,
+                    "keyCount": len(api.e2ee.my_keys),
                 },
                 "chats": chats_list,
                 "contacts": contacts_list,
@@ -996,7 +1246,7 @@ async def line_overview(request: Request) -> JSONResponse:
 
 @router.post("/line/api/messages")
 async def line_messages(request: Request) -> JSONResponse:
-    """Fetch recent messages for a chatMid and decrypt Letter-Sealed payloads."""
+    """Fetch recent or previous messages for a chatMid and decrypt Letter-Sealed payloads."""
     try:
         body = await request.json()
     except Exception:
@@ -1005,8 +1255,10 @@ async def line_messages(request: Request) -> JSONResponse:
     sid = str(body.get("sessionId") or "").strip() or None
     sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
     chat_mid = str(body.get("chatMid") or "").strip()
-    count = min(max(int(body.get("count") or 50), 1), 100)
+    count = min(max(int(body.get("count") or 60), 1), 100)
     mark_read = bool(body.get("markRead", False))
+    before_message_id = str(body.get("beforeMessageId") or "").strip()
+    before_delivered_time = int(body.get("beforeDeliveredTime") or 0)
 
     if not chat_mid:
         return JSONResponse({"ok": False, "error": "chatMidが指定されていません。"}, status_code=400)
@@ -1014,36 +1266,66 @@ async def line_messages(request: Request) -> JSONResponse:
     try:
         sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
         api: OkLine = entry["api"]
-        my_mid = str((entry.get("profile") or {}).get("mid") or api.transport.tokens.mid or "")
+        profile_dict = entry.get("profile") or {}
+        if not profile_dict.get("mid") and not getattr(api.transport.tokens, "mid", None):
+            try:
+                profile_dict = _serialize_profile(api.get_profile())
+                entry["profile"] = profile_dict
+            except Exception:
+                pass
+        my_mid = _sync_my_mid(api, profile_dict.get("mid"))
         contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
+        if my_mid and profile_dict.get("displayName"):
+            contacts_map.setdefault(my_mid, profile_dict)
 
-        raw_msgs = api.get_recent_messages(chat_mid, count=count) or []
+        if before_message_id and before_delivered_time > 0:
+            res_msgs = api.get_previous_messages(
+                chat_mid,
+                before_message_id,
+                before_delivered_time,
+                count=count,
+            )
+        else:
+            res_msgs = api.get_recent_messages(chat_mid, count=count)
 
-        # Resolve any unknown sender MIDs so group chat messages show real names & avatars
+        if isinstance(res_msgs, dict):
+            raw_msgs = res_msgs.get("messages") or []
+        elif isinstance(res_msgs, list):
+            raw_msgs = res_msgs
+        else:
+            raw_msgs = []
+
+        # Resolve any unknown sender MIDs so group & 1:1 chat messages show real names & avatars
         unknown_senders = []
         for m in raw_msgs:
-            fmid = str(m.from_mid or "")
+            md = _coerce_message_dict(m)
+            fmid = str(md.get("from") or md.get("_from") or md.get("fromMid") or "")
             if fmid and fmid.startswith("u") and fmid != my_mid and fmid not in contacts_map:
                 unknown_senders.append(fmid)
         if unknown_senders:
             try:
                 unique_unknown = list(dict.fromkeys(unknown_senders))[:100]
-                for c in api.get_contacts(unique_unknown) or []:
-                    c_info = _serialize_profile(c)
+                for c_info in _extract_contacts_list(api.get_contacts(unique_unknown)):
                     if c_info.get("mid"):
                         contacts_map[c_info["mid"]] = c_info
                 entry["contactsMap"] = contacts_map
             except Exception:
                 pass
 
-        # Messages from getRecentMessagesV2 are newest-first; sort oldest-first for chat display
+        # Messages from getRecentMessagesV2 / getPreviousMessagesV2WithRequest are newest-first; sort oldest-first
         serialized = [
             _decrypt_and_serialize_message(api, m, contacts_map, my_mid)
             for m in raw_msgs
         ]
-        serialized.sort(key=lambda x: (x.get("createdTime") or 0, x.get("id") or ""))
+        serialized.sort(
+            key=lambda x: (
+                x.get("createdTime") or 0,
+                int(x["id"]) if str(x.get("id") or "").isdigit() else 0,
+                x.get("id") or "",
+            )
+        )
 
-        if mark_read and serialized:
+        if mark_read and serialized and not before_message_id:
             last_id = serialized[-1].get("id")
             if last_id:
                 try:
@@ -1051,12 +1333,23 @@ async def line_messages(request: Request) -> JSONResponse:
                 except Exception:
                     pass
 
+        oldest_id = serialized[0].get("id", "") if serialized else ""
+        oldest_time = int(
+            (serialized[0].get("deliveredTime") or serialized[0].get("createdTime") or 0)
+            if serialized
+            else 0
+        )
+
         entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
         return JSONResponse(
             {
                 "ok": True,
+                "sessionId": sid,
                 "chatMid": chat_mid,
                 "messages": serialized,
+                "hasMore": len(raw_msgs) >= count and bool(oldest_id) and oldest_time > 0,
+                "oldestMessageId": oldest_id,
+                "oldestDeliveredTime": oldest_time,
                 "e2eeReady": api.e2ee.is_ready(),
                 "sessionData": entry["sessionData"],
             }
@@ -1090,16 +1383,16 @@ async def line_send_message(request: Request) -> JSONResponse:
     try:
         sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
         api: OkLine = entry["api"]
-        my_mid = str((entry.get("profile") or {}).get("mid") or api.transport.tokens.mid or "")
+        my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
         contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
 
         if reply_to_id:
-            sent = api.reply_text(to_mid, reply_to_id, text)
+            sent = api.reply_text(to_mid, text, reply_to_id)
         else:
             sent = api.send_text(to_mid, text)
 
         serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
-        if not serialized.get("text"):
+        if not serialized.get("text") or serialized["text"].startswith("🔒"):
             serialized["text"] = text
         serialized["isMe"] = True
         if not serialized.get("createdTime"):
@@ -1136,7 +1429,10 @@ async def line_send_sticker(request: Request) -> JSONResponse:
     to_mid = str(body.get("chatMid") or body.get("to") or "").strip()
     sticker_id = str(body.get("stickerId") or "52002734").strip()
     package_id = str(body.get("packageId") or "11537").strip()
-    version = str(body.get("version") or "1").strip()
+    try:
+        version_int = int(body.get("version") or 1)
+    except (TypeError, ValueError):
+        version_int = 1
 
     if not to_mid:
         return JSONResponse({"ok": False, "error": "送信先が指定されていません。"}, status_code=400)
@@ -1144,10 +1440,10 @@ async def line_send_sticker(request: Request) -> JSONResponse:
     try:
         sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
         api: OkLine = entry["api"]
-        my_mid = str((entry.get("profile") or {}).get("mid") or api.transport.tokens.mid or "")
+        my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
         contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
 
-        sent = api.send_sticker(to_mid, sticker_id=sticker_id, package_id=package_id, version=version)
+        sent = api.send_sticker(to_mid, package_id, sticker_id, version_int)
         serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
         serialized["isMe"] = True
         if not serialized.get("createdTime"):
@@ -1183,6 +1479,7 @@ async def line_send_media(request: Request) -> JSONResponse:
         raw_bytes = base64.b64decode(data_b64)
         sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
         api: OkLine = entry["api"]
+        _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
         suffix = os.path.splitext(filename)[1] or ".bin"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -1200,7 +1497,7 @@ async def line_send_media(request: Request) -> JSONResponse:
             except Exception:
                 pass
 
-        return JSONResponse({"ok": True, "result": getattr(res, "raw", str(res))})
+        return JSONResponse({"ok": True, "result": res if isinstance(res, dict) else getattr(res, "raw", str(res))})
     except Exception as exc:
         return JSONResponse({"ok": False, "error": f"メディア送信エラー: {exc}"}, status_code=500)
 
@@ -1220,12 +1517,12 @@ async def line_action(request: Request) -> JSONResponse:
     try:
         sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
         api: OkLine = entry["api"]
+        _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
         if action == "react":
-            chat_mid = str(body.get("chatMid") or "").strip()
             message_id = str(body.get("messageId") or "").strip()
             reaction_type = int(body.get("reactionType") or 2)
-            api.react(chat_mid, message_id, reaction_type)
+            api.react(message_id, reaction_type)
             return JSONResponse({"ok": True})
 
         if action == "unsend":
@@ -1259,12 +1556,14 @@ async def line_action(request: Request) -> JSONResponse:
             if not name:
                 return JSONResponse({"ok": False, "error": "グループ名を入力してください。"}, status_code=400)
             g = api.create_group(name, [str(m) for m in member_mids if m])
+            extracted = _extract_chats_list(g)
+            g_out = extracted[0] if extracted else {"chatMid": "", "chatName": name}
             return JSONResponse(
                 {
                     "ok": True,
                     "group": {
-                        "chatMid": getattr(g, "chat_mid", ""),
-                        "chatName": getattr(g, "chat_name", name),
+                        "chatMid": g_out.get("chatMid", ""),
+                        "chatName": g_out.get("chatName") or name,
                     },
                 }
             )
@@ -1282,6 +1581,7 @@ async def line_action(request: Request) -> JSONResponse:
             if status_message is not None:
                 api.set_status_message(str(status_message))
             profile_dict = _serialize_profile(api.get_profile())
+            _sync_my_mid(api, profile_dict.get("mid"))
             entry["profile"] = profile_dict
             _save_persisted_sessions()
             return JSONResponse({"ok": True, "profile": profile_dict})
@@ -1359,23 +1659,37 @@ async def line_media_proxy(
     try:
         _, entry = _get_or_restore_session(session_id=sessionId)
         api: OkLine = entry["api"]
+        _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
-        # Try plain OBS download first or look up message in recent messages for E2EE keyMaterial
         data = None
+        oid = str(messageId)
+        sid_obs = "m"
         if chatMid:
             try:
-                recent = api.get_recent_messages(chatMid, count=50) or []
+                recent = api.get_recent_messages(chatMid, count=80) or []
+                if isinstance(recent, dict):
+                    recent = recent.get("messages") or []
                 for m in recent:
-                    if str(m.id) == str(messageId):
-                        dm = api.decrypt_message(m) if api.e2ee.is_ready() else m
-                        if dm.content_metadata and "keyMaterial" in dm.content_metadata:
-                            data = api.download_sealed_media(dm)
+                    md = _coerce_message_dict(m)
+                    if str(md.get("id") or "") == str(messageId):
+                        dec_fn = getattr(api, "decrypt_message", None) or api.e2ee.decrypt
+                        dm = dec_fn(md) if api.e2ee.is_ready() else md
+                        meta = (dm.get("contentMetadata") if isinstance(dm, dict) else None) or {}
+                        oid = str(meta.get("OID") or messageId)
+                        enc_km = meta.get("ENC_KM") or meta.get("keyMaterial")
+                        sid_obs = str(meta.get("SID") or ("emi" if enc_km else "m"))
+                        if enc_km:
+                            from okline import e2ee_crypto as _fr
+
+                            raw_blob = api.obs.download_object("talk", sid_obs, oid, message_id=str(messageId))
+                            km_bytes = base64.b64decode(str(enc_km) + "=" * (-len(str(enc_km)) % 4))
+                            data = _fr.decrypt_blob(km_bytes, raw_blob)
                         break
             except Exception:
                 data = None
 
         if not data:
-            data = api.obs.download_object("talk", "m", messageId)
+            data = api.obs.download_object("talk", sid_obs, oid, message_id=str(messageId))
 
         # Sniff content type
         ctype = "application/octet-stream"
@@ -2290,6 +2604,7 @@ function closeMobileChat() {
 }
 
 async function openChatRoom(chatMid, title, picturePath, isGroup) {
+  const switchedChat = currentChatMid !== chatMid;
   currentChatMid = chatMid;
   clearReply();
   document.getElementById("appView").classList.add("chat-open");
@@ -2302,13 +2617,158 @@ async function openChatRoom(chatMid, title, picturePath, isGroup) {
     : "標準トーク";
 
   renderCurrentList();
-  await loadMessages(chatMid, true);
+  const state = ensureChatHistoryState(chatMid);
+  const box = document.getElementById("chatMessagesBox");
+  if (switchedChat) {
+    state.lastRenderKey = "";
+    if (state.messages.length > 0) {
+      renderChatMessages(chatMid, true);
+    } else {
+      box.innerHTML = `<div style="margin:auto;background:rgba(15,23,42,0.55);color:#fff;padding:10px 18px;border-radius:999px;font-size:12.5px;">🔄 トーク履歴を取得中...</div>`;
+    }
+  }
+  await loadMessages(chatMid, true, switchedChat);
 }
 
-async function loadMessages(chatMid, markRead) {
-  if (!chatMid) return;
+const chatHistoryMap = {};
+
+function ensureChatHistoryState(chatMid) {
+  if (!chatHistoryMap[chatMid]) {
+    chatHistoryMap[chatMid] = {
+      byId: new Map(),
+      messages: [],
+      hasMore: false,
+      oldestMessageId: "",
+      oldestDeliveredTime: 0,
+      initialized: false,
+      loadingOlder: false,
+      lastRenderKey: ""
+    };
+  }
+  return chatHistoryMap[chatMid];
+}
+
+function mergeMessagesIntoState(state, incoming) {
+  for (const m of (incoming || [])) {
+    if (!m || !m.id) continue;
+    state.byId.set(String(m.id), m);
+  }
+  const arr = Array.from(state.byId.values());
+  arr.sort((a, b) => {
+    const ta = Number(a.createdTime || a.deliveredTime || 0);
+    const tb = Number(b.createdTime || b.deliveredTime || 0);
+    if (ta !== tb) return ta - tb;
+    return String(a.id).localeCompare(String(b.id), undefined, { numeric: true });
+  });
+  state.messages = arr;
+}
+
+function computeRenderKey(state) {
+  const parts = [
+    state.hasMore ? "1" : "0",
+    state.loadingOlder ? "1" : "0",
+    String(state.messages.length)
+  ];
+  for (const m of state.messages) {
+    parts.push(`${m.id}:${(m.text || "").length}:${(m.reactions || []).length}:${m.wasEncrypted ? 1 : 0}`);
+  }
+  return parts.join("|");
+}
+
+function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
+  const state = ensureChatHistoryState(chatMid);
   const box = document.getElementById("chatMessagesBox");
-  const wasNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  const prevHeight = box.scrollHeight;
+  const prevTop = box.scrollTop;
+  const wasNearBottom = prevHeight - prevTop - box.clientHeight < 120;
+
+  const nextKey = computeRenderKey(state);
+  if (!scrollToBottom && !preserveScrollDelta && state.lastRenderKey === nextKey) {
+    return;
+  }
+  state.lastRenderKey = nextKey;
+
+  const msgs = state.messages || [];
+  box.innerHTML = "";
+  if (!msgs.length) {
+    box.innerHTML = `<div style="margin:auto;background:rgba(15,23,42,0.55);color:#fff;padding:10px 18px;border-radius:999px;font-size:12.5px;">まだメッセージがありません。最初のメッセージを送信しましょう！</div>`;
+    return;
+  }
+
+  if (state.hasMore && state.oldestMessageId && state.oldestDeliveredTime > 0) {
+    const moreWrap = document.createElement("div");
+    moreWrap.style.cssText = "display:flex;justify-content:center;padding:6px 0 10px;";
+    const moreBtn = document.createElement("button");
+    moreBtn.type = "button";
+    moreBtn.style.cssText = "background:rgba(15,23,42,0.68);color:#fff;border:1px solid rgba(255,255,255,0.22);padding:6px 16px;border-radius:999px;font-size:12px;font-weight:600;cursor:pointer;";
+    moreBtn.disabled = state.loadingOlder;
+    moreBtn.textContent = state.loadingOlder ? "🔄 過去の履歴を読み込み中..." : "📜 過去のトーク履歴をもっと読み込む";
+    moreBtn.onclick = () => loadOlderMessages(chatMid);
+    moreWrap.appendChild(moreBtn);
+    box.appendChild(moreWrap);
+  }
+
+  for (const m of msgs) {
+    const row = document.createElement("div");
+    row.className = "msg-row " + (m.isMe ? "me" : "other");
+
+    const mediaUrl = `/line/api/media?sessionId=${encodeURIComponent(sessionId)}&chatMid=${encodeURIComponent(chatMid)}&messageId=${encodeURIComponent(m.id)}`;
+    let innerContent = "";
+    if (m.contentType === 7 && m.stickerUrl) {
+      innerContent = `<img class="msg-sticker" src="${escapeHtml(m.stickerUrl)}" alt="[スタンプ]" />`;
+    } else if (m.contentType === 1) {
+      innerContent = `<img class="msg-image" src="${mediaUrl}" alt="画像" onclick="window.open('${mediaUrl}','_blank')" onerror="this.outerHTML='<div class=msg-bubble>📷 [画像]</div>'" />`;
+    } else if (m.contentType === 2) {
+      innerContent = `<video class="msg-image" controls preload="metadata" src="${mediaUrl}" style="max-height:260px;background:#000;"></video>`;
+    } else if (m.contentType === 3) {
+      innerContent = `<div class="msg-bubble"><div style="font-size:11.5px;margin-bottom:4px;">🎤 音声メッセージ</div><audio controls preload="none" src="${mediaUrl}" style="max-width:230px;height:34px;"></audio></div>`;
+    } else if (m.contentType === 14) {
+      innerContent = `<div class="msg-bubble"><a href="${mediaUrl}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">${escapeHtml(m.text || "📎 ファイルをダウンロード")}</a></div>`;
+    } else {
+      const replyBadge = m.relatedMessageId ? `<div style="font-size:11px;opacity:0.75;border-left:2px solid currentColor;padding-left:6px;margin-bottom:4px;">↩ 返信メッセージ</div>` : "";
+      innerContent = `<div class="msg-bubble" title="クリックで返信 / 右クリックでメニュー">${replyBadge}${escapeHtml(m.text)}</div>`;
+    }
+
+    const reactCount = (m.reactions || []).length;
+    const reactHtml = reactCount > 0 ? `<div style="font-size:11px;background:rgba(15,23,42,0.75);color:#fff;padding:2px 7px;border-radius:999px;align-self:flex-start;margin-top:2px;">❤️ ${reactCount}</div>` : "";
+
+    row.innerHTML = `
+      ${!m.isMe ? `<img class="msg-avatar" src="${avatarUrl(m.senderPicture, m.fromMid, m.senderName)}" alt="" />` : ""}
+      <div class="msg-col">
+        ${!m.isMe ? `<div class="msg-sender">${escapeHtml(m.senderName)}</div>` : ""}
+        <div class="msg-bubble-wrap">
+          ${innerContent}
+          <div class="msg-meta">
+            <span>${m.wasEncrypted ? "🔒" : ""}</span>
+            <span>${escapeHtml(formatTime(m.createdTime))}</span>
+          </div>
+        </div>
+        ${reactHtml}
+      </div>
+    `;
+
+    const bubbleEl = row.querySelector(".msg-bubble");
+    if (bubbleEl) {
+      bubbleEl.onclick = () => setReply(m.id, m.senderName, m.text);
+      bubbleEl.oncontextmenu = (ev) => {
+        ev.preventDefault();
+        openMessageActionModal(m);
+      };
+    }
+    box.appendChild(row);
+  }
+
+  if (preserveScrollDelta) {
+    box.scrollTop = Math.max(0, box.scrollHeight - prevHeight + prevTop);
+  } else if (scrollToBottom || wasNearBottom) {
+    box.scrollTop = box.scrollHeight;
+  }
+}
+
+async function loadMessages(chatMid, markRead, forceScroll) {
+  if (!chatMid) return;
+  const state = ensureChatHistoryState(chatMid);
+  const box = document.getElementById("chatMessagesBox");
 
   try {
     const resp = await fetch("/line/api/messages", {
@@ -2323,64 +2783,86 @@ async function loadMessages(chatMid, markRead) {
       })
     });
     const data = await resp.json();
-    if (!data.ok || chatMid !== currentChatMid) return;
-    if (data.sessionData) saveVault(sessionId, data.sessionData);
-
-    const msgs = data.messages || [];
-    box.innerHTML = "";
-    if (!msgs.length) {
-      box.innerHTML = `<div style="margin:auto;background:rgba(15,23,42,0.55);color:#fff;padding:10px 18px;border-radius:999px;font-size:12.5px;">まだメッセージがありません。最初のメッセージを送信しましょう！</div>`;
+    if (!data.ok) {
+      if (resp.status === 401) {
+        showLoginScreen();
+        return;
+      }
+      if (chatMid === currentChatMid && !state.messages.length) {
+        box.innerHTML = `<div style="margin:auto;text-align:center;background:rgba(15,23,42,0.72);color:#fff;padding:14px 20px;border-radius:16px;font-size:12.5px;max-width:340px;">
+          <div style="margin-bottom:8px;">⚠️ ${escapeHtml(data.error || "トーク履歴の取得に失敗しました")}</div>
+          <button type="button" onclick="loadMessages('${escapeHtml(chatMid)}', true, true)" style="background:#06c755;color:#fff;border:none;padding:6px 14px;border-radius:999px;font-size:12px;font-weight:700;cursor:pointer;">再試行</button>
+        </div>`;
+      }
       return;
     }
-
-    for (const m of msgs) {
-      const row = document.createElement("div");
-      row.className = "msg-row " + (m.isMe ? "me" : "other");
-
-      let innerContent = "";
-      if (m.contentType === 7 && m.stickerUrl) {
-        innerContent = `<img class="msg-sticker" src="${escapeHtml(m.stickerUrl)}" alt="[スタンプ]" />`;
-      } else if (m.contentType === 1) {
-        const mediaUrl = `/line/api/media?sessionId=${encodeURIComponent(sessionId)}&chatMid=${encodeURIComponent(chatMid)}&messageId=${encodeURIComponent(m.id)}`;
-        innerContent = `<img class="msg-image" src="${mediaUrl}" alt="画像" onclick="window.open('${mediaUrl}','_blank')" onerror="this.outerHTML='<div class=msg-bubble>📷 [画像]</div>'" />`;
-      } else {
-        const replyBadge = m.relatedMessageId ? `<div style="font-size:11px;opacity:0.75;border-left:2px solid currentColor;padding-left:6px;margin-bottom:4px;">↩ 返信メッセージ</div>` : "";
-        innerContent = `<div class="msg-bubble" title="クリックで返信 / 右クリックで送信取消">${replyBadge}${escapeHtml(m.text)}</div>`;
-      }
-
-      const reactCount = (m.reactions || []).length;
-      const reactHtml = reactCount > 0 ? `<div style="font-size:11px;background:rgba(15,23,42,0.75);color:#fff;padding:2px 7px;border-radius:999px;align-self:flex-start;margin-top:2px;">❤️ ${reactCount}</div>` : "";
-
-      row.innerHTML = `
-        ${!m.isMe ? `<img class="msg-avatar" src="${avatarUrl(m.senderPicture, m.fromMid, m.senderName)}" alt="" />` : ""}
-        <div class="msg-col">
-          ${!m.isMe ? `<div class="msg-sender">${escapeHtml(m.senderName)}</div>` : ""}
-          <div class="msg-bubble-wrap">
-            ${innerContent}
-            <div class="msg-meta">
-              <span>${m.wasEncrypted ? "🔒" : ""}</span>
-              <span>${escapeHtml(formatTime(m.createdTime))}</span>
-            </div>
-          </div>
-          ${reactHtml}
-        </div>
-      `;
-
-      const bubbleEl = row.querySelector(".msg-bubble");
-      if (bubbleEl) {
-        bubbleEl.onclick = () => setReply(m.id, m.senderName, m.text);
-        bubbleEl.oncontextmenu = (ev) => {
-          ev.preventDefault();
-          openMessageActionModal(m);
-        };
-      }
-      box.appendChild(row);
+    if (data.sessionId || data.sessionData) {
+      saveVault(data.sessionId || sessionId, data.sessionData || sessionData);
     }
+    if (chatMid !== currentChatMid) return;
 
-    if (markRead || wasNearBottom) {
-      box.scrollTop = box.scrollHeight;
+    const incoming = data.messages || [];
+    mergeMessagesIntoState(state, incoming);
+    if (!state.initialized) {
+      state.hasMore = Boolean(data.hasMore);
+      state.oldestMessageId = data.oldestMessageId || "";
+      state.oldestDeliveredTime = Number(data.oldestDeliveredTime || 0);
+      state.initialized = true;
     }
-  } catch (e) {}
+    renderChatMessages(chatMid, Boolean(markRead || forceScroll), false);
+  } catch (e) {
+    if (chatMid === currentChatMid && !state.messages.length) {
+      box.innerHTML = `<div style="margin:auto;text-align:center;background:rgba(15,23,42,0.72);color:#fff;padding:14px 20px;border-radius:16px;font-size:12.5px;">通信エラーが発生しました。しばらくしてから再試行してください。</div>`;
+    }
+  }
+}
+
+async function loadOlderMessages(chatMid) {
+  if (!chatMid) return;
+  const state = ensureChatHistoryState(chatMid);
+  if (state.loadingOlder || !state.oldestMessageId || !state.oldestDeliveredTime) return;
+  state.loadingOlder = true;
+  state.lastRenderKey = "";
+  renderChatMessages(chatMid, false, false);
+
+  try {
+    const resp = await fetch("/line/api/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        sessionData,
+        chatMid,
+        count: 60,
+        markRead: false,
+        beforeMessageId: state.oldestMessageId,
+        beforeDeliveredTime: state.oldestDeliveredTime
+      })
+    });
+    const data = await resp.json();
+    state.loadingOlder = false;
+    if (!data.ok) {
+      state.lastRenderKey = "";
+      renderChatMessages(chatMid, false, false);
+      return;
+    }
+    if (data.sessionId || data.sessionData) {
+      saveVault(data.sessionId || sessionId, data.sessionData || sessionData);
+    }
+    const older = data.messages || [];
+    mergeMessagesIntoState(state, older);
+    state.hasMore = Boolean(data.hasMore);
+    if (data.oldestMessageId) state.oldestMessageId = data.oldestMessageId;
+    if (data.oldestDeliveredTime) state.oldestDeliveredTime = Number(data.oldestDeliveredTime);
+    state.lastRenderKey = "";
+    if (chatMid === currentChatMid) {
+      renderChatMessages(chatMid, false, true);
+    }
+  } catch (e) {
+    state.loadingOlder = false;
+    state.lastRenderKey = "";
+    if (chatMid === currentChatMid) renderChatMessages(chatMid, false, false);
+  }
 }
 
 function setReply(msgId, senderName, text) {
@@ -2545,7 +3027,14 @@ async function unsendMsg(messageId) {
     body: JSON.stringify({ sessionId, sessionData, action: "unsend", messageId })
   });
   const data = await resp.json();
-  if (!data.ok) alert(data.error || "送信取消に失敗しました");
+  if (!data.ok) {
+    alert(data.error || "送信取消に失敗しました");
+  } else if (currentChatMid && chatHistoryMap[currentChatMid]) {
+    const st = chatHistoryMap[currentChatMid];
+    st.byId.delete(String(messageId));
+    mergeMessagesIntoState(st, []);
+    st.lastRenderKey = "";
+  }
   await loadMessages(currentChatMid, false);
 }
 
@@ -2728,6 +3217,7 @@ async function logoutLine() {
     });
   } catch (e) {}
   try { localStorage.removeItem(VAULT_KEY); } catch (e) {}
+  for (const k of Object.keys(chatHistoryMap)) delete chatHistoryMap[k];
   sessionId = null;
   sessionData = null;
   currentChatMid = null;
