@@ -16,5 +16,8 @@
     "node": ">=18.0.0"
   },
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "dependencies": {
+    "@evex-dev/linejs": "^3.6.4"
+  }
 }

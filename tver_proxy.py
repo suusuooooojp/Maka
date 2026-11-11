@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import ipaddress
 import json
 import os
@@ -50,13 +51,13 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or TVER_UPSTREAM_PROXY):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 15000)
+            curl.setopt(connect_timeout_ms, 3500)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
@@ -97,11 +98,7 @@ if CurlAsyncSession is not None:
             except Exception:
                 pass
             try:
-                try:
-                    return await super().request(method, url, *args, **kwargs)
-                except Exception:
-                    self._force_fresh = True
-                    return await super().request(method, url, *args, **kwargs)
+                return await super().request(method, url, *args, **kwargs)
             finally:
                 try:
                     self._cookies.clear()
@@ -121,9 +118,15 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261110-tver4"
+RUNTIME_REV = "20261111-tver7"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
+TVER_UPSTREAM_PROXY = (
+    os.getenv("TVER_UPSTREAM_PROXY")
+    or os.getenv("JAPAN_PROXY_URL")
+    or ""
+).strip()
+TVER_STREAKS_RELAY_URL = (os.getenv("TVER_STREAKS_RELAY_URL") or "").strip()
 
 TVER_HOME = "https://tver.jp/"
 
@@ -568,14 +571,9 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         text = text.replace(old_srcset, new_srcset, 1)
 
     old_url_props = "src:[t.HTMLImageElement,t.HTMLMediaElement,t.HTMLIFrameElement,t.HTMLFrameElement,t.HTMLEmbedElement,t.HTMLScriptElement,t.HTMLSourceElement],href:"
-    new_url_props = "src:[t.HTMLImageElement,t.HTMLMediaElement,t.HTMLIFrameElement,t.HTMLFrameElement,t.HTMLEmbedElement,t.HTMLScriptElement,t.HTMLSourceElement],srcset:[t.HTMLImageElement,t.HTMLSourceElement],loading:[t.HTMLImageElement],href:"
+    new_url_props = "src:[t.HTMLImageElement,t.HTMLMediaElement,t.HTMLIFrameElement,t.HTMLFrameElement,t.HTMLEmbedElement,t.HTMLScriptElement,t.HTMLSourceElement],srcset:[t.HTMLImageElement,t.HTMLSourceElement],href:"
     if old_url_props in text:
         text = text.replace(old_url_props, new_url_props, 1)
-
-    old_setattr = 'e.Proxy("Element.prototype.setAttribute",{apply(t){let[r,s]=t.args,o=t.this.tagName.toLowerCase();null!=s&&(s=(0,n.Qf)(s)),t.args[1]=s;'
-    new_setattr = 'e.Proxy("Element.prototype.setAttribute",{apply(t){let[r,s]=t.args,o=t.this.tagName.toLowerCase();null!=s&&(s=(0,n.Qf)(s)),t.args[1]=s;if("img"===o){const _rn=String(r).toLowerCase();if("loading"===_rn&&"lazy"===String(s).toLowerCase()){t.args[1]="eager";return;}}'
-    if old_setattr in text:
-        text = text.replace(old_setattr, new_setattr, 1)
 
     text = text.replace(
         'if(e.startsWith("data:")){',
@@ -677,70 +675,77 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     return text.encode("utf-8")
 
 
-@router.get("/tver/runtime/scramjet.js", include_in_schema=False)
-async def tver_scramjet_js():
+_PATCHED_RUNTIME_CACHE: dict[str, bytes] = {}
+_PATCHED_RUNTIME_GZIP_CACHE: dict[str, bytes] = {}
+
+
+async def _ensure_patched_runtime(asset_name: str, patcher) -> tuple[bytes, bytes] | None:
+    cached = _PATCHED_RUNTIME_CACHE.get(asset_name)
+    cached_gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
+    if cached is not None and cached_gz is not None:
+        return cached, cached_gz
     import app as host_app
 
-    resp = await host_app.scramjet_asset("scramjet.js")
+    resp = await host_app.scramjet_asset(asset_name)
     if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_scramjet_js(bytes(resp.body))
+        return None
+    patched = patcher(bytes(resp.body))
+    gz = gzip.compress(patched, compresslevel=6)
+    _PATCHED_RUNTIME_CACHE[asset_name] = patched
+    _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
+    return patched, gz
+
+
+async def _serve_patched_runtime(asset_name: str, patcher, request: Request) -> Response:
+    pair = await _ensure_patched_runtime(asset_name, patcher)
+    if pair is None:
+        import app as host_app
+
+        return await host_app.scramjet_asset(asset_name)
+    patched, gz = pair
+    ae = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" in ae:
+        return Response(
+            gz,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "public, max-age=86400, immutable",
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding",
+            },
+        )
     return Response(
         patched,
         media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
+
+
+@router.get("/tver/runtime/scramjet.js", include_in_schema=False)
+async def tver_scramjet_js(request: Request):
+    return await _serve_patched_runtime("scramjet.js", _patch_scramjet_js, request)
 
 
 @router.get("/tver/runtime/controller.api.js", include_in_schema=False)
-async def tver_controller_api():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.api.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_api(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def tver_controller_api(request: Request):
+    return await _serve_patched_runtime("controller.api.js", _patch_controller_api, request)
 
 
 @router.get("/tver/runtime/controller.sw.js", include_in_schema=False)
-async def tver_controller_sw():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.sw.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_sw(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def tver_controller_sw(request: Request):
+    return await _serve_patched_runtime("controller.sw.js", _patch_controller_sw, request)
 
 
 @router.get("/tver/runtime/controller.inject.js", include_in_schema=False)
-async def tver_controller_inject():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.inject.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_inject(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def tver_controller_inject(request: Request):
+    return await _serve_patched_runtime("controller.inject.js", _patch_controller_inject, request)
 
 
 async def _tver_sw_override(request: Request) -> Response:
     code = f"""
 importScripts('/tver/runtime/controller.sw.js?v={RUNTIME_REV}');
 const TVER_MEDIA_CACHE = 'sh-tver-media-{RUNTIME_REV}';
+const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
 function encodeMediaKey(urlStr) {{
   try {{
     const rev = encodeURIComponent(String(urlStr)).split('').reverse().join('');
@@ -758,6 +763,23 @@ function decodeMediaKey(k) {{
     return '';
   }}
 }}
+function isStreamCdnTarget(target) {{
+  if (!target) return false;
+  const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
+  const p = String(target.pathname || '');
+  if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
+  if (h.endsWith('.api.streaks.jp')) return false;
+  if ((
+      h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') || h.endsWith('.akamaihd.net') ||
+      h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') || h.endsWith('.brightcove.com') ||
+      h.endsWith('.brightcove.net') || h.endsWith('.streaks.jp') || h.endsWith('.llnwd.net') ||
+      h.endsWith('.edgekey.net') || h.endsWith('.edgesuite.net') || h.endsWith('.cdngc.net') ||
+      h.endsWith('.footprint.net') || h === 'localhost' || h === '127.0.0.1'
+  ) && /\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) {{
+    return true;
+  }}
+  return false;
+}}
 function isDirectMediaTarget(target) {{
   if (!target) return false;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
@@ -765,20 +787,35 @@ function isDirectMediaTarget(target) {{
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   if (h === 'image-cdn.tver.jp') return true;
   if (h === 'statics.tver.jp' && /\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(p)) return true;
-  if (!h.endsWith('.api.streaks.jp') && (
-      h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') || h.endsWith('.akamaihd.net') ||
-      h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') || h.endsWith('.brightcove.com') ||
-      h.endsWith('.brightcove.net') || h.endsWith('.streaks.jp')
-  ) && /\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) {{
-    return true;
-  }}
-  return false;
+  return isStreamCdnTarget(target);
 }}
 function isCacheableImageTarget(target) {{
   if (!target) return false;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = String(target.pathname || '');
   return h === 'image-cdn.tver.jp' || (h === 'statics.tver.jp' && /\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(p));
+}}
+function rewriteM3u8Text(text, manifestUrl, forNative) {{
+  const toTarget = (rawRef) => {{
+    const cleanRef = String(rawRef || '').trim();
+    if (!cleanRef || /^(data:|skd:|blob:)/i.test(cleanRef)) return rawRef;
+    let absHref = '';
+    try {{
+      absHref = new URL(cleanRef, manifestUrl).href;
+    }} catch {{
+      return rawRef;
+    }}
+    if (!/^https?:\\/\\//i.test(absHref)) return rawRef;
+    if (forNative) {{
+      return '/tver/runtime/media-relay?native=1&k=' + encodeMediaKey(absHref);
+    }}
+    return absHref;
+  }};
+  const withUris = String(text || '').replace(/URI="([^"]+)"/g, (_, u) => 'URI="' + toTarget(u) + '"');
+  return withUris.split(/\\r?\\n/).map((line) => {{
+    const s = line.trim();
+    return (s && !s.startsWith('#')) ? toTarget(s) : line;
+  }}).join('\\n');
 }}
 function normalizeMediaTarget(target) {{
   try {{
@@ -857,17 +894,50 @@ function checkShortCircuit(target) {{
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
   if (
+    (h === 'adsvr.tver.jp' && p.startsWith('/ad-server')) ||
+    ((h === 'pubads.g.doubleclick.net' || h === 'securepubads.g.doubleclick.net') && (p.includes('/gampad/ads') || p.includes('/pagead/ads')))
+  ) {{
+    return new Response(EMPTY_VAST_XML, {{
+      status: 200,
+      headers: {{
+        'Content-Type': 'application/xml; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Credentials': 'true',
+      }},
+    }});
+  }}
+  if (
+    h === 'www.googletagmanager.com' || h === 'googletagmanager.com' ||
+    ((h === 'imasdk.googleapis.com' || h === 'pagead2.googlesyndication.com' || h === 'securepubads.g.doubleclick.net') &&
+      (p.includes('omweb-v1.js') || p.includes('omsdk-v1.js') || p.includes('/tag/js/gpt.js') || p.includes('/gpt/pubads_impl')))
+  ) {{
+    return new Response('window.dataLayer=window.dataLayer||[];window.googletag=window.googletag||{{cmd:[]}};', {{
+      status: 200,
+      headers: {{
+        'Content-Type': 'application/javascript; charset=utf-8',
+        'Access-Control-Allow-Origin': '*',
+      }},
+    }});
+  }}
+  if (
+    h === 'm-tag.tver.jp' || h === 's-tag.tver.jp' || h === 'ce-api.tver.jp' || h === 'log.tver.jp' ||
     h === 'analytics.tiktok.com' || h === 'analytics.twitter.com' ||
     h === 'ads-twitter.com' || h.endsWith('.ads-twitter.com') ||
-    h === 'b99.yahoo.co.jp' || h === 'yjtag.yahoo.co.jp' ||
+    h === 'b99.yahoo.co.jp' || h === 'yjtag.yahoo.co.jp' || h === 'yads.c.yimg.jp' || h === 's.yimg.jp' ||
     h === 'dmp.im-apps.net' || h === 'connect.facebook.net' ||
-    (h === 'www.facebook.com' && p.startsWith('/tr'))
+    (h === 'www.facebook.com' && p.startsWith('/tr')) ||
+    h === 'gum.criteo.com' || h === 'static.criteo.net' || h === 'bidder.criteo.com' ||
+    h === 'cnt.fout.jp' || h === 'sync.fout.jp' || h === 'js.fout.jp' ||
+    h === 'www.google-analytics.com' || h === 'region1.google-analytics.com' ||
+    h === 'analytics.google.com' || h === 'stats.g.doubleclick.net' ||
+    h.endsWith('.karte.io') || h.endsWith('.braze.com') ||
+    h === 'js-sec.indexww.com' || h === 'c.amazon-adsystem.com' || h.endsWith('.amazon-adsystem.com')
   ) {{
-    const isJs = /\\.js(\\?|$)/i.test(p);
+    const isJs = /\\.js(\\?|$)/i.test(p) || p.includes('/js');
     return new Response(isJs ? '' : '{{}}', {{
       status: 200,
       headers: {{
-        'Content-Type': isJs ? 'application/javascript' : 'application/json',
+        'Content-Type': isJs ? 'application/javascript; charset=utf-8' : 'application/json',
         'Access-Control-Allow-Origin': '*',
       }},
     }});
@@ -921,6 +991,12 @@ self.addEventListener('activate', event => event.waitUntil(self.clients.claim())
 self.addEventListener('fetch', event => {{
   try {{
     const reqUrlObj = new URL(event.request.url);
+    if (reqUrlObj.origin !== self.location.origin) {{
+      return;
+    }}
+    if (reqUrlObj.searchParams.get('via') === 'server') {{
+      return;
+    }}
     if ((reqUrlObj.pathname.startsWith('/tver/runtime/') && reqUrlObj.pathname !== '/tver/runtime/media-relay') || reqUrlObj.pathname.startsWith('/_diag/')) {{
       return;
     }}
@@ -966,15 +1042,19 @@ self.addEventListener('fetch', event => {{
             headers: r.headers,
           }});
       if (anyTarget && isDirectMediaTarget(anyTarget) && event.request.destination !== 'script' && event.request.destination !== 'worker' && event.request.destination !== 'sharedworker' && event.request.destination !== 'style' && !event.request.url.includes('%24module=module') && !event.request.url.includes('$module=module')) {{
+        const forNative = reqUrlObj.searchParams.get('native') === '1' || event.request.destination === 'video' || event.request.destination === 'audio';
         const relay = new URL('/tver/runtime/media-relay', self.location.origin);
         relay.searchParams.set('k', encodeMediaKey(anyTarget.href));
-        if (reqUrlObj.searchParams.get('native') === '1') relay.searchParams.set('native', '1');
+        relay.searchParams.set('via', 'server');
+        if (forNative) relay.searchParams.set('native', '1');
         const method = event.request.method;
         const rng = event.request.headers.get('range');
         const acc = event.request.headers.get('accept');
         const canCache = method === 'GET' && !rng && isCacheableImageTarget(anyTarget);
+        const isStreamCdn = isStreamCdnTarget(anyTarget);
+        const isM3u8Path = /\\.m3u8(\\?|$)/i.test(anyTarget.pathname || '');
         const fwdHeaders = {{}};
-        if (rng) fwdHeaders['Range'] = rng;
+        if (rng && !isM3u8Path) fwdHeaders['Range'] = rng;
         if (acc) fwdHeaders['Accept'] = acc;
         event.respondWith((async () => {{
           let cache = null;
@@ -983,6 +1063,40 @@ self.addEventListener('fetch', event => {{
               cache = await caches.open(TVER_MEDIA_CACHE);
               const hit = await cache.match(relay.href);
               if (hit) return asOut(hit, method);
+            }} catch {{}}
+          }}
+          if (isStreamCdn && !forNative) {{
+            try {{
+              const cdnResp = await fetch(anyTarget.href, {{
+                method,
+                headers: fwdHeaders,
+                mode: 'cors',
+                credentials: 'omit',
+              }});
+              if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
+                const ct = String(cdnResp.headers.get('content-type') || '').toLowerCase();
+                if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
+                  const rawTxt = await cdnResp.text();
+                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, false);
+                  return new Response(rewritten, {{
+                    status: 200,
+                    headers: {{
+                      'Content-Type': 'application/vnd.apple.mpegurl',
+                      'Access-Control-Allow-Origin': '*',
+                      'Cross-Origin-Resource-Policy': 'cross-origin',
+                      'Cache-Control': 'no-cache',
+                    }},
+                  }});
+                }}
+                const hCopy = new Headers(cdnResp.headers);
+                hCopy.set('Access-Control-Allow-Origin', '*');
+                hCopy.set('Cross-Origin-Resource-Policy', 'cross-origin');
+                return new Response(method === 'HEAD' ? null : cdnResp.body, {{
+                  status: cdnResp.status,
+                  statusText: cdnResp.statusText,
+                  headers: hCopy,
+                }});
+              }}
             }} catch {{}}
           }}
           try {{
@@ -1037,8 +1151,11 @@ self.addEventListener('message', event => {{
 # ---------------------------------------------------------------------------
 # Fast HTTP/2 + Chrome-TLS Relay & HLS Media Relay for TVer
 # ---------------------------------------------------------------------------
-_CURL_SESSION: StatelessCurlSession | None = None
+_CURL_SESSIONS: dict[str, StatelessCurlSession] = {}
 _CURL_SESSION_LOCK = asyncio.Lock()
+_CURL_DISABLED_UNTIL: float = 0.0
+_RELAY_HTTP_CLIENT: httpx.AsyncClient | None = None
+_RELAY_HTTP_CLIENT_LOCK = asyncio.Lock()
 _MEDIA_HTTP_CLIENT: httpx.AsyncClient | None = None
 _MEDIA_HTTP_CLIENT_LOCK = asyncio.Lock()
 _IMAGE_CACHE: dict[str, tuple[float, int, str, bytes, str]] = {}
@@ -1093,22 +1210,61 @@ _DESKTOP_CHROME_UA = (
 )
 
 
-async def _get_curl_session():
-    global _CURL_SESSION
-    if StatelessCurlSession is None:
+async def _get_curl_session(impersonate_profile: str = "chrome131"):
+    if StatelessCurlSession is None or time.time() < _CURL_DISABLED_UNTIL:
         return None
-    if _CURL_SESSION is not None:
-        return _CURL_SESSION
+    profile = impersonate_profile or "chrome131"
+    existing = _CURL_SESSIONS.get(profile)
+    if existing is not None:
+        return existing
     async with _CURL_SESSION_LOCK:
-        if _CURL_SESSION is None:
-            _CURL_SESSION = StatelessCurlSession(
-                impersonate="chrome131",
+        existing = _CURL_SESSIONS.get(profile)
+        if existing is None:
+            existing = StatelessCurlSession(
+                impersonate=profile,
                 default_headers=False,
                 allow_redirects=False,
-                timeout=25,
-                max_clients=64,
+                timeout=8,
+                max_clients=32,
             )
-    return _CURL_SESSION
+            _CURL_SESSIONS[profile] = existing
+    return existing
+
+
+async def _get_relay_http_client() -> httpx.AsyncClient:
+    """Fast persistent non-redirecting HTTP client for TVer SSR HTML, Next.js chunks, and APIs."""
+    global _RELAY_HTTP_CLIENT
+    if _RELAY_HTTP_CLIENT is not None and not _RELAY_HTTP_CLIENT.is_closed:
+        return _RELAY_HTTP_CLIENT
+    async with _RELAY_HTTP_CLIENT_LOCK:
+        if _RELAY_HTTP_CLIENT is None or _RELAY_HTTP_CLIENT.is_closed:
+            limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
+            timeout = httpx.Timeout(connect=6.0, read=22.0, write=10.0, pool=8.0)
+            if TVER_UPSTREAM_PROXY:
+                _RELAY_HTTP_CLIENT = httpx.AsyncClient(
+                    proxy=TVER_UPSTREAM_PROXY,
+                    follow_redirects=False,
+                    limits=limits,
+                    timeout=timeout,
+                )
+            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+                transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
+                    retries=1,
+                    limits=limits,
+                )
+                _RELAY_HTTP_CLIENT = httpx.AsyncClient(
+                    transport=transport,
+                    follow_redirects=False,
+                    timeout=timeout,
+                )
+            else:
+                _RELAY_HTTP_CLIENT = httpx.AsyncClient(
+                    follow_redirects=False,
+                    limits=limits,
+                    timeout=timeout,
+                )
+    return _RELAY_HTTP_CLIENT
 
 
 async def _get_media_http_client() -> httpx.AsyncClient:
@@ -1120,7 +1276,14 @@ async def _get_media_http_client() -> httpx.AsyncClient:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
             timeout = httpx.Timeout(connect=8.0, read=45.0, write=10.0, pool=10.0)
-            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+            if TVER_UPSTREAM_PROXY:
+                _MEDIA_HTTP_CLIENT = httpx.AsyncClient(
+                    proxy=TVER_UPSTREAM_PROXY,
+                    follow_redirects=True,
+                    limits=limits,
+                    timeout=timeout,
+                )
+            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
                     local_address="0.0.0.0",
                     retries=2,
@@ -1234,7 +1397,8 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
             and (
                 path.startswith("/_next/static/")
                 or path.startswith("/streaksplayer/")
-                or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf", ".svg", ".png", ".jpg", ".webp"))
+                or path == "/config/streaks_info_v2.json"
+                or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf", ".svg", ".png", ".jpg", ".webp", ".ico"))
             )
             and path != "/setting.js"
         ):
@@ -1245,7 +1409,11 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
 
 
 def _pack_relay_response(
-    status: int, status_text: str, headers_list: list[list[str]], body: bytes
+    status: int,
+    status_text: str,
+    headers_list: list[list[str]],
+    body: bytes,
+    request: Request | None = None,
 ) -> Response:
     meta_bytes = json.dumps(
         {
@@ -1256,14 +1424,22 @@ def _pack_relay_response(
         ensure_ascii=False,
     ).encode("utf-8")
     payload = struct.pack(">I", len(meta_bytes)) + meta_bytes + body
+    resp_headers = {
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    if (
+        request is not None
+        and len(payload) >= 1024
+        and "gzip" in (request.headers.get("accept-encoding") or "").lower()
+    ):
+        payload = gzip.compress(payload, compresslevel=5)
+        resp_headers["Content-Encoding"] = "gzip"
     return Response(
         payload,
         media_type="application/octet-stream",
-        headers={
-            "Cache-Control": "private, no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-            "Vary": "*",
-        },
+        headers=resp_headers,
     )
 
 
@@ -1289,7 +1465,8 @@ def _decode_media_key(k: str) -> str:
 def _rewrite_hls_manifest(
     body: bytes, manifest_url: str, *, for_native_player: bool = False
 ) -> bytes:
-    """Rewrite all HTTP(S)/relative HLS .m3u8 URIs to /tver/runtime/media-relay?k=..."""
+    """Resolve relative HLS .m3u8 URIs to full HTTP(S) URLs for Video.js/MSE,
+    or to /tver/runtime/media-relay?native=1&k=... for native <video> players."""
     try:
         text = body.decode("utf-8")
     except Exception:
@@ -1302,7 +1479,9 @@ def _rewrite_hls_manifest(
         abs_url = urljoin(manifest_url, clean_ref)
         if not abs_url.lower().startswith(("http://", "https://")):
             return raw_ref
-        return "/tver/runtime/media-relay?k=" + _encode_media_key(abs_url)
+        if for_native_player:
+            return "/tver/runtime/media-relay?native=1&via=server&k=" + _encode_media_key(abs_url)
+        return abs_url
 
     text = re.sub(
         r'URI="([^"]+)"',
@@ -1550,6 +1729,58 @@ async def _serve_virtual_wasm_js() -> Response:
     )
 
 
+_EMPTY_VAST_BYTES = b'<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>'
+_SHORT_CIRCUIT_HOSTS = frozenset(
+    {
+        "m-tag.tver.jp",
+        "s-tag.tver.jp",
+        "ce-api.tver.jp",
+        "log.tver.jp",
+        "analytics.tiktok.com",
+        "analytics.twitter.com",
+        "ads-twitter.com",
+        "b99.yahoo.co.jp",
+        "yjtag.yahoo.co.jp",
+        "yads.c.yimg.jp",
+        "dmp.im-apps.net",
+        "connect.facebook.net",
+        "gum.criteo.com",
+        "static.criteo.net",
+        "bidder.criteo.com",
+        "cnt.fout.jp",
+        "sync.fout.jp",
+        "js.fout.jp",
+        "www.google-analytics.com",
+        "region1.google-analytics.com",
+        "analytics.google.com",
+        "stats.g.doubleclick.net",
+    }
+)
+
+
+def _check_server_short_circuit(host: str, raw_path: str) -> tuple[int, str, bytes] | None:
+    p = raw_path or ""
+    pl = p.lower()
+    if (host == "adsvr.tver.jp" and pl.startswith("/ad-server")) or (
+        host in ("pubads.g.doubleclick.net", "securepubads.g.doubleclick.net")
+        and ("/gampad/ads" in pl or "/pagead/ads" in pl)
+    ):
+        return (200, "application/xml; charset=utf-8", _EMPTY_VAST_BYTES)
+    if host in ("imasdk.googleapis.com", "pagead2.googlesyndication.com") and (
+        "omweb-v1.js" in pl or "omsdk-v1.js" in pl
+    ):
+        return (200, "application/javascript; charset=utf-8", b"")
+    if (
+        host in _SHORT_CIRCUIT_HOSTS
+        or host.endswith(".ads-twitter.com")
+        or (host == "www.facebook.com" and pl.startswith("/tr"))
+    ):
+        if pl.endswith(".js"):
+            return (200, "application/javascript; charset=utf-8", b"")
+        return (200, "application/json", b"{}")
+    return None
+
+
 @router.api_route(
     "/tver/~/sj/{rest:path}",
     methods=["GET", "HEAD", "POST", "OPTIONS"],
@@ -1607,18 +1838,17 @@ async def tver_sj_direct_fallback(rest: str, request: Request):
                 return await _serve_tver_media_url(nested, request)
         host = (parsed.hostname or "").lower().rstrip(".")
         path = (parsed.path or "").lower()
-        if (
-            host in ("analytics.tiktok.com", "analytics.twitter.com", "ads-twitter.com", "b99.yahoo.co.jp", "yjtag.yahoo.co.jp", "dmp.im-apps.net", "connect.facebook.net")
-            or host.endswith(".ads-twitter.com")
-        ):
+        sc = _check_server_short_circuit(host, parsed.path or "")
+        if sc is not None:
+            sc_status, sc_ct, sc_body = sc
             return Response(
-                b"{}",
-                status_code=200,
-                media_type="application/json",
-                headers={"Access-Control-Allow-Origin": "*"},
+                b"" if request.method == "HEAD" else sc_body,
+                status_code=sc_status,
+                media_type=sc_ct,
+                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
             )
         if host == "image-cdn.tver.jp" or path.endswith(
-            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
+            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
         ):
             return await _serve_tver_media_url(virtual_url, request)
     except Exception:
@@ -1691,6 +1921,8 @@ def _is_leaked_proxy_url(ref_val: str) -> bool:
 
 @router.post("/tver/runtime/http-relay", include_in_schema=False)
 async def tver_http_relay(request: Request):
+    global _CURL_DISABLED_UNTIL
+
     raw = await request.body()
     if len(raw) < 4:
         return Response(b"invalid frame", status_code=400)
@@ -1730,6 +1962,20 @@ async def tver_http_relay(request: Request):
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
         return Response(b"unsupported port", status_code=403)
+
+    sc = _check_server_short_circuit(host, parsed.path or "")
+    if sc is not None:
+        sc_status, sc_ct, sc_body = sc
+        return _pack_relay_response(
+            sc_status,
+            "OK",
+            [
+                ["content-type", sc_ct],
+                ["access-control-allow-origin", "*"],
+                ["access-control-allow-credentials", "true"],
+            ],
+            b"" if method == "HEAD" else sc_body,
+        )
 
     try:
         await _ensure_public_host(host, port)
@@ -1830,13 +2076,6 @@ async def tver_http_relay(request: Request):
         if has_origin:
             header_dict["Origin"] = "https://tver.jp"
 
-    has_sensitive_auth = (
-        bool(cookie_parts)
-        or any(k.lower() in ("authorization", "x-tver-platform-type") for k in header_dict)
-        or host in AUTH_HOSTS
-        or host.endswith((".api.tver.jp", "platform-api.tver.jp", "service-api.tver.jp", "member-api.tver.jp", "user-api.tver.jp"))
-    )
-
     path_lower = (parsed.path or "").lower()
     has_range = any(k.lower() == "range" for k in header_dict)
     is_static_img_host = host == "image-cdn.tver.jp" or (
@@ -1859,12 +2098,12 @@ async def tver_http_relay(request: Request):
                 b"" if method == "HEAD" else c_body,
             )
 
-    cacheable = (not has_sensitive_auth) and _is_cacheable_static_asset(method, url)
+    cacheable = (not has_range) and _is_cacheable_static_asset(method, url)
     if cacheable:
         cached = _STATIC_ASSET_CACHE.get(url)
         if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
             _, c_status, c_text, c_headers, c_body = cached
-            return _pack_relay_response(c_status, c_text, c_headers, c_body)
+            return _pack_relay_response(c_status, c_text, c_headers, c_body, request=request)
 
     impersonate_profile = _select_curl_impersonate(client_ua)
     if impersonate_profile.startswith("safari"):
@@ -1883,55 +2122,80 @@ async def tver_http_relay(request: Request):
                 ch_plat = '"Windows"'
             header_dict["sec-ch-ua-platform"] = ch_plat
 
-    ephemeral_session: StatelessCurlSession | None = None
     try:
-        if StatelessCurlSession is not None:
-            if has_sensitive_auth:
-                ephemeral_session = StatelessCurlSession(
-                    impersonate=impersonate_profile,
-                    default_headers=False,
-                    allow_redirects=False,
-                    timeout=25,
-                    max_clients=4,
-                )
-                active_session = ephemeral_session
-            else:
-                active_session = await _get_curl_session()
-        else:
-            active_session = None
-
-        used_curl = False
-        if active_session is not None:
-            try:
-                upstream = await active_session.request(
-                    method=method,
-                    url=url,
-                    headers=header_dict,
-                    data=req_body if req_body else None,
-                    allow_redirects=False,
-                    timeout=22,
-                )
-                status = int(upstream.status_code)
-                status_text = str(getattr(upstream, "reason", "") or "OK")
-                resp_body = bytes(upstream.content or b"")
-                raw_multi = upstream.headers.multi_items()
-                used_curl = True
-            except Exception:
-                used_curl = False
-
-        if not used_curl:
-            client = await _get_media_http_client()
+        client = await _get_relay_http_client()
+        httpx_err: Exception | None = None
+        status = 502
+        status_text = "Bad Gateway"
+        resp_body = b""
+        raw_multi: list[tuple[str, str]] = []
+        try:
             upstream = await client.request(
                 method=method,
                 url=url,
                 headers=header_dict,
                 content=req_body if req_body else None,
-                follow_redirects=False,
             )
             status = int(upstream.status_code)
             status_text = str(upstream.reason_phrase or "OK")
             resp_body = bytes(upstream.content or b"")
             raw_multi = list(upstream.headers.multi_items())
+        except Exception as exc_http:
+            httpx_err = exc_http
+
+        need_curl_fallback = httpx_err is not None or (status == 403 and host in AUTH_HOSTS)
+        if need_curl_fallback:
+            curl_sess = await _get_curl_session(impersonate_profile)
+            if curl_sess is not None:
+                try:
+                    c_up = await curl_sess.request(
+                        method=method,
+                        url=url,
+                        headers=header_dict,
+                        data=req_body if req_body else None,
+                        allow_redirects=False,
+                        timeout=7,
+                    )
+                    status = int(c_up.status_code)
+                    status_text = str(getattr(c_up, "reason", "") or "OK")
+                    resp_body = bytes(c_up.content or b"")
+                    raw_multi = list(c_up.headers.multi_items())
+                    httpx_err = None
+                except Exception as c_exc:
+                    if "28" in str(c_exc) or "timed out" in str(c_exc).lower():
+                        _CURL_DISABLED_UNTIL = time.time() + 120.0
+                    if httpx_err is not None:
+                        raise httpx_err
+            elif httpx_err is not None:
+                raise httpx_err
+
+        if (
+            host == "playback.api.streaks.jp"
+            and status == 403
+            and b"P01002" in resp_body
+            and TVER_STREAKS_RELAY_URL
+        ):
+            try:
+                sep = "&" if "?" in TVER_STREAKS_RELAY_URL else "?"
+                relay_target = f"{TVER_STREAKS_RELAY_URL}{sep}url={quote(url, safe='')}"
+                fwd_hdrs = {
+                    k: v
+                    for k, v in header_dict.items()
+                    if k.lower() in ("x-streaks-api-key", "accept", "user-agent", "origin", "referer")
+                }
+                r_up = await client.request(
+                    method=method,
+                    url=relay_target,
+                    headers=fwd_hdrs,
+                    content=req_body if req_body else None,
+                )
+                if r_up.status_code < 400:
+                    status = int(r_up.status_code)
+                    status_text = str(r_up.reason_phrase or "OK")
+                    resp_body = bytes(r_up.content or b"")
+                    raw_multi = list(r_up.headers.multi_items())
+            except Exception:
+                pass
     except Exception as exc:
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
         return _pack_relay_response(
@@ -1940,17 +2204,12 @@ async def tver_http_relay(request: Request):
             [["content-type", "text/plain; charset=utf-8"]],
             err_msg,
         )
-    finally:
-        if ephemeral_session is not None:
-            try:
-                await ephemeral_session.close()
-            except Exception:
-                pass
 
     out_headers: list[list[str]] = []
     has_set_cookie = False
     is_m3u8 = path_lower.endswith(".m3u8")
     is_html = False
+    is_json = False
     resp_media_type = "application/octet-stream"
     resp_cc = "public, max-age=86400"
     for k, v in raw_multi:
@@ -1967,9 +2226,20 @@ async def tver_http_relay(request: Request):
                 is_m3u8 = True
             elif "text/html" in vl:
                 is_html = True
+            elif "json" in vl:
+                is_json = True
         elif kl == "cache-control":
             resp_cc = v
         out_headers.append([k, v])
+
+    if host == "playback.api.streaks.jp" and status == 200 and is_json and resp_body and b'"ads"' in resp_body:
+        try:
+            pb_data = json.loads(resp_body.decode("utf-8"))
+            if isinstance(pb_data, dict) and "ads" in pb_data:
+                pb_data.pop("ads", None)
+                resp_body = json.dumps(pb_data, ensure_ascii=False).encode("utf-8")
+        except Exception:
+            pass
 
     if is_html and status == 200 and resp_body and b"modulepreload" in resp_body:
         resp_body = re.sub(
@@ -2006,7 +2276,6 @@ async def tver_http_relay(request: Request):
     if (
         cacheable
         and not has_set_cookie
-        and not cookie_parts
         and status == 200
         and 0 < len(resp_body) <= _STATIC_ASSET_MAX_BYTES
     ):
@@ -2021,7 +2290,7 @@ async def tver_http_relay(request: Request):
             resp_body,
         )
 
-    return _pack_relay_response(status, status_text, out_headers, resp_body)
+    return _pack_relay_response(status, status_text, out_headers, resp_body, request=request)
 
 
 @router.websocket("/tver/wisp/")
@@ -2100,6 +2369,10 @@ def _shell_html(initial_target: str) -> str:
 <meta name="theme-color" content="#ffffff">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="preload" href="/tver/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/tver/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/tver/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <style>
 *{{box-sizing:border-box}}
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP","Segoe UI",Roboto,sans-serif}}
@@ -2135,6 +2408,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   const MEDIA_RELAY_ENDPOINT = "/tver/runtime/media-relay";
   const STATIC_CACHE_NAME = "sh-tver-static-{RUNTIME_REV}";
   const MEDIA_CACHE_NAME = "sh-tver-media-{RUNTIME_REV}";
+  const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
   const SESSION_KEY = "schoolhub.tver.target.v1";
   const SW_GUARD = "schoolhub.tver.sw-reload.v1";
   const MAX_RECOVERY = 3;
@@ -2259,6 +2533,24 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     }}
   }}
 
+  function isStreamCdnTarget(target) {{
+    if (!target) return false;
+    const h = String(target.hostname || "").toLowerCase().replace(/\\.$/, "");
+    const p = String(target.pathname || "");
+    if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
+    if (h.endsWith(".api.streaks.jp")) return false;
+    if ((
+        h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") || h.endsWith(".akamaihd.net") ||
+        h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") || h.endsWith(".brightcove.com") ||
+        h.endsWith(".brightcove.net") || h.endsWith(".streaks.jp") || h.endsWith(".llnwd.net") ||
+        h.endsWith(".edgekey.net") || h.endsWith(".edgesuite.net") || h.endsWith(".cdngc.net") ||
+        h.endsWith(".footprint.net") || h === "localhost" || h === "127.0.0.1"
+    ) && /\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) {{
+      return true;
+    }}
+    return false;
+  }}
+
   function isDirectMediaTarget(target) {{
     if (!target) return false;
     const h = String(target.hostname || "").toLowerCase().replace(/\\.$/, "");
@@ -2266,14 +2558,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
     if (h === "image-cdn.tver.jp") return true;
     if (h === "statics.tver.jp" && /\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(p)) return true;
-    if (!h.endsWith(".api.streaks.jp") && (
-        h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") || h.endsWith(".akamaihd.net") ||
-        h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") || h.endsWith(".brightcove.com") ||
-        h.endsWith(".brightcove.net") || h.endsWith(".streaks.jp")
-    ) && /\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) {{
-      return true;
-    }}
-    return false;
+    return isStreamCdnTarget(target);
   }}
 
   function isCacheableImageTarget(target) {{
@@ -2281,6 +2566,24 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     const h = String(target.hostname || "").toLowerCase().replace(/\\.$/, "");
     const p = String(target.pathname || "");
     return h === "image-cdn.tver.jp" || (h === "statics.tver.jp" && /\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(p));
+  }}
+
+  function rewriteM3u8Text(text, manifestUrl) {{
+    const toTarget = (rawRef) => {{
+      const cleanRef = String(rawRef || "").trim();
+      if (!cleanRef || /^(data:|skd:|blob:)/i.test(cleanRef)) return rawRef;
+      try {{
+        const absHref = new URL(cleanRef, manifestUrl).href;
+        return /^https?:\\/\\//i.test(absHref) ? absHref : rawRef;
+      }} catch (_) {{
+        return rawRef;
+      }}
+    }};
+    const withUris = String(text || "").replace(/URI="([^"]+)"/g, (_, u) => 'URI="' + toTarget(u) + '"');
+    return withUris.split(/\\r?\\n/).map((line) => {{
+      const s = line.trim();
+      return (s && !s.startsWith("#")) ? toTarget(s) : line;
+    }}).join("\\n");
   }}
 
   function unwrapMediaTarget(urlStr) {{
@@ -2309,9 +2612,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp" || h === "player.tver.jp") &&
-          (p.startsWith("/_next/static/") || p.startsWith("/streaksplayer/")) &&
-          /\\.(js|css|woff2|woff|ttf|svg|png|jpg|webp)$/i.test(p)) {{
+      if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp" || h === "player.tver.jp" || h === "statics.tver.jp") &&
+          p !== "/setting.js" &&
+          (p.startsWith("/_next/static/") || p.startsWith("/streaksplayer/") || p === "/config/streaks_info_v2.json" ||
+           /\\.(js|css|woff2|woff|ttf|svg|png|jpg|webp|ico)$/i.test(p))) {{
         return true;
       }}
     }} catch (_) {{}}
@@ -2324,11 +2628,45 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
       if (
+        (h === "adsvr.tver.jp" && p.startsWith("/ad-server")) ||
+        ((h === "pubads.g.doubleclick.net" || h === "securepubads.g.doubleclick.net") && (p.includes("/gampad/ads") || p.includes("/pagead/ads")))
+      ) {{
+        return {{
+          body: new TextEncoder().encode(EMPTY_VAST_XML).buffer,
+          headers: [
+            ["content-type", "application/xml; charset=utf-8"],
+            ["access-control-allow-origin", "*"],
+            ["access-control-allow-credentials", "true"],
+          ],
+          status: 200,
+          statusText: "OK",
+        }};
+      }}
+      if (
+        (h === "imasdk.googleapis.com" || h === "pagead2.googlesyndication.com") &&
+        (p.includes("omweb-v1.js") || p.includes("omsdk-v1.js"))
+      ) {{
+        return {{
+          body: new ArrayBuffer(0),
+          headers: [
+            ["content-type", "application/javascript; charset=utf-8"],
+            ["access-control-allow-origin", "*"],
+          ],
+          status: 200,
+          statusText: "OK",
+        }};
+      }}
+      if (
+        h === "m-tag.tver.jp" || h === "s-tag.tver.jp" || h === "ce-api.tver.jp" || h === "log.tver.jp" ||
         h === "analytics.tiktok.com" || h === "analytics.twitter.com" ||
         h === "ads-twitter.com" || h.endsWith(".ads-twitter.com") ||
-        h === "b99.yahoo.co.jp" || h === "yjtag.yahoo.co.jp" ||
+        h === "b99.yahoo.co.jp" || h === "yjtag.yahoo.co.jp" || h === "yads.c.yimg.jp" ||
         h === "dmp.im-apps.net" || h === "connect.facebook.net" ||
-        (h === "www.facebook.com" && p.startsWith("/tr"))
+        (h === "www.facebook.com" && p.startsWith("/tr")) ||
+        h === "gum.criteo.com" || h === "static.criteo.net" || h === "bidder.criteo.com" ||
+        h === "cnt.fout.jp" || h === "sync.fout.jp" || h === "js.fout.jp" ||
+        h === "www.google-analytics.com" || h === "region1.google-analytics.com" ||
+        h === "analytics.google.com" || h === "stats.g.doubleclick.net"
       ) {{
         const isJs = /\\.js(\\?|$)/i.test(p);
         const b = new TextEncoder().encode(isJs ? "" : "{{}}").buffer;
@@ -2449,9 +2787,48 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       const rangeEntry = list.find(([k]) => k.toLowerCase() === "range");
 
       if ((m === "GET" || m === "HEAD") && unwrapped && isDirectMediaTarget(unwrapped)) {{
-        const relayUrl = MEDIA_RELAY_ENDPOINT + "?k=" + encodeMediaKey(unwrapped.href);
+        const relayUrl = MEDIA_RELAY_ENDPOINT + "?via=server&k=" + encodeMediaKey(unwrapped.href);
         const canCache = m === "GET" && !rangeEntry && isCacheableImageTarget(unwrapped);
+        const isStreamCdn = isStreamCdnTarget(unwrapped);
+        const isM3u8Path = /\\.m3u8(\\?|$)/i.test(unwrapped.pathname || "");
         try {{
+          if (isStreamCdn) {{
+            try {{
+              const cdnHdrs = {{}};
+              if (rangeEntry && rangeEntry[1] && !isM3u8Path) cdnHdrs["Range"] = rangeEntry[1];
+              const cdnResp = await fetch(unwrapped.href, {{
+                method: m,
+                headers: cdnHdrs,
+                mode: "cors",
+                credentials: "omit",
+                signal,
+              }});
+              if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
+                const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
+                if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
+                  const rawTxt = await cdnResp.text();
+                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
+                  return {{
+                    body: new TextEncoder().encode(rewritten).buffer,
+                    headers: [
+                      ["content-type", "application/vnd.apple.mpegurl"],
+                      ["access-control-allow-origin", "*"],
+                      ["cross-origin-resource-policy", "cross-origin"],
+                      ["cache-control", "no-cache"],
+                    ],
+                    status: 200,
+                    statusText: "OK",
+                  }};
+                }}
+                return {{
+                  body: m === "HEAD" ? new ArrayBuffer(0) : await cdnResp.arrayBuffer(),
+                  headers: [...cdnResp.headers.entries()],
+                  status: cdnResp.status,
+                  statusText: cdnResp.statusText || "OK",
+                }};
+              }}
+            }} catch (_) {{}}
+          }}
           if (canCache && typeof caches !== "undefined") {{
             try {{
               const cache = await caches.open(MEDIA_CACHE_NAME);
@@ -2479,7 +2856,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
             }} catch (_) {{}}
           }}
           const fwdHeaders = {{}};
-          if (rangeEntry && rangeEntry[1]) fwdHeaders["Range"] = rangeEntry[1];
+          if (rangeEntry && rangeEntry[1] && !isM3u8Path) fwdHeaders["Range"] = rangeEntry[1];
           const r = await fetch(relayUrl, {{ method: m, headers: fwdHeaders, credentials: "omit", signal }});
           if (r && r.status < 400) {{
             return {{
@@ -2492,8 +2869,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         }} catch (_) {{}}
       }}
 
-      const hasCookie = list.some(([k]) => k.toLowerCase() === "cookie");
-      const canClientCache = !hasCookie && isClientCacheableAsset(m, urlStr);
+      const canClientCache = !rangeEntry && isClientCacheableAsset(m, urlStr);
       if (canClientCache && typeof caches !== "undefined") {{
         try {{
           const cache = await caches.open(STATIC_CACHE_NAME);
@@ -2884,7 +3260,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
           ensurePageMedia();
         }}
       }}
-    }}, 650);
+    }}, 250);
   }}
 
   function bindFrame() {{

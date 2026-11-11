@@ -420,70 +420,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     }
   } catch (e) {}
 
-  // 1b. Ultra-Low-Latency WebRTC Playout & Receiver Optimizer
-  try {
-    function applyLowLatencyReceiver(receiver) {
-      if (!receiver) return;
-      const isApple = /iPad|iPhone|iPod|Macintosh/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-      if (isApple) {
-        // Apple WebKit VideoToolbox requires ~20ms jitter buffer to prevent hardware decoder starvation on iPad
-        try { if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.025; } catch (_) {}
-        try { if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 25; } catch (_) {}
-        return;
-      }
-      try {
-        if ('playoutDelayHint' in receiver) receiver.playoutDelayHint = 0.015;
-      } catch (_) {}
-      try {
-        if ('jitterBufferTarget' in receiver) receiver.jitterBufferTarget = 15;
-      } catch (_) {}
-    }
-    if (typeof RTCPeerConnection !== 'undefined') {
-      const origAddEv = RTCPeerConnection.prototype.addEventListener;
-      RTCPeerConnection.prototype.addEventListener = function(type, listener, options) {
-        if (type === 'track') {
-          const wrapped = function(ev) {
-            if (ev && ev.receiver) applyLowLatencyReceiver(ev.receiver);
-            return listener.apply(this, arguments);
-          };
-          return origAddEv.call(this, type, wrapped, options);
-        }
-        return origAddEv.apply(this, arguments);
-      };
-      const ontrackDesc = Object.getOwnPropertyDescriptor(RTCPeerConnection.prototype, 'ontrack');
-      if (ontrackDesc && ontrackDesc.set) {
-        Object.defineProperty(RTCPeerConnection.prototype, 'ontrack', {
-          set: function(fn) {
-            const wrapped = function(ev) {
-              if (ev && ev.receiver) applyLowLatencyReceiver(ev.receiver);
-              return fn ? fn.apply(this, arguments) : undefined;
-            };
-            return ontrackDesc.set.call(this, wrapped);
-          },
-          get: ontrackDesc.get,
-          configurable: true
-        });
-      }
-      const origGetReceivers = RTCPeerConnection.prototype.getReceivers;
-      if (origGetReceivers) {
-        RTCPeerConnection.prototype.getReceivers = function() {
-          const list = origGetReceivers.apply(this, arguments) || [];
-          for (let i = 0; i < list.length; i++) applyLowLatencyReceiver(list[i]);
-          return list;
-        };
-      }
-    }
-    if (typeof RTCDataChannel !== 'undefined') {
-      const origDcSend = RTCDataChannel.prototype.send;
-      RTCDataChannel.prototype.send = function(data) {
-        // Prevent iPad WebKit SCTP send buffer exhaustion on rapid multi-touch drag events (120Hz ProMotion)
-        if (this.bufferedAmount > 65536 && typeof data === 'string' && data.startsWith('touch>Touch move')) {
-          return;
-        }
-        return origDcSend.apply(this, arguments);
-      };
-    }
-  } catch (_) {}
+  // 1b. Native adaptive WebRTC jitter buffer preserved (congestion guard consolidated in RTCDataChannel.prototype.send below)
 
   // 1c. Ensure all inline video and audio elements on iPad/iOS have webkit-playsinline and playsinline
   try {
@@ -802,11 +739,26 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       }
     } catch (_) {}
 
-    // Fallback: reload current page after brief pause
+    // Safe fallback: NEVER reload a consumed single-use /run-site/?sid=... URL (which causes Init error freeze)!
+    // Instead clear the badge and attempt an in-place ICE restart if PC is still alive, or return cleanly to /cloudmoon/ only if session is completely dead.
     setTimeout(function() {
       window.__cm_reconnecting = false;
-      try { window.location.reload(); } catch (_) {}
-    }, 800);
+      try {
+        const b = document.getElementById('__cm_reconnect_badge');
+        if (b && b.parentNode) b.parentNode.removeChild(b);
+      } catch (_) {}
+      try {
+        const pc = window.__cm_pc;
+        if (pc && pc.connectionState !== 'closed' && pc.connectionState !== 'failed') {
+          if (typeof pc.restartIce === 'function') pc.restartIce();
+          return;
+        }
+        if (reason === 'pc_connection_failed' || reason === 'datachannel_closed' || reason === 'cleanup_redirect' || reason === 'redirect') {
+          window.__cm_intentional_exit = true;
+          window.location.replace('/cloudmoon/');
+        }
+      } catch (_) {}
+    }, 1200);
   };
 
   try {
@@ -822,17 +774,20 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           pc.addEventListener('connectionstatechange', function() {
             if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
               if (pc.connectionState === 'failed') {
+                try { if (typeof pc.restartIce === 'function') pc.restartIce(); } catch (_) {}
                 setTimeout(function() {
-                  if (pc.connectionState !== 'connected') {
+                  if (pc.connectionState === 'failed') {
                     window.__cmAutoReconnect('pc_connection_failed');
                   }
-                }, 2000);
+                }, 4000);
               } else if (pc.connectionState === 'disconnected') {
                 setTimeout(function() {
-                  if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-                    window.__cmAutoReconnect('pc_connection_disconnected');
+                  if (pc.connectionState === 'disconnected') {
+                    try { if (typeof pc.restartIce === 'function') pc.restartIce(); } catch (_) {}
+                  } else if (pc.connectionState === 'failed') {
+                    window.__cmAutoReconnect('pc_connection_failed');
                   }
-                }, 4500);
+                }, 3500);
               }
             }
           });
@@ -840,16 +795,19 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
             window.__cm_dc = dc;
             window.__cm_dc_opened_at = Date.now();
             window.__cm_reconnecting = false;
+            try {
+              const b = document.getElementById('__cm_reconnect_badge');
+              if (b && b.parentNode) b.parentNode.removeChild(b);
+            } catch (_) {}
             try { dc.send('adBlock>false'); } catch (_) {}
           });
           dc.addEventListener('close', function() {
-            // If DataChannel closes during active gameplay, auto-reconnect within 2.5s
             if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
               setTimeout(function() {
-                if (!window.__cm_dc || window.__cm_dc.readyState !== 'open') {
+                if ((!window.__cm_dc || window.__cm_dc.readyState !== 'open') && (!window.__cm_pc || window.__cm_pc.connectionState === 'failed' || window.__cm_pc.connectionState === 'closed')) {
                   window.__cmAutoReconnect('datachannel_closed');
                 }
-              }, 2500);
+              }, 3500);
             }
           });
         } catch (_) {}
@@ -866,6 +824,10 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           window.__cm_dc = this;
           if (!window.__cm_dc_opened_at && this.readyState === 'open') {
             window.__cm_dc_opened_at = Date.now();
+          }
+          // Drop congested touch-move packets when SCTP buffer exceeds 64KB (120Hz ProMotion protection)
+          if (this.bufferedAmount > 65536 && typeof data === 'string' && data.startsWith('touch>Touch move')) {
+            return;
           }
         } catch (_) {}
         if (typeof data === 'string' && data.startsWith('adBlock>')) {
@@ -938,40 +900,18 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     };
   } catch (e) {}
 
-  // 5. Inactivity keepalive, 5s adBlock>false pod heartbeat, video watchdog & 20s background reward refill
+  // 5. Gentle DataChannel keepalive, non-destructive RTP H.264 stream healer & 20s background reward refill
   try {
-    // 5a. Anti-AFK: ANY user interaction resets client-side inactivity timer (throttled to 5s)
-    let lastActivityDispatch = 0;
-    const reportActivity = function() {
-      const now = Date.now();
-      if (now - lastActivityDispatch > 5000) {
-        lastActivityDispatch = now;
-        try {
-          window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
-        } catch (_) {}
-      }
-    };
-    ['keydown', 'keyup', 'mousedown', 'mouseup', 'mousemove', 'wheel', 'touchstart', 'touchmove', 'pointerdown'].forEach(function(evType) {
-      window.addEventListener(evType, reportActivity, { passive: true, capture: true });
-    });
-
-    // 5b. 5-Second DataChannel `adBlock>false` Heartbeat to Android Pod (replaces Ce()/ge() disabled by showAD:false)
+    // 5a. Gentle DataChannel `adBlock>false` heartbeat every 25s (only when buffer is clear)
     setInterval(function() {
       try {
-        if (window.__cm_dc && window.__cm_dc.readyState === 'open') {
-          window.__cm_dc.send('adBlock>false');
+        if (window.__cm_dc && window.__cm_dc.readyState === 'open' && (window.__cm_dc.bufferedAmount || 0) === 0) {
+          window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
         }
       } catch (_) {}
-    }, 5000);
+    }, 25000);
 
-    // 5b-2. Anti-AFK pulse every 15 seconds to keep client-side inactivity timer reset
-    setInterval(function() {
-      try {
-        window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
-      } catch (_) {}
-    }, 15000);
-
-    // 5c. Periodic Background Free Playtime Refill (every 20 seconds with proper `game_name` field!)
+    // 5c. Periodic Background Free Playtime Refill (every 20 seconds with proper `game_name` field)
     const claimPlaytimeRefill = function() {
       try {
         const s = getStoredSession();
@@ -994,39 +934,61 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     setTimeout(claimPlaytimeRefill, 3000);
     setTimeout(claimPlaytimeRefill, 10000);
 
-    // 5c-2. Video & Audio Freeze Watchdog on /run-site
+    // 5c-2. Non-destructive RTP-aware H.264 Video & Audio Stream Healer on /run-site
+    // Uses inbound-rtp stats (framesReceived vs framesDecoded) so static game menus NEVER trigger false reloads,
+    // and heals wedged H.264 decoders in-place by rebinding srcObject (triggering an instant PLI keyframe) without dropping gameplay!
     if ((window.location.pathname || '').startsWith('/run-site')) {
-      let lastVideoTime = -1;
-      let stalledTicks = 0;
-      setInterval(function() {
+      let prevFramesRecv = -1;
+      let prevFramesDec = -1;
+      let decodeWedgedCount = 0;
+      let lastHealAt = 0;
+      setInterval(async function() {
         try {
           const v = document.getElementById('remote-video');
           const a = document.getElementById('remote-audio');
-          if (v && v.srcObject) {
-            if (v.paused) {
-              v.play().catch(function() {});
-            }
-            const ct = v.currentTime || 0;
-            if (ct > 0 && ct === lastVideoTime) {
-              stalledTicks++;
-              const pcState = (window.__cm_pc && window.__cm_pc.connectionState) || '';
-              const iceState = (window.__cm_pc && window.__cm_pc.iceConnectionState) || '';
-              const dcNotOpen = (!window.__cm_dc || window.__cm_dc.readyState !== 'open');
-              const pcDead = (pcState === 'disconnected' || pcState === 'failed' || pcState === 'closed' || iceState === 'disconnected' || iceState === 'failed');
-              if ((stalledTicks >= 2 && (dcNotOpen || pcDead)) || stalledTicks >= 5) {
-                stalledTicks = 0;
-                window.__cmAutoReconnect('video_frozen');
-              }
-            } else {
-              stalledTicks = 0;
-              lastVideoTime = ct;
-            }
+          if (v && v.srcObject && v.paused && !document.hidden) {
+            v.play().catch(function() {});
           }
-          if (a && a.srcObject && a.paused) {
+          if (a && a.srcObject && a.paused && !document.hidden) {
             a.play().catch(function() {});
           }
+          const pc = window.__cm_pc;
+          if (!pc || typeof pc.getStats !== 'function' || pc.connectionState !== 'connected' || document.hidden) {
+            decodeWedgedCount = 0;
+            return;
+          }
+          const stats = await pc.getStats();
+          let recv = -1;
+          let dec = -1;
+          stats.forEach(function(r) {
+            if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
+              if (typeof r.framesReceived === 'number') recv = r.framesReceived;
+              if (typeof r.framesDecoded === 'number') dec = r.framesDecoded;
+            }
+          });
+          if (recv >= 0 && dec >= 0) {
+            if (prevFramesRecv >= 0 && prevFramesDec >= 0) {
+              const dRecv = recv - prevFramesRecv;
+              const dDec = dec - prevFramesDec;
+              if (dRecv >= 15 && dDec <= 0) {
+                decodeWedgedCount++;
+                if (decodeWedgedCount >= 2 && Date.now() - lastHealAt > 10000 && v && v.srcObject) {
+                  decodeWedgedCount = 0;
+                  lastHealAt = Date.now();
+                  const stream = v.srcObject;
+                  v.srcObject = null;
+                  v.srcObject = stream;
+                  v.play().catch(function() {});
+                }
+              } else {
+                decodeWedgedCount = 0;
+              }
+            }
+            prevFramesRecv = recv;
+            prevFramesDec = dec;
+          }
         } catch (_) {}
-      }, 2500);
+      }, 3000);
     }
 
     // 5d. Intercept unprovoked navigation to Home on /run-site/ gameplay pages
@@ -1704,8 +1666,8 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'localStorage.setItem("enableHighLight","false")',
         )
 
-        # ICE candidate pre-gathering (iceCandidatePoolSize:4) and 1s low-latency ping HUD
-        # (Preserve CloudMoon's native minDelayMs:15..100ms playout delay so H.264 decoder never starves/freezes)
+        # ICE candidate pre-gathering (iceCandidatePoolSize:4) and resilient adaptive jitter buffer (28..150ms)
+        # Prevents H.264 decoder starvation & mid-stream video freezes on Wi-Fi/LTE jitter while preserving native 3s stats cadence
         js_text = js_text.replace(
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all"}',
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all",iceCandidatePoolSize:4}',
@@ -1715,8 +1677,8 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'let a={iceServers:t,bundlePolicy:`max-bundle`,rtcpMuxPolicy:`require`,iceTransportPolicy:`all`,iceCandidatePoolSize:4}',
         )
         js_text = js_text.replace(
-            "this.statsInterval=setInterval(()=>this.updateStats(),3e3)",
-            "this.statsInterval=setInterval(()=>this.updateStats(),1e3)",
+            "minDelayMs:15,maxDelayMs:100,",
+            "minDelayMs:28,maxDelayMs:150,",
         )
         js_text = js_text.replace(
             "et.set(e.currentRoundTripTime*1e3)",
@@ -2649,7 +2611,11 @@ async def cloudmoon_js_proxy(request: Request, path: str) -> Response:
         return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
     clean_path = path.lstrip("/")
     # Block Ad-Shield anti-adblock (cm-compat.js), ramp-helper.js, and all.js
-    if clean_path in ("all.js", "cm-compat.js", "ramp-helper.js") or "ad" in clean_path.lower():
+    if (
+        clean_path in ("all.js", "cm-compat.js", "ramp-helper.js")
+        or clean_path.startswith("ads/")
+        or any(k in clean_path.lower() for k in ("ad-shield", "adsense", "prebid", "doubleclick", "adblock"))
+    ):
         return Response(
             content=b"/* ad-shield blocked */",
             status_code=200,

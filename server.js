@@ -81,6 +81,16 @@ async function ensurePython() {
     process.exit(1);
   }
 
+  const linejsPkg = path.join(__dirname, 'node_modules', '@evex-dev', 'linejs', 'package.json');
+  if (!fs.existsSync(linejsPkg)) {
+    try {
+      console.log('[SchoolHub Launcher] Installing Node dependencies (@evex-dev/linejs)...');
+      execSync('npm install --omit=dev --no-audit --no-fund', { cwd: __dirname, stdio: 'inherit' });
+    } catch (err) {
+      console.warn('[SchoolHub Launcher] npm install warning:', err.message);
+    }
+  }
+
   const vendorDir = path.join(__dirname, '_vendor');
   const wheelsDir = path.join(__dirname, 'wheels');
   const bootstrapScript = path.join(__dirname, 'bootstrap_wheels.py');
