@@ -998,6 +998,7 @@ function checkShortCircuit(target, reqOrigin) {{
     h === 'www.google-analytics.com' || h === 'region1.google-analytics.com' ||
     h === 'analytics.google.com' || h === 'stats.g.doubleclick.net' ||
     h.endsWith('.karte.io') || h.endsWith('.braze.com') ||
+    h === 'firebaseremoteconfig.googleapis.com' || h.endsWith('.firebaseremoteconfig.googleapis.com') ||
     h === 'js-sec.indexww.com' || h === 'c.amazon-adsystem.com' || h.endsWith('.amazon-adsystem.com')
   ) {{
     const isJs = /\\.js(\\?|$)/i.test(p) || p.includes('/js');
@@ -1136,7 +1137,6 @@ self.addEventListener('fetch', event => {{
               if (hit) return asOut(hit, method);
             }} catch {{}}
           }}
-
           const fetchRelayAsset = async () => {{
             try {{
               const resp = await fetch(relay.href, {{
@@ -1310,7 +1310,6 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=1,
                     limits=limits,
                 )
@@ -1346,7 +1345,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1944,6 +1942,7 @@ _SHORT_CIRCUIT_HOSTS = frozenset(
         "stats.g.doubleclick.net",
         "js-sec.indexww.com",
         "c.amazon-adsystem.com",
+        "firebaseremoteconfig.googleapis.com",
     }
 )
 
@@ -2910,7 +2909,11 @@ async def tver_http_relay(request: Request):
                 ch_plat = '"macOS"'
             else:
                 ch_plat = '"Windows"'
-            header_dict["sec-ch-ua-platform"] = ch_plat
+    if host == "contents-api.tver.jp" or host.endswith((".tver.jp", ".streaks.jp")):
+        if not any(k.lower() == "x-tver-platform-type" for k in header_dict):
+            header_dict["x-tver-platform-type"] = "web"
+        if not any(k.lower() == "x-tver-platform-version" for k in header_dict):
+            header_dict["x-tver-platform-version"] = "5.0.0"
 
     try:
         client = await _get_relay_http_client()

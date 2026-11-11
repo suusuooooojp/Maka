@@ -1,0 +1,12 @@
+{
+  "pauseAll": false,
+  "pausedServices": [],
+  "pauseTitle": "アプリは一時停止中です",
+  "pauseMessage": "",
+  "dialogEnabled": false,
+  "dialogTitle": "管理者からのお知らせ",
+  "dialogMessage": "",
+  "dialogButtonText": "確認",
+  "dialogMode": "always",
+  "updatedAt": 9999999999999
+}

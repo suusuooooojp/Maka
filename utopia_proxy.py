@@ -239,7 +239,7 @@ def _get_asset_client() -> httpx.AsyncClient:
             follow_redirects=True,
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=limits,
-            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", limits=limits),
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(limits=limits),
             headers={"User-Agent": DEFAULT_UA},
         )
     return _ASSET_CLIENT
@@ -254,7 +254,7 @@ def _get_bare_client() -> httpx.AsyncClient:
             verify=False,
             timeout=httpx.Timeout(45.0, connect=10.0),
             limits=limits,
-            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, limits=limits),
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(verify=False, limits=limits),
         )
     return _BARE_CLIENT
 
@@ -268,7 +268,7 @@ def _get_service_client() -> httpx.AsyncClient:
             verify=False,
             timeout=httpx.Timeout(30.0, connect=10.0),
             limits=limits,
-            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, limits=limits),
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(verify=False, limits=limits),
         )
     return _SERVICE_CLIENT
 

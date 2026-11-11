@@ -31,7 +31,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 _HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy"))
 
 RELAY_CLIENT = httpx.AsyncClient(
-    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=2),
+    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(retries=2),
     follow_redirects=True,
     verify=True,
     timeout=httpx.Timeout(connect=10.0, read=None, write=30.0, pool=10.0),
@@ -40,7 +40,7 @@ RELAY_CLIENT = httpx.AsyncClient(
 )
 
 PROBE_CLIENT = httpx.AsyncClient(
-    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1),
+    transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(retries=1),
     follow_redirects=True,
     verify=True,
     timeout=httpx.Timeout(connect=3.0, read=4.0, write=4.0, pool=4.0),

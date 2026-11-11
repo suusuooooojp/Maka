@@ -1128,7 +1128,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
             timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )

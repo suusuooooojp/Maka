@@ -53,7 +53,6 @@ CORE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
-            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_CORE_LIMITS,
@@ -74,7 +73,6 @@ ASSET_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
-            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_ASSET_LIMITS,
@@ -122,7 +120,6 @@ YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
-            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_YT_IMG_LIMITS,

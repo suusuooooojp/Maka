@@ -1196,7 +1196,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
             timeout = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1705,7 +1704,11 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
             rb"\g<1>1",
             html_bytes,
         )
-    if b"data:" not in html_bytes:
+    if b"data:" not in html_bytes or not (
+        b"data:text/javascript" in html_bytes
+        or b"data:application/x-javascript" in html_bytes
+        or b"data:application/javascript" in html_bytes
+    ):
         return html_bytes
     try:
         text = html_bytes.decode("utf-8")
@@ -1763,13 +1766,13 @@ async def _ig_raw_single_request(
         ephemeral: StatelessCurlSession | None = None
         session = None
         try:
-            curl_timeout = min(float(timeout), 4.5) if not fresh_curl else min(float(timeout), 12.0)
+            curl_timeout = min(float(timeout), 4.5) if not fresh_curl else min(float(timeout), 10.0)
             if fresh_curl:
                 ephemeral = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=int(curl_timeout),
+                    timeout=int(max(5.0, curl_timeout)),
                     max_clients=4,
                 )
                 session = ephemeral
@@ -1790,7 +1793,7 @@ async def _ig_raw_single_request(
             raw_multi = list(upstream.headers.multi_items())
             return status, status_text, resp_body, raw_multi
         except Exception:
-            _CURL_DISABLED_UNTIL = time.time() + 60.0
+            _CURL_DISABLED_UNTIL = time.time() + 300.0
             if not fresh_curl and session is not None:
                 try:
                     asyncio.create_task(_reset_curl_session(session))
@@ -1826,95 +1829,122 @@ async def _ig_upstream_request(
     headers: dict[str, str],
     body: bytes | None = None,
     *,
-    timeout: float = 22.0,
-    prefer_httpx: bool = False,
+    timeout: float = 15.0,
+    prefer_httpx: bool = True,
     fresh_curl: bool = False,
     impersonate_profile: str = "chrome131",
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if host:
-        try:
-            await _ensure_public_host(host, port)
-        except PermissionError:
-            raise
-        except Exception:
-            pass
-
-    used_httpx = prefer_httpx or (StatelessCurlSession is None) or (time.time() < _CURL_DISABLED_UNTIL)
-    try:
-        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
-            method,
-            url,
-            headers,
-            body,
-            timeout=timeout,
-            use_httpx=used_httpx,
-            fresh_curl=fresh_curl,
-            impersonate_profile=impersonate_profile,
-        )
-    except Exception:
-        used_httpx = not used_httpx
-        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
-            method,
-            url,
-            headers,
-            body,
-            timeout=timeout,
-            use_httpx=used_httpx,
-            fresh_curl=fresh_curl,
-            impersonate_profile=impersonate_profile,
-        )
-
-    if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
-        m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
-        if m_rd:
-            rd_path = m_rd.group(1).decode("utf-8", "ignore")
-            rd_headers = dict(headers)
-            rd_headers["Sec-Fetch-Dest"] = "empty"
-            rd_headers["Sec-Fetch-Mode"] = "cors"
-            rd_headers["Sec-Fetch-Site"] = "same-origin"
-            rd_headers["Origin"] = f"https://{host}"
-            rd_headers["Referer"] = url
+    cur_url = url
+    cur_headers = dict(headers)
+    for _hop in range(4):
+        parsed = urlparse(cur_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        if host:
             try:
-                _, _, _, rd_multi = await _ig_raw_single_request(
-                    "POST",
-                    f"https://{host}{rd_path}",
-                    rd_headers,
-                    None,
-                    timeout=12.0,
-                    use_httpx=used_httpx,
-                    fresh_curl=False,
-                    impersonate_profile=impersonate_profile,
-                )
-                extra_set_cookies: list[tuple[str, str]] = []
-                rd_cookie_pairs: list[str] = []
-                for rk, rv in rd_multi:
-                    if rk.lower() == "set-cookie":
-                        extra_set_cookies.append((rk, rv))
-                        c_nv = rv.split(";", 1)[0].strip()
-                        if c_nv:
-                            rd_cookie_pairs.append(c_nv)
-                retry_headers = dict(headers)
-                if rd_cookie_pairs:
-                    cur_c = retry_headers.get("Cookie", "")
-                    retry_headers["Cookie"] = (
-                        f"{cur_c}; {'; '.join(rd_cookie_pairs)}" if cur_c else "; ".join(rd_cookie_pairs)
-                    )
-                status, status_text, resp_body, retry_multi = await _ig_raw_single_request(
-                    method,
-                    url,
-                    retry_headers,
-                    body,
-                    timeout=timeout,
-                    use_httpx=used_httpx,
-                    fresh_curl=False,
-                    impersonate_profile=impersonate_profile,
-                )
-                raw_multi = extra_set_cookies + retry_multi
+                await _ensure_public_host(host, port)
+            except PermissionError:
+                raise
             except Exception:
                 pass
+
+        used_httpx = prefer_httpx or (StatelessCurlSession is None) or (time.time() < _CURL_DISABLED_UNTIL)
+        try:
+            status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+                method,
+                cur_url,
+                cur_headers,
+                body,
+                timeout=timeout,
+                use_httpx=used_httpx,
+                fresh_curl=fresh_curl,
+                impersonate_profile=impersonate_profile,
+            )
+        except Exception:
+            used_httpx = not used_httpx
+            status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+                method,
+                cur_url,
+                cur_headers,
+                body,
+                timeout=timeout,
+                use_httpx=used_httpx,
+                fresh_curl=fresh_curl,
+                impersonate_profile=impersonate_profile,
+            )
+
+        if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
+            m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
+            if m_rd:
+                rd_path = m_rd.group(1).decode("utf-8", "ignore")
+                rd_headers = dict(cur_headers)
+                rd_headers["Sec-Fetch-Dest"] = "empty"
+                rd_headers["Sec-Fetch-Mode"] = "cors"
+                rd_headers["Sec-Fetch-Site"] = "same-origin"
+                rd_headers["Origin"] = f"https://{host}"
+                rd_headers["Referer"] = cur_url
+                try:
+                    _, _, _, rd_multi = await _ig_raw_single_request(
+                        "POST",
+                        f"https://{host}{rd_path}",
+                        rd_headers,
+                        None,
+                        timeout=8.0,
+                        use_httpx=used_httpx,
+                        fresh_curl=False,
+                        impersonate_profile=impersonate_profile,
+                    )
+                    extra_set_cookies: list[tuple[str, str]] = []
+                    rd_cookie_pairs: list[str] = []
+                    for rk, rv in rd_multi:
+                        if rk.lower() == "set-cookie":
+                            extra_set_cookies.append((rk, rv))
+                            c_nv = rv.split(";", 1)[0].strip()
+                            if c_nv:
+                                rd_cookie_pairs.append(c_nv)
+                    retry_headers = dict(cur_headers)
+                    if rd_cookie_pairs:
+                        cur_c = retry_headers.get("Cookie", "")
+                        retry_headers["Cookie"] = (
+                            f"{cur_c}; {'; '.join(rd_cookie_pairs)}" if cur_c else "; ".join(rd_cookie_pairs)
+                        )
+                    status, status_text, resp_body, retry_multi = await _ig_raw_single_request(
+                        method,
+                        cur_url,
+                        retry_headers,
+                        body,
+                        timeout=timeout,
+                        use_httpx=used_httpx,
+                        fresh_curl=False,
+                        impersonate_profile=impersonate_profile,
+                    )
+                    raw_multi = extra_set_cookies + retry_multi
+                except Exception:
+                    pass
+
+        if method in ("GET", "HEAD") and status in (301, 302, 303, 307, 308):
+            loc = ""
+            for k, v in raw_multi:
+                if k.lower() == "location":
+                    loc = v
+                    break
+            if loc:
+                target_url = urljoin(cur_url, loc)
+                target_parsed = urlparse(target_url)
+                target_host = (target_parsed.hostname or "").lower().rstrip(".")
+                if target_host in IG_HOSTS or target_host in AUTH_HOSTS or target_host.endswith((".instagram.com", ".facebook.com")):
+                    new_cookies = []
+                    for k, v in raw_multi:
+                        if k.lower() == "set-cookie":
+                            c_nv = v.split(";", 1)[0].strip()
+                            if c_nv:
+                                new_cookies.append(c_nv)
+                    if new_cookies:
+                        existing = cur_headers.get("Cookie", "")
+                        cur_headers["Cookie"] = f"{existing}; {'; '.join(new_cookies)}" if existing else "; ".join(new_cookies)
+                    cur_url = target_url
+                    continue
+        break
 
     return status, status_text, resp_body, raw_multi
 
@@ -2695,9 +2725,9 @@ async def ig_http_relay(request: Request):
             headers={"Cache-Control": "no-store"},
         )
 
-    # If Instagram returns 429 on /ajax/bulk-route-definitions/ or /ajax/route-definition/,
+    # If Instagram returns 404 or 429 on /ajax/bulk-route-definitions/ or /ajax/route-definition/,
     # return valid Comet responses so client-side navigation falls back to clean full-page load.
-    if status == 429 and req_path.startswith("/ajax/bulk-route-definitions"):
+    if status in (404, 429) and req_path.startswith("/ajax/bulk-route-definitions"):
         return _pack_relay_response(
             200,
             "OK",
@@ -2708,7 +2738,7 @@ async def ig_http_relay(request: Request):
             ],
             b'for (;;);{"__ar":1,"payload":{}}',
         )
-    if status == 429 and req_path.startswith("/ajax/route-definition"):
+    if status in (404, 429) and req_path.startswith("/ajax/route-definition"):
         return _pack_relay_response(
             200,
             "OK",
@@ -2751,6 +2781,15 @@ async def ig_http_relay(request: Request):
             "access-control-expose-headers",
         ):
             continue
+        if kl == "location":
+            try:
+                loc_u = urljoin(url, v)
+                loc_p = urlparse(loc_u)
+                lh = (loc_p.hostname or "").lower()
+                if lh in ("www.instagram.com", "instagram.com"):
+                    v = f"/instagram{loc_p.path}" + (f"?{loc_p.query}" if loc_p.query else "")
+            except Exception:
+                pass
         if kl == "set-cookie":
             has_set_cookie = True
             v = _normalize_ig_set_cookie(v, host)
@@ -4208,9 +4247,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         created = await createController("libcurl");
         transportName = "libcurl";
       }} catch (_) {{
-        created = await createController("epoxy");
-        transportName = "epoxy";
+        try {{
+          created = await createController("epoxy");
+          transportName = "epoxy";
+        }} catch (_) {{}}
       }}
+    }}
+    if (!created || !created.instance) {{
+      throw new Error("All Scramjet transport controllers failed to initialize");
     }}
 
     controller = created.instance;
