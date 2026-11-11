@@ -123,7 +123,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261109-v19"
+RUNTIME_REV = "20261112-x-v20"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -3324,7 +3324,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
+  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/x/sw.js") || String(c.scriptURL || "").includes("x_proxy") || String(c.scriptURL || "").includes("/x/")));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -3332,57 +3332,53 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    const pendingSw = reg?.installing || reg?.waiting;
-    if (pendingSw) {{
-      await new Promise((resolve) => {{
-        let done = false;
-        const finish = () => {{
-          if (done) return;
-          done = true;
-          clearTimeout(t);
-          navigator.serviceWorker.removeEventListener("controllerchange", finish);
-          resolve();
-        }};
-        navigator.serviceWorker.addEventListener("controllerchange", finish);
-        pendingSw.addEventListener("statechange", () => {{
-          if (pendingSw.state === "activated") {{
-            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
-            if (isOurSw(navigator.serviceWorker.controller)) finish();
-          }} else if (pendingSw.state === "redundant") {{
-            finish();
-          }}
-        }});
-        const t = setTimeout(finish, 3500);
-      }});
-    }}
-    if (isOurSw(navigator.serviceWorker.controller)) {{
-      try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
-      return;
-    }}
-    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
+    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
+
     let settled = false;
-    let timer = 0;
+    let pollTimer = 0;
+    let fallbackTimer = 0;
     let onChange = null;
+
     await new Promise((resolve) => {{
-      onChange = () => {{
+      const finish = () => {{
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        clearInterval(pollTimer);
+        clearTimeout(fallbackTimer);
         navigator.serviceWorker.removeEventListener("controllerchange", onChange);
         resolve();
       }};
+
+      onChange = () => {{
+        if (isOurSw(navigator.serviceWorker.controller)) finish();
+      }};
       navigator.serviceWorker.addEventListener("controllerchange", onChange);
-      timer = setTimeout(() => {{
-        if (settled) return;
-        settled = true;
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }}, CONTROL_WAIT);
+
+      pollTimer = setInterval(() => {{
+        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+        if (isOurSw(navigator.serviceWorker.controller)) finish();
+      }}, 35);
+
+      if (navigator.serviceWorker.ready) {{
+        navigator.serviceWorker.ready.then((r) => {{
+          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
+          if (isOurSw(navigator.serviceWorker.controller)) finish();
+        }}).catch(() => {{}});
+      }}
+
+      fallbackTimer = setTimeout(finish, 1800);
     }});
+
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
+    if (navigator.serviceWorker.controller) {{
+      try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+      return;
+    }}
+
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -3390,7 +3386,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    throw new Error("X Service Worker did not take control");
+    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
   }}
 
   async function recover(reason) {{

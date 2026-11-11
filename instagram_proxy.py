@@ -125,7 +125,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-ig-v20"
+RUNTIME_REV = "20261112-ig-v21"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -467,8 +467,8 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'deleteProperty:(t,r)=>(t.removeItem(_pfx()+r),!0)},'
         "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
         "delete t.localStorage,delete t.sessionStorage,"
-        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!1,enumerable:!0}),'
-        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!1,enumerable:!0})}'
+        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!0,enumerable:!0}),'
+        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!0,enumerable:!0})}'
     )
     if old_storage_mod in text:
         text = text.replace(old_storage_mod, new_storage_mod, 1)
@@ -1758,17 +1758,18 @@ async def _ig_raw_single_request(
     fresh_curl: bool,
     impersonate_profile: str,
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
+    global _CURL_DISABLED_UNTIL
     if not use_httpx and StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
         ephemeral: StatelessCurlSession | None = None
         session = None
         try:
-            curl_timeout = max(5.0, float(timeout))
+            curl_timeout = min(float(timeout), 4.5) if not fresh_curl else min(float(timeout), 12.0)
             if fresh_curl:
                 ephemeral = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=int(max(15.0, curl_timeout)),
+                    timeout=int(curl_timeout),
                     max_clients=4,
                 )
                 session = ephemeral
@@ -1789,6 +1790,7 @@ async def _ig_raw_single_request(
             raw_multi = list(upstream.headers.multi_items())
             return status, status_text, resp_body, raw_multi
         except Exception:
+            _CURL_DISABLED_UNTIL = time.time() + 60.0
             if not fresh_curl and session is not None:
                 try:
                     asyncio.create_task(_reset_curl_session(session))
@@ -1809,6 +1811,7 @@ async def _ig_raw_single_request(
         headers=headers,
         content=body if body else None,
         follow_redirects=False,
+        timeout=min(float(timeout), 12.0),
     )
     status = int(upstream.status_code)
     status_text = str(upstream.reason_phrase or "OK")
@@ -2679,8 +2682,8 @@ async def ig_http_relay(request: Request):
             url=url,
             headers=header_dict,
             body=req_body if req_body else None,
-            timeout=25.0,
-            prefer_httpx=False,
+            timeout=15.0,
+            prefer_httpx=not is_credential_login,
             fresh_curl=is_credential_login,
             impersonate_profile=impersonate_profile,
         )
@@ -3984,7 +3987,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
     return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
+  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/instagram/sw.js") || String(c.scriptURL || "").includes("instagram")));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -3992,57 +3995,53 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    const pendingSw = reg?.installing || reg?.waiting;
-    if (pendingSw) {{
-      await new Promise((resolve) => {{
-        let done = false;
-        const finish = () => {{
-          if (done) return;
-          done = true;
-          clearTimeout(t);
-          navigator.serviceWorker.removeEventListener("controllerchange", finish);
-          resolve();
-        }};
-        navigator.serviceWorker.addEventListener("controllerchange", finish);
-        pendingSw.addEventListener("statechange", () => {{
-          if (pendingSw.state === "activated") {{
-            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
-            if (isOurSw(navigator.serviceWorker.controller)) finish();
-          }} else if (pendingSw.state === "redundant") {{
-            finish();
-          }}
-        }});
-        const t = setTimeout(finish, 3500);
-      }});
-    }}
-    if (isOurSw(navigator.serviceWorker.controller)) {{
-      try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
-      return;
-    }}
-    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
+    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
+
     let settled = false;
-    let timer = 0;
+    let pollTimer = 0;
+    let fallbackTimer = 0;
     let onChange = null;
+
     await new Promise((resolve) => {{
-      onChange = () => {{
+      const finish = () => {{
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        clearInterval(pollTimer);
+        clearTimeout(fallbackTimer);
         navigator.serviceWorker.removeEventListener("controllerchange", onChange);
         resolve();
       }};
+
+      onChange = () => {{
+        if (isOurSw(navigator.serviceWorker.controller)) finish();
+      }};
       navigator.serviceWorker.addEventListener("controllerchange", onChange);
-      timer = setTimeout(() => {{
-        if (settled) return;
-        settled = true;
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }}, CONTROL_WAIT);
+
+      pollTimer = setInterval(() => {{
+        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+        if (isOurSw(navigator.serviceWorker.controller)) finish();
+      }}, 35);
+
+      if (navigator.serviceWorker.ready) {{
+        navigator.serviceWorker.ready.then((r) => {{
+          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
+          if (isOurSw(navigator.serviceWorker.controller)) finish();
+        }}).catch(() => {{}});
+      }}
+
+      fallbackTimer = setTimeout(finish, 1800);
     }});
+
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
+    if (navigator.serviceWorker.controller) {{
+      try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+      return;
+    }}
+
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -4050,7 +4049,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    throw new Error("Instagram Service Worker did not take control");
+    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
   }}
 
   async function recover(reason) {{
