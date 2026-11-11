@@ -74,12 +74,22 @@ _RATE_LIMIT_EXEMPT_PREFIXES = (
     "/twitch/",
     "/activity/",
     "/openchat",
+    "/line/",
+    "/tver/",
+    "/cloudmoon/",
+    "/run-site/",
+    "/ja/",
+    "/game/",
+    "/list/",
+    "/h5/",
+    "/data/",
 )
 
 _RATE_LIMIT_EXEMPT_EXTS = (
     ".js", ".mjs", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
     ".ico", ".ogg", ".mp3", ".wav", ".m4a", ".flac", ".otf", ".ttf", ".woff",
     ".woff2", ".wasm", ".json", ".tja", ".osu", ".vtt", ".map",
+    ".m3u8", ".ts", ".m4s", ".mp4", ".cmfv", ".cmfa", ".aac", ".key",
 )
 
 # Exempt IPs (Localhost / Loopback)

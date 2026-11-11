@@ -161,10 +161,51 @@ def _terminate_bridge_proc() -> None:
 atexit.register(_terminate_bridge_proc)
 
 
+def _ensure_node_binary() -> str:
+    for cand in (
+        shutil.which("node"),
+        "/usr/bin/node",
+        "/usr/local/bin/node",
+        "/tmp/.node/bin/node",
+    ):
+        if cand and os.path.exists(cand) and os.access(cand, os.X_OK):
+            return cand
+
+    # Fallback for pure-Python container images where Node.js is not preinstalled
+    import platform
+    import tarfile
+    import urllib.request
+
+    arch = platform.machine().lower()
+    node_arch = "arm64" if arch in ("aarch64", "arm64") else "x64"
+    node_ver = "v22.14.0"
+    tar_url = f"https://nodejs.org/dist/{node_ver}/node-{node_ver}-linux-{node_arch}.tar.xz"
+    dest_dir = "/tmp/.node"
+    os.makedirs(dest_dir, exist_ok=True)
+    tar_path = os.path.join(dest_dir, "node.tar.xz")
+    try:
+        urllib.request.urlretrieve(tar_url, tar_path)
+        with tarfile.open(tar_path, mode="r:xz") as tf:
+            for member in tf.getmembers():
+                parts = member.name.split("/", 1)
+                if len(parts) == 2 and parts[1]:
+                    member.name = parts[1]
+                    tf.extract(member, dest_dir)
+        try:
+            os.remove(tar_path)
+        except Exception:
+            pass
+        cand = os.path.join(dest_dir, "bin", "node")
+        if os.path.exists(cand):
+            os.chmod(cand, 0o755)
+            return cand
+    except Exception as exc:
+        raise RuntimeError(f"Node.js runtime not found and bootstrap failed: {exc}") from exc
+    raise RuntimeError("Node.js runtime not found for @evex-dev/linejs bridge")
+
+
 def _spawn_bridge_sync() -> str:
-    node_bin = shutil.which("node") or "/usr/bin/node"
-    if not os.path.exists(node_bin):
-        raise RuntimeError("Node.js runtime not found for @evex-dev/linejs bridge")
+    node_bin = _ensure_node_binary()
     if not os.path.exists(_BRIDGE_SCRIPT):
         raise RuntimeError(f"Bridge script missing: {_BRIDGE_SCRIPT}")
 
@@ -187,6 +228,7 @@ def _spawn_bridge_sync() -> str:
 
     env = os.environ.copy()
     env["LINEJS_BRIDGE_PORT"] = "0"
+    env["NODE_USE_ENV_PROXY"] = "1"
 
     proc = subprocess.Popen(
         cmd,
@@ -403,6 +445,9 @@ async def line_qr_stream(
         def _sse(ev: str, payload: Dict[str, Any]) -> str:
             return f"event: {ev}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
+        # Initial 2KB comment padding forces reverse proxies to flush SSE headers immediately
+        yield f": {' ' * 2048}\n\n"
+
         start_data, _ = await _bridge_json(
             "POST",
             "/auth/qr/start",
@@ -424,12 +469,14 @@ async def line_qr_stream(
 
         login_id = str(start_data["loginId"])
         qr_url = str(start_data["qrUrl"])
+        qr_state = str(start_data.get("qrState") or "")
         yield _sse(
             "qr",
             {
                 "ok": True,
                 "loginId": login_id,
                 "qrUrl": qr_url,
+                "qrState": qr_state,
                 "qrSvg": _generate_qr_svg(qr_url),
                 "device": start_data.get("device") or device,
             },
@@ -442,15 +489,21 @@ async def line_qr_stream(
         while time.monotonic() - started_at < 240.0:
             if await request.is_disconnected():
                 return
-            await asyncio.sleep(0.9)
-            st_data, _ = await _bridge_json("GET", "/auth/qr/status", params={"loginId": login_id})
+            await asyncio.sleep(1.0)
+            st_data, _ = await _bridge_json(
+                "POST",
+                "/auth/qr/status",
+                {"loginId": login_id, "qrState": qr_state},
+            )
+            if st_data.get("qrState"):
+                qr_state = str(st_data["qrState"])
             status = str(st_data.get("status") or "")
 
             if status == "waiting_pin":
                 pin = str(st_data.get("pinCode") or "")
                 if pin and pin != emitted_pin:
                     emitted_pin = pin
-                    yield _sse("waiting_pin", {"status": "waiting_pin", "pinCode": pin})
+                    yield _sse("waiting_pin", {"status": "waiting_pin", "pinCode": pin, "qrState": qr_state})
             elif status == "authenticated":
                 yield _sse(
                     "authenticated",
@@ -500,8 +553,27 @@ async def line_qr_stream(
 
 
 @router.get("/line/api/auth/qr/status")
-async def line_qr_status(loginId: str = Query("")) -> JSONResponse:
-    data, code = await _bridge_json("GET", "/auth/qr/status", params={"loginId": loginId})
+@router.post("/line/api/auth/qr/status")
+async def line_qr_status(request: Request, loginId: str = Query(""), qrState: str = Query("")) -> JSONResponse:
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        data, code = await _bridge_json(
+            "POST",
+            "/auth/qr/status",
+            {
+                "loginId": body.get("loginId") or loginId,
+                "qrState": body.get("qrState") or qrState,
+            },
+        )
+    else:
+        data, code = await _bridge_json(
+            "GET",
+            "/auth/qr/status",
+            params={"loginId": loginId, "qrState": qrState},
+        )
     return JSONResponse(data, status_code=code)
 
 
@@ -1284,7 +1356,8 @@ _LINE_HTML = r"""<!DOCTYPE html>
 </div>
 
 <script>
-const VAULT_KEY = "sh_line_session_vault_v1";
+const VAULT_KEY = "sh_linejs_session_vault_v2";
+const LEGACY_VAULT_KEY = "sh_line_session_vault_v1";
 const DEVICE_KEY = "sh_line_device_v1";
 
 let sessionId = null;
@@ -1302,7 +1375,9 @@ let currentChatMid = null;
 let currentReplyTo = null;
 
 let qrLoginId = null;
+let qrStateToken = "";
 let qrPollTimer = null;
+let qrPollInFlight = false;
 let qrEventSource = null;
 let emailPollTimer = null;
 let chatPollTimer = null;
@@ -1330,6 +1405,7 @@ function stopQrFlow() {
     clearInterval(qrPollTimer);
     qrPollTimer = null;
   }
+  qrPollInFlight = false;
 }
 
 const DEFAULT_STICKERS = [
@@ -1386,8 +1462,17 @@ function saveVault(sid, sdata) {
 function loadVault() {
   try {
     const raw = localStorage.getItem(VAULT_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
+    if (raw) return JSON.parse(raw);
+    const legacyRaw = localStorage.getItem(LEGACY_VAULT_KEY);
+    if (legacyRaw) {
+      localStorage.removeItem(LEGACY_VAULT_KEY);
+      const parsed = JSON.parse(legacyRaw);
+      if (parsed && parsed.sessionData && parsed.sessionData.engine === "linejs") {
+        localStorage.setItem(VAULT_KEY, JSON.stringify(parsed));
+        return parsed;
+      }
+    }
+    return null;
   } catch (e) {
     return null;
   }
@@ -1418,15 +1503,16 @@ async function startQrLoginPollingFallback(cert, prevId) {
     });
     const data = await resp.json();
     reloadBtn.disabled = false;
-    if (!data.ok) {
+    if (!data.ok || !data.qrSvg) {
       svgBox.innerHTML = `<span style="color:#ef4444;font-size:13px;padding:12px;">${escapeHtml(data.error || "エラー")}</span>`;
-      statusText.textContent = "QRコード取得失敗";
+      statusText.textContent = "QRコード取得失敗 — 更新ボタンを押してください";
       return;
     }
     qrLoginId = data.loginId;
+    qrStateToken = data.qrState || "";
     svgBox.innerHTML = data.qrSvg;
     statusText.textContent = "スマホのLINEアプリでQRコードを読み取ってください";
-    qrPollTimer = setInterval(pollQrStatus, 1400);
+    qrPollTimer = setInterval(pollQrStatus, 1200);
   } catch (err) {
     reloadBtn.disabled = false;
     svgBox.innerHTML = `<span style="color:#ef4444;font-size:13px;">通信エラーが発生しました</span>`;
@@ -1438,6 +1524,7 @@ async function startQrLogin() {
   const prevId = qrLoginId || "";
   stopQrFlow();
   qrLoginId = null;
+  qrStateToken = "";
   const svgBox = document.getElementById("qrSvgContainer");
   const pinOverlay = document.getElementById("qrPinOverlay");
   const pinDigits = document.getElementById("qrPinDigits");
@@ -1479,6 +1566,7 @@ async function startQrLogin() {
           return;
         }
         qrLoginId = data.loginId;
+        if (data.qrState) qrStateToken = data.qrState;
         svgBox.innerHTML = data.qrSvg;
         statusText.textContent = "スマホのLINEアプリでQRコードを読み取ってください";
       } catch (e) {}
@@ -1487,6 +1575,7 @@ async function startQrLogin() {
     es.addEventListener("waiting_pin", (ev) => {
       try {
         const data = JSON.parse(ev.data || "{}");
+        if (data.qrState) qrStateToken = data.qrState;
         pinOverlay.style.display = "flex";
         pinDigits.textContent = data.pinCode || "------";
         statusText.textContent = `スマホのLINE画面に「${data.pinCode || ""}」を入力してください`;
@@ -1533,7 +1622,7 @@ async function startQrLogin() {
       if (!receivedQr) {
         startQrLoginPollingFallback(cert, prevId);
       } else if (qrLoginId) {
-        qrPollTimer = setInterval(pollQrStatus, 1400);
+        qrPollTimer = setInterval(pollQrStatus, 1200);
       }
     });
   } catch (e) {
@@ -1543,20 +1632,32 @@ async function startQrLogin() {
 }
 
 async function pollQrStatus() {
-  if (!qrLoginId) return;
+  if (!qrLoginId || qrPollInFlight) return;
+  qrPollInFlight = true;
   try {
-    const resp = await fetch(`/line/api/auth/qr/status?loginId=${encodeURIComponent(qrLoginId)}`);
+    const resp = await fetch("/line/api/auth/qr/status", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loginId: qrLoginId,
+        qrState: qrStateToken
+      })
+    });
     const data = await resp.json();
+    if (data.qrState) qrStateToken = data.qrState;
     const statusText = document.getElementById("qrStatusText");
     const pinOverlay = document.getElementById("qrPinOverlay");
     const pinDigits = document.getElementById("qrPinDigits");
+    const reloadBtn = document.getElementById("btnReloadQr");
 
     if (data.status === "waiting_scan") {
       statusText.textContent = "スマホのLINEアプリでQRコードを読み取ってください";
     } else if (data.status === "waiting_pin") {
       pinOverlay.style.display = "flex";
       pinDigits.textContent = data.pinCode || "------";
-      statusText.textContent = `スマホのLINE画面に「${data.pinCode}」を入力してください`;
+      statusText.textContent = `スマホのLINE画面に「${data.pinCode || ""}」を入力してください`;
+    } else if (data.status === "completing") {
+      statusText.textContent = "本人確認完了！トークとE2EE鍵を同期中...";
     } else if (data.status === "authenticated") {
       stopQrFlow();
       saveVault(data.sessionId, data.sessionData);
@@ -1564,10 +1665,14 @@ async function pollQrStatus() {
       onLoginSuccess();
     } else if (data.status === "expired" || data.status === "error") {
       stopQrFlow();
+      reloadBtn.disabled = false;
       pinOverlay.style.display = "none";
-      statusText.textContent = data.error || "QRコードの有効期限が切れました";
+      statusText.textContent = data.error || "QRコードの有効期限が切れました。更新ボタンを押してください。";
     }
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    qrPollInFlight = false;
+  }
 }
 
 async function startEmailLogin() {
@@ -1872,8 +1977,21 @@ async function refreshOverview() {
     });
     const data = await resp.json();
     if (!data.ok) {
-      if (resp.status === 401) {
-        showLoginScreen();
+      if (resp.status === 401 || data.authExpired) {
+        try { localStorage.removeItem(VAULT_KEY); } catch (e) {}
+        sessionId = null;
+        sessionData = null;
+        showLoginScreen("LINEセッションの有効期限が切れました。再度ログインしてください。");
+        return;
+      }
+      if (!chatsData.length) {
+        const scroll = document.getElementById("listScroll");
+        if (scroll) {
+          scroll.innerHTML = `<div style="padding:24px 16px;text-align:center;color:#fca5a5;font-size:13px;">
+            <div style="margin-bottom:10px;">⚠️ ${escapeHtml(data.error || "トーク一覧の取得に失敗しました")}</div>
+            <button type="button" class="btn-primary" onclick="refreshOverview()">🔄 再読み込み</button>
+          </div>`;
+        }
       }
       return;
     }
@@ -1896,6 +2014,15 @@ async function refreshOverview() {
     updateUnreadTotalBadge();
     renderCurrentList();
   } catch (e) {
+    if (!chatsData.length) {
+      const scroll = document.getElementById("listScroll");
+      if (scroll) {
+        scroll.innerHTML = `<div style="padding:24px 16px;text-align:center;color:#fca5a5;font-size:13px;">
+          <div style="margin-bottom:10px;">⚠️ 通信エラーによりトーク一覧を取得できませんでした</div>
+          <button type="button" class="btn-primary" onclick="refreshOverview()">🔄 再試行</button>
+        </div>`;
+      }
+    }
   } finally {
     overviewInFlight = false;
   }
@@ -2706,7 +2833,7 @@ function closeModal() {
   document.getElementById("modalBackdrop").style.display = "none";
 }
 
-function showLoginScreen() {
+function showLoginScreen(reasonMsg) {
   stopTalkRealtimeStream();
   if (chatPollTimer) {
     clearInterval(chatPollTimer);
@@ -2717,7 +2844,12 @@ function showLoginScreen() {
   document.getElementById("btnRefreshOverview").style.display = "none";
   document.getElementById("btnExportSession").style.display = "none";
   document.getElementById("btnLogout").style.display = "none";
-  startQrLogin();
+  startQrLogin().then(() => {
+    if (reasonMsg) {
+      const st = document.getElementById("qrStatusText");
+      if (st) st.textContent = reasonMsg;
+    }
+  });
 }
 
 async function logoutLine() {
@@ -2769,6 +2901,11 @@ async function logoutLine() {
         onLoginSuccess();
         return;
       }
+      if (resp.status === 401 || data.authExpired) {
+        try { localStorage.removeItem(VAULT_KEY); } catch (e) {}
+        sessionId = null;
+        sessionData = null;
+      }
     } catch (e) {}
   }
   startQrLogin();
@@ -2777,17 +2914,6 @@ async function logoutLine() {
 </body>
 </html>
 """
-
-
-@router.on_event("startup")
-async def _prewarm_linejs_bridge() -> None:
-    async def _warm() -> None:
-        try:
-            await _ensure_bridge_url()
-        except Exception:
-            pass
-
-    asyncio.create_task(_warm())
 
 
 @router.get("/line", response_class=HTMLResponse)

@@ -366,6 +366,36 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       destroyUnits: function() { return Promise.resolve(); },
       settings: {}
     };
+    window.__rampLoading = false;
+    if (typeof window.ramp.spaNewPage !== 'function') {
+      window.ramp.spaNewPage = function() { return Promise.resolve(); };
+    }
+    window.google = window.google || {};
+    if (!window.google.ima) {
+      const noopFn = function() {};
+      const FakeAdDisplayContainer = function() { this.initialize = noopFn; this.destroy = noopFn; };
+      const FakeAdsLoader = function() {
+        this.addEventListener = noopFn;
+        this.removeEventListener = noopFn;
+        this.contentComplete = noopFn;
+        this.requestAds = noopFn;
+        this.destroy = noopFn;
+        this.getSettings = function() { return { setPlayerType: noopFn, setPlayerVersion: noopFn, setVpaidMode: noopFn, setLocale: noopFn }; };
+      };
+      const FakeAdsRequest = function() { this.setAdWillAutoPlay = noopFn; this.setAdWillPlayMuted = noopFn; };
+      window.google.ima = {
+        AdDisplayContainer: FakeAdDisplayContainer,
+        AdsLoader: FakeAdsLoader,
+        AdsRequest: FakeAdsRequest,
+        AdsRenderingSettings: function() {},
+        AdErrorEvent: { Type: { AD_ERROR: 'adError' } },
+        AdsManagerLoadedEvent: { Type: { ADS_MANAGER_LOADED: 'adsManagerLoaded' } },
+        AdEvent: { Type: { CONTENT_PAUSE_REQUESTED: 'pause', CONTENT_RESUME_REQUESTED: 'resume', ALL_ADS_COMPLETED: 'complete', LOADED: 'loaded', STARTED: 'started', COMPLETE: 'complete', SKIPPED: 'skipped', CLICK: 'click' } },
+        ImaSdkSettings: { VpaidMode: { ENABLED: 1, INSECURE: 2, DISABLED: 0 } },
+        ViewMode: { NORMAL: 'normal', FULLSCREEN: 'fullscreen' },
+        settings: { setVpaidMode: noopFn, setLocale: noopFn, setDisableCustomPlaybackForIOS10Plus: noopFn }
+      };
+    }
     window.pbjs = window.pbjs || {
       libLoaded: true,
       que: { push: function(fn) { try { if (typeof fn === 'function') fn(); } catch (_) {} } },
@@ -441,6 +471,24 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
 
   // 1c. Ensure all inline video and audio elements on iPad/iOS have webkit-playsinline and playsinline
   try {
+    const unlockRemoteAudioOnce = function() {
+      window.__cm_user_interacted = true;
+      try {
+        const a = document.getElementById('remote-audio');
+        if (a && a.srcObject) {
+          a.muted = false;
+          a.play().catch(function() {});
+        }
+        const v = document.getElementById('remote-video');
+        if (v && v.srcObject && v.paused) {
+          v.muted = true;
+          v.play().catch(function() {});
+        }
+      } catch (_) {}
+    };
+    ['pointerdown', 'touchstart', 'keydown'].forEach(function(evt) {
+      window.addEventListener(evt, unlockRemoteAudioOnce, { capture: true, passive: true });
+    });
     const enforceInlineMedia = function(el) {
       if (!el || !el.tagName) return;
       const tag = el.tagName.toLowerCase();
@@ -451,6 +499,10 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           el.setAttribute('x5-playsinline', '');
           el.playsInline = true;
           if ('webkitPlaysInline' in el) el.webkitPlaysInline = true;
+          if (tag === 'video' && el.id === 'remote-video') {
+            el.muted = true;
+            el.setAttribute('muted', '');
+          }
         } catch (_) {}
       }
     };
@@ -888,6 +940,11 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
   } catch (_) {}
 
   const handleKickoutSignal = function(msg) {
+    const s = String(msg || '');
+    if (s.includes('manually_disconnect') || s.includes('manually_kickout') || s.includes('multiple_connection')) {
+      window.__cm_intentional_exit = true;
+      return;
+    }
     console.warn('[CloudMoon Unlimited] Intercepted kickout signal, triggering seamless reconnect:', msg);
     setTimeout(function() {
       window.__cmAutoReconnect(msg || 'kickout');
@@ -900,6 +957,10 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       const wrapped = function(e) {
         if (e && typeof e.detail === 'string') {
           if (e.detail.startsWith('kickout>') || e.detail.includes('kickout') || e.detail.startsWith('noTime') || e.detail.includes('time_up')) {
+            if (e.detail.includes('manually_disconnect') || e.detail.includes('manually_kickout') || e.detail.includes('multiple_connection')) {
+              window.__cm_intentional_exit = true;
+              return listener.apply(this, arguments);
+            }
             handleKickoutSignal(e.detail);
             if (e.stopImmediatePropagation) e.stopImmediatePropagation();
             return;
@@ -919,8 +980,11 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         set: function(fn) {
           const wrapped = function(ev) {
             if (ev && typeof ev.data === 'string' && (ev.data.startsWith('kickout>') || ev.data.includes('kickout'))) {
-              handleKickoutSignal(ev.data);
-              return;
+              if (!ev.data.includes('manually_disconnect') && !ev.data.includes('manually_kickout') && !ev.data.includes('multiple_connection')) {
+                handleKickoutSignal(ev.data);
+                return;
+              }
+              window.__cm_intentional_exit = true;
             }
             return fn.apply(this, arguments);
           };
@@ -938,8 +1002,11 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       if (type === 'message') {
         const wrapped = function(ev) {
           if (ev && typeof ev.data === 'string' && (ev.data.startsWith('kickout>') || ev.data.includes('kickout'))) {
-            handleKickoutSignal(ev.data);
-            return;
+            if (!ev.data.includes('manually_disconnect') && !ev.data.includes('manually_kickout') && !ev.data.includes('multiple_connection')) {
+              handleKickoutSignal(ev.data);
+              return;
+            }
+            window.__cm_intentional_exit = true;
           }
           return listener.apply(this, arguments);
         };
@@ -981,22 +1048,71 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         }
       } catch (_) {}
     };
-    setInterval(claimPlaytimeRefill, 45000);
-    setTimeout(claimPlaytimeRefill, 5000);
+    setInterval(claimPlaytimeRefill, 30000);
+    setTimeout(claimPlaytimeRefill, 4000);
 
-    // 5c-2. Non-destructive media resume monitor on /run-site:
-    // NEVER detach `v.srcObject = null` (which destroys Chromium's H.264 decoder state while waiting for an IDR keyframe and freezes gameplay!).
+    // 5c-2. Non-destructive RTP + currentTime verified H.264 Video & Audio Stream Healer on /run-site:
+    // Active or static frames are NEVER touched; only genuinely wedged decoders (packets arriving with 0 frames decoded and 0 timeline progress) are recovered.
     if ((window.location.pathname || '').startsWith('/run-site')) {
-      setInterval(function() {
+      let prevFramesRecv = -1;
+      let prevFramesDec = -1;
+      let prevVideoTime = -1;
+      let decodeWedgedCount = 0;
+      let lastHealAt = 0;
+      setInterval(async function() {
         try {
-          if (document.hidden) return;
+          if (document.hidden) {
+            decodeWedgedCount = 0;
+            return;
+          }
           const v = document.getElementById('remote-video');
           const a = document.getElementById('remote-audio');
           if (v && v.srcObject && v.paused) {
+            v.muted = true;
             v.play().catch(function() {});
           }
-          if (a && a.srcObject && a.paused) {
+          if (a && a.srcObject && a.paused && window.__cm_user_interacted) {
             a.play().catch(function() {});
+          }
+          const pc = window.__cm_pc;
+          if (!pc || typeof pc.getStats !== 'function' || pc.connectionState !== 'connected') {
+            decodeWedgedCount = 0;
+            return;
+          }
+          const curTime = v ? Number(v.currentTime || 0) : 0;
+          const timeAdvancing = prevVideoTime >= 0 && curTime > prevVideoTime + 0.05;
+          prevVideoTime = curTime;
+
+          const stats = await pc.getStats();
+          let recv = -1;
+          let dec = -1;
+          stats.forEach(function(r) {
+            if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
+              if (typeof r.framesReceived === 'number') recv = r.framesReceived;
+              if (typeof r.framesDecoded === 'number') dec = r.framesDecoded;
+            }
+          });
+          if (recv >= 0 && dec >= 0) {
+            if (prevFramesRecv >= 0 && prevFramesDec >= 0) {
+              const dRecv = recv - prevFramesRecv;
+              const dDec = dec - prevFramesDec;
+              if (dRecv >= 15 && dDec <= 0 && !timeAdvancing) {
+                decodeWedgedCount++;
+                if (decodeWedgedCount >= 2 && Date.now() - lastHealAt > 15000 && v && v.srcObject) {
+                  decodeWedgedCount = 0;
+                  lastHealAt = Date.now();
+                  const stream = v.srcObject;
+                  v.srcObject = null;
+                  v.srcObject = stream;
+                  v.muted = true;
+                  v.play().catch(function() {});
+                }
+              } else {
+                decodeWedgedCount = 0;
+              }
+            }
+            prevFramesRecv = recv;
+            prevFramesDec = dec;
           }
         } catch (_) {}
       }, 3000);
@@ -1776,10 +1892,31 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             "function de(){console.warn(`[StreamView] first frame timeout suppressed`);return;",
         )
 
-        # Add webkit-playsinline and x5-playsinline to audio and video elements to keep iPad Safari in inline mode
+        # Add muted="" + webkit-playsinline + x5-playsinline to #remote-video so G(3e3) play() NEVER rejects with NotAllowedError
         js_text = js_text.replace(
             'id="remote-audio" style="display: none" controls="" autoplay="" playsinline=""></audio> <video id="remote-video" autoplay="" playsinline="" controlslist="nodownload"></video>',
-            'id="remote-audio" style="display: none" controls="" autoplay="" playsinline="" webkit-playsinline=""></audio> <video id="remote-video" autoplay="" playsinline="" webkit-playsinline="" x5-playsinline="" controlslist="nodownload"></video>',
+            'id="remote-audio" style="display: none" controls="" autoplay="" playsinline="" webkit-playsinline=""></audio> <video id="remote-video" muted="" autoplay="" playsinline="" webkit-playsinline="" x5-playsinline="" controlslist="nodownload"></video>',
+        )
+
+        # CRITICAL FIX: In StreamView he(e) (2.D2AbakOU.js), unmuted #remote-video caused G(3e3) to reject, K(8e3) to stall 8s on a paused video,
+        # and the timeout branch to call P() WITHOUT calling n(T)||U() (Oe.set('READY')), freezing gameplay behind the CONNECTING overlay forever!
+        js_text = js_text.replace(
+            "else{await G(3e3)?M(`video_play_resolved`):M(`video_play_rejected`);let e=await K(8e3);document.hidden?(M(`video_first_frame_deferred`),B=!0,n(T)||U()):e?(ie=!0,console.log(`video first frame`),n(T)||U()):(M(`video_first_frame_timeout`),P())}",
+            "else{try{n(b).muted=!0}catch{}await G(1500)?M(`video_play_resolved`):M(`video_play_rejected`);let e=await K(1200);document.hidden?(M(`video_first_frame_deferred`),B=!0,n(T)||U()):e?(ie=!0,console.log(`video first frame`),n(T)||U()):(M(`video_first_frame_timeout`),n(T)||U())}",
+        )
+        # Prevent #remote-audio play() promise from ever hanging he(e) before Z.getManager()?.setMediaElements(...)
+        js_text = js_text.replace(
+            "await n(C).play().catch(()=>{})",
+            "await Promise.race([n(C).play(),new Promise(_r=>setTimeout(_r,400))]).catch(()=>{})",
+        )
+        # Eliminate 15s loadingVideoStatus (t&&n<98) freeze on loading overlay ms()
+        js_text = js_text.replace(
+            "return e===`LOADING`||e===`CONNECTING`||t&&n<98",
+            "return e===`LOADING`||e===`CONNECTING`",
+        )
+        js_text = js_text.replace(
+            'return e==="LOADING"||e==="CONNECTING"||t&&n<98',
+            'return e==="LOADING"||e==="CONNECTING"',
         )
 
         # Add automatic School Hub WebSocket proxy fallback candidates when direct coordinator WebSockets are blocked
@@ -1808,6 +1945,12 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'let r=(z.lang==="cloudmoon"?"ja":z.lang)||"ja";',
         )
         js_text = js_text.replace("; domain=.cloudmoonapp.com; Secure; SameSite=None", "; SameSite=Lax")
+        # Prevent guest ad gate xe() in 2.CK9a4-dv.js from mounting GAM Bottom Anchor & Floating Google IMA Video Ad
+        js_text = re.sub(
+            r"function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$,]*)\)\{return [A-Za-z_$][\w$]*\|\|![A-Za-z_$][\w$]*\?!1:[A-Za-z_$][\w$]*\?[A-Za-z_$][\w$]*&&![A-Za-z_$][\w$]*:!0\}",
+            r"function \1(\2){return !1}",
+            js_text,
+        )
         js_text = re.sub(
             r'function ([A-Za-z_$][\w$]*)\(\)\{(?=const [A-Za-z_$][\w$]*=document\.documentElement;let [A-Za-z_$][\w$]*=0;const [A-Za-z_$][\w$]*=document\.querySelectorAll\("div, iframe"\))',
             r"function \1(){return;",
@@ -2832,37 +2975,74 @@ async def _prewarm_cloudmoon_assets() -> None:
             client.get(f"{TARGET_ORIGIN}/run-site/"),
             return_exceptions=True,
         )
-        tasks = []
+        second_hop_app: set[str] = set()
+        second_hop_rs: set[str] = set()
+
+        async def _fetch_app(r: str) -> None:
+            k = f"_app/{r}"
+            if k in _CACHE:
+                return
+            try:
+                u = await client.get(f"{TARGET_ORIGIN}/_app/{r}")
+                if u.status_code == 200:
+                    if r.endswith(".js"):
+                        txt = u.text
+                        for sm in re.finditer(r'(?:\.\./|\./)((?:nodes|chunks)/[A-Za-z0-9_.-]+\.(?:js|css))', txt):
+                            second_hop_app.add(f"immutable/{sm.group(1)}")
+                        b = _transform_js(txt, is_runsite=False).encode("utf-8")
+                    else:
+                        b = u.content
+                    _CACHE[k] = b
+            except Exception:
+                pass
+
+        async def _fetch_rs(r: str) -> None:
+            k = f"run-site/_app/{r}"
+            if k in _CACHE:
+                return
+            try:
+                u = await client.get(f"{TARGET_ORIGIN}/run-site/_app/{r}")
+                if u.status_code == 200:
+                    if r.endswith(".js"):
+                        txt = u.text
+                        for sm in re.finditer(r'(?:\.\./|\./)((?:nodes|chunks)/[A-Za-z0-9_.-]+\.(?:js|css))', txt):
+                            second_hop_rs.add(f"immutable/{sm.group(1)}")
+                        b = _transform_js(txt, is_runsite=True).encode("utf-8")
+                    else:
+                        b = u.content
+                    _CACHE[k] = b
+            except Exception:
+                pass
+
+        app_paths: list[str] = []
+        rs_paths: list[str] = []
+        seen_app: set[str] = set()
+        seen_rs: set[str] = set()
         if not isinstance(ja_resp, Exception) and ja_resp.status_code == 200:
             for m in re.finditer(r'/_app/(immutable/[^"\'\s<>]+\.(?:js|css))', ja_resp.text):
-                rel = m.group(1)
-                ck = f"_app/{rel}"
-                if ck not in _CACHE:
-                    async def _fetch_app(r=rel, k=ck):
-                        try:
-                            u = await client.get(f"{TARGET_ORIGIN}/_app/{r}")
-                            if u.status_code == 200:
-                                b = _transform_js(u.text, is_runsite=False).encode("utf-8") if r.endswith(".js") else u.content
-                                _CACHE[k] = b
-                        except Exception:
-                            pass
-                    tasks.append(_fetch_app())
+                p = m.group(1)
+                if p not in seen_app:
+                    seen_app.add(p)
+                    app_paths.append(p)
         if not isinstance(rs_resp, Exception) and rs_resp.status_code == 200:
             for m in re.finditer(r'_app/(immutable/[^"\'\s<>]+\.(?:js|css))', rs_resp.text):
-                rel = m.group(1)
-                ck = f"run-site/_app/{rel}"
-                if ck not in _CACHE:
-                    async def _fetch_rs(r=rel, k=ck):
-                        try:
-                            u = await client.get(f"{TARGET_ORIGIN}/run-site/_app/{r}")
-                            if u.status_code == 200:
-                                b = _transform_js(u.text, is_runsite=True).encode("utf-8") if r.endswith(".js") else u.content
-                                _CACHE[k] = b
-                        except Exception:
-                            pass
-                    tasks.append(_fetch_rs())
-        if tasks:
-            await asyncio.gather(*tasks[:32], return_exceptions=True)
+                p = m.group(1)
+                if p not in seen_rs:
+                    seen_rs.add(p)
+                    rs_paths.append(p)
+        hop1 = [_fetch_app(r) for r in app_paths[:36]] + [_fetch_rs(r) for r in rs_paths[:36]]
+        if hop1:
+            await asyncio.gather(*hop1, return_exceptions=True)
+
+        hop2 = [
+            _fetch_app(r)
+            for r in sorted(second_hop_app - seen_app, key=lambda s: (0 if "/nodes/" in s else 1, s))[:40]
+        ] + [
+            _fetch_rs(r)
+            for r in sorted(second_hop_rs - seen_rs, key=lambda s: (0 if "/nodes/" in s else 1, s))[:40]
+        ]
+        if hop2:
+            await asyncio.gather(*hop2, return_exceptions=True)
     except Exception:
         pass
 

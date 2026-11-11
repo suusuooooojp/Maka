@@ -118,7 +118,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261111-tver10"
+RUNTIME_REV = "20261111-tver12"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -1489,8 +1489,10 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
             if (
                 path.startswith("/_next/static/")
                 or path.startswith("/streaksplayer/")
+                or path.startswith("/player/")
                 or path in (
                     "/config/streaks_info_v2.json",
+                    "/player/streaks_info_v2.json",
                     "/player/tver_thv_config2.json",
                     "/app/config/web.json",
                     "/setting.js",
@@ -1530,6 +1532,8 @@ def _public_api_cache_spec(method: str, url: str, has_auth: bool = False) -> tup
             else:
                 norm = f"https://{host}{path}"
             return (f"pubapi:{norm}", 90.0)
+        if host == "service-api.tver.jp" and path == "/api/v1/callHeader":
+            return (f"pubapi:https://{host}{path}", 90.0)
         if host == "platform-api.tver.jp" and path == "/v2/api/public/current_time":
             return (f"pubapi:https://{host}{path}", 4.0)
     except Exception:
@@ -2214,12 +2218,40 @@ async def _prewarm_home_thumbnails(home_body: bytes) -> None:
         pass
 
 
+def _extract_webpack_dynamic_assets(webpack_bytes: bytes) -> list[str]:
+    out: list[str] = []
+    try:
+        text = webpack_bytes.decode("utf-8", "ignore")
+        m_u = re.search(
+            r'static/chunks/"\+\(\(\{([^}]*)\}\)\[\w+\]\|\|\w+\)\+"\."\+\{([^}]*)\}\[\w+\]\+"\.js"',
+            text,
+        )
+        if m_u:
+            name_map = dict(re.findall(r'(\d+):"([^"]+)"', m_u.group(1)))
+            for cid, chash in re.findall(r'(\d+):"([0-9a-f]{8,32})"', m_u.group(2)):
+                cname = name_map.get(cid, cid)
+                out.append(f"https://tver.jp/_next/static/chunks/{cname}.{chash}.js")
+        else:
+            m_u2 = re.search(r'static/chunks/"\+\w+\+"\."\+\{([^}]*)\}\[\w+\]\+"\.js"', text)
+            if m_u2:
+                for cid, chash in re.findall(r'(\d+):"([0-9a-f]{8,32})"', m_u2.group(1)):
+                    out.append(f"https://tver.jp/_next/static/chunks/{cid}.{chash}.js")
+        m_css = re.search(r'static/css/"\+\{([^}]*)\}\[\w+\]\+"\.css"', text)
+        if m_css:
+            for _, chash in re.findall(r'(\d+):"([0-9a-f]{8,32})"', m_css.group(1)):
+                out.append(f"https://tver.jp/_next/static/css/{chash}.css")
+    except Exception:
+        pass
+    return out
+
+
 async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
     if not html_bytes:
         return
     urls: list[str] = []
     seen: set[str] = set()
     manifest_url = ""
+    webpack_urls: list[str] = []
     for m in _HTML_STATIC_REF_RE.finditer(html_bytes):
         try:
             ref = m.group(1).decode("utf-8", "ignore")
@@ -2229,6 +2261,8 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
             if abs_u not in seen and _is_cacheable_static_asset("GET", abs_u):
                 seen.add(abs_u)
                 urls.append(abs_u)
+                if "/_next/static/chunks/webpack-" in abs_u:
+                    webpack_urls.append(abs_u)
         except Exception:
             continue
     for extra_u in (
@@ -2239,13 +2273,23 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
         "https://s.tver.jp/appsdk.js",
         "https://statics.tver.jp/app/config/web.json",
         "https://player.tver.jp/config/streaks_info_v2.json",
+        "https://player.tver.jp/player/streaks_info_v2.json",
+        "https://player.tver.jp/player/tver_thv_config2.json",
         "https://imasdk.googleapis.com/js/sdkloader/ima3.js",
     ):
         if extra_u not in seen:
             seen.add(extra_u)
             urls.append(extra_u)
     if urls:
-        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:36]), return_exceptions=True)
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:48]), return_exceptions=True)
+    dyn_urls: list[str] = []
+    for wp_u in webpack_urls:
+        wp_cached = _STATIC_ASSET_CACHE.get(wp_u)
+        if wp_cached and wp_cached[4]:
+            for du in _extract_webpack_dynamic_assets(wp_cached[4]):
+                if du not in seen:
+                    seen.add(du)
+                    dyn_urls.append(du)
     if manifest_url:
         m_cached = _STATIC_ASSET_CACHE.get(manifest_url)
         if m_cached and m_cached[4]:
@@ -2253,16 +2297,15 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
                 m_txt = m_cached[4].decode("utf-8", "ignore")
                 idx_pos = m_txt.find('"/":')
                 slice_txt = m_txt[idx_pos : idx_pos + 1800] if idx_pos >= 0 else m_txt[:2500]
-                dyn_urls = []
                 for cm in _MANIFEST_CHUNK_RE.finditer(slice_txt):
                     cu = f"https://tver.jp/_next/{cm.group(1)}"
                     if cu not in seen:
                         seen.add(cu)
                         dyn_urls.append(cu)
-                if dyn_urls:
-                    await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:16]), return_exceptions=True)
             except Exception:
                 pass
+    if dyn_urls:
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:48]), return_exceptions=True)
 
 
 async def _prewarm_tver_target(target_url: str) -> None:
@@ -2271,6 +2314,8 @@ async def _prewarm_tver_target(target_url: str) -> None:
         return
     _PREWARM_INFLIGHT.add(clean_url)
     try:
+        import app as host_app
+
         parsed = urlparse(clean_url)
         host = (parsed.hostname or "").lower().rstrip(".")
         is_home = host in ("tver.jp", "www.tver.jp") and (parsed.path or "/") == "/"
@@ -2280,15 +2325,17 @@ async def _prewarm_tver_target(target_url: str) -> None:
             _ensure_patched_runtime("controller.api.js", _patch_controller_api),
             _ensure_patched_runtime("controller.sw.js", _patch_controller_sw),
             _ensure_patched_runtime("controller.inject.js", _patch_controller_inject),
+            host_app.scramjet_asset("scramjet-utils.js"),
             _serve_virtual_wasm_js(),
         ]
         if is_home:
             base_tasks.append(_prefetch_public_api("https://contents-api.tver.jp/contents/api/v1/callHome"))
             base_tasks.append(_prefetch_public_api("https://contents-api.tver.jp/contents/api/v1/news/latest"))
+            base_tasks.append(_prefetch_public_api("https://service-api.tver.jp/api/v1/callHeader"))
         results = await asyncio.gather(*base_tasks, return_exceptions=True)
-        if is_home and len(results) >= 6 and isinstance(results[5], (bytes, bytearray)) and results[5]:
+        if is_home and len(results) >= 7 and isinstance(results[6], (bytes, bytearray)) and results[6]:
             try:
-                asyncio.get_running_loop().create_task(_prewarm_home_thumbnails(bytes(results[5])))
+                asyncio.get_running_loop().create_task(_prewarm_home_thumbnails(bytes(results[6])))
             except Exception:
                 pass
 
@@ -3065,6 +3112,7 @@ def _shell_html(initial_target: str) -> str:
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preload" href="/tver/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/tver/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
 <link rel="preload" href="/tver/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <script>
@@ -3328,7 +3376,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       }}
       if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp" || h === "player.tver.jp" || h === "statics.tver.jp") &&
           p !== "/setting.js" && p !== "/setting.json" && !p.startsWith("/api/") &&
-          (p.startsWith("/_next/static/") || p.startsWith("/streaksplayer/") ||
+          (p.startsWith("/_next/static/") || p.startsWith("/streaksplayer/") || p.startsWith("/player/") ||
            p === "/config/streaks_info_v2.json" || p === "/player/tver_thv_config2.json" ||
            p === "/app/config/web.json" || p === "/data/string/s.json" ||
            (h === "s.tver.jp" && p.endsWith("/psdkplf.html")) ||
@@ -3389,7 +3437,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       }}
       if (
         h === "m-tag.tver.jp" || h === "s-tag.tver.jp" || h === "ce-api.tver.jp" || h === "log.tver.jp" ||
-        h === "js-agent.newrelic.com" || h.endsWith(".nr-data.net") ||
+        h === "bam.nr-data.net" || h === "js-agent.newrelic.com" || h.endsWith(".nr-data.net") || h.endsWith(".newrelic.com") ||
         h === "analytics.tiktok.com" || h === "analytics.twitter.com" ||
         h === "ads-twitter.com" || h.endsWith(".ads-twitter.com") ||
         h === "b99.yahoo.co.jp" || h === "yjtag.yahoo.co.jp" || h === "yads.c.yimg.jp" || h === "s.yimg.jp" ||

@@ -852,7 +852,7 @@ async function decryptAndSerializeMessage(entry, rawMsg) {
       from: fromMid,
       to: toMid,
       toType,
-      contentType: ctName,
+      contentType: ctCode,
       contentMetadata: { ...meta },
       chunks: normChunks,
     };
@@ -1924,6 +1924,266 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
+function encodeQrState(st) {
+  try {
+    return Buffer.from(
+      JSON.stringify({
+        l: st.loginId,
+        s: st.sqr,
+        n: st.nonce,
+        k: st.secretB64,
+        d: st.device,
+        c: st.certificate || "",
+        p: st.pinCode || "",
+        u: st.qrUrl || "",
+        t: st.status,
+        a: st.createdAt,
+      }),
+      "utf-8"
+    ).toString("base64url");
+  } catch {
+    return "";
+  }
+}
+
+function decodeQrState(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf-8"));
+    if (!parsed?.s || !parsed?.k) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function isTransientQrPollError(err) {
+  const msg = `${err?.code || ""} ${err?.cause?.code || ""} ${err?.message || String(err)}`;
+  return /Timeout|timed out|status=408|fetch failed|socket|ECONNRESET|EPIPE|UND_ERR|ETIMEDOUT|EAI_AGAIN|network|terminated/i.test(
+    msg
+  );
+}
+
+function runResilientQrBackground(state) {
+  if (state.bgRunning) return;
+  state.bgRunning = true;
+
+  (async () => {
+    try {
+      const lp = state.base.loginProcess;
+      const pollSec = 18;
+
+      if (state.status === "waiting_scan" || state.status === "creating") {
+        state.status = "waiting_scan";
+        let verified = false;
+        while (!state.abortController.signal.aborted && Date.now() - state.createdAt < 210_000) {
+          try {
+            const ok = await lp.checkQrCodeVerified(state.sqr, 1, pollSec);
+            if (ok) {
+              verified = true;
+              break;
+            }
+          } catch (err) {
+            if (state.abortController.signal.aborted) break;
+            if (isTransientQrPollError(err)) {
+              await new Promise((r) => setTimeout(r, 250));
+              continue;
+            }
+            const msg = err?.message || String(err);
+            if (/expired|status=410|410|INVALID_STATE|NOT_FOUND/i.test(msg)) {
+              state.status = "expired";
+              state.error = "QRコードの有効期限が切れました。更新ボタンを押してください。";
+              return;
+            }
+            throw err;
+          }
+        }
+        if (!verified) {
+          if (!state.abortController.signal.aborted) {
+            state.status = "expired";
+            state.error = "QRコードの有効期限が切れました。更新ボタンを押してください。";
+          }
+          return;
+        }
+
+        let certOk = false;
+        try {
+          const savedCert = await lp.getQrCert();
+          if (savedCert) {
+            await lp.verifyCertificate(state.sqr, savedCert);
+            certOk = true;
+          }
+        } catch {
+          certOk = false;
+        }
+
+        if (!certOk) {
+          const pinRes = await lp.createPinCode(state.sqr);
+          const pincode = String(pinRes?.[1] ?? pinRes?.pincode ?? "");
+          state.pinCode = pincode;
+          state.status = "waiting_pin";
+        } else {
+          state.status = "completing";
+        }
+      }
+
+      if (state.status === "waiting_pin") {
+        let pinVerified = false;
+        while (!state.abortController.signal.aborted && Date.now() - state.createdAt < 240_000) {
+          try {
+            const ok = await lp.checkPinCodeVerified(state.sqr, 1, pollSec);
+            if (ok) {
+              pinVerified = true;
+              break;
+            }
+          } catch (err) {
+            if (state.abortController.signal.aborted) break;
+            if (isTransientQrPollError(err)) {
+              await new Promise((r) => setTimeout(r, 250));
+              continue;
+            }
+            const msg = err?.message || String(err);
+            if (/expired|status=410|410|INVALID_STATE|NOT_FOUND/i.test(msg)) {
+              state.status = "expired";
+              state.error = "本人確認コードの有効期限が切れました。再度QRコードを読み取ってください。";
+              return;
+            }
+            throw err;
+          }
+        }
+        if (!pinVerified) {
+          if (!state.abortController.signal.aborted) {
+            state.status = "expired";
+            state.error = "本人確認コードの入力期限が切れました。更新ボタンを押してください。";
+          }
+          return;
+        }
+        state.status = "completing";
+      }
+
+      const response = await lp.qrCodeLoginV2ForSecure(state.sqr, state.nonce || "");
+      const pem = response?.[1] ?? response?.certificate;
+      const tokenInfo = response?.[3] ?? response?.tokenV3IssueResult;
+      const metaData = response?.[6] ?? response?.metaData;
+      if (pem) {
+        state.certificate = String(pem);
+        state.base.emit("update:qrcert", pem);
+        await lp.registerQrCert(String(pem));
+      }
+
+      const e2eeInfo = response?.[10] ?? metaData?.["e2eeInfo"] ?? response?.e2eeKeyBackupInfo;
+      const secretBuf = Buffer.from(state.secretB64, "base64");
+      let e2eeKeyResult;
+      if (e2eeInfo) {
+        try {
+          e2eeKeyResult = await state.base.e2ee.decodeE2EEKeyV1(e2eeInfo, secretBuf);
+        } catch {}
+      }
+
+      const authToken = String(tokenInfo?.[1] ?? tokenInfo?.accessToken ?? response?.[2] ?? "");
+      const refreshToken = String(tokenInfo?.[2] ?? tokenInfo?.refreshToken ?? "");
+      const dur = Number(tokenInfo?.[3] ?? tokenInfo?.durationUntilRefreshInSec ?? 0);
+      const issuedAt = Number(
+        tokenInfo?.[6] ?? tokenInfo?.issueTimeEpochSec ?? Math.floor(Date.now() / 1000)
+      );
+      if (!authToken) {
+        throw new Error("LINEサーバーからアクセストークンを取得できませんでした");
+      }
+      if (refreshToken) await state.storage.set("refreshToken", refreshToken);
+      if (dur || issuedAt) await state.storage.set("expire", dur + issuedAt);
+
+      state.base.authToken = authToken;
+      state.base.emit("update:authtoken", authToken);
+
+      if (!e2eeKeyResult) {
+        try {
+          await state.base.e2ee.registerE2EEKeyPair();
+        } catch {}
+      }
+      try {
+        await state.base.e2ee.verifyLoginKey();
+      } catch {}
+
+      await lp.ready();
+      const profile = serializeProfile(state.base.profile);
+      await ensureSelfKeyIndexedByMid(state.base, state.storage, profile.mid);
+      const entry = createSessionEntry({
+        base: state.base,
+        storage: state.storage,
+        device: state.device,
+        profile,
+      });
+      state.sessionId = entry.sessionId;
+      state.profile = profile;
+      state.sessionData = exportSessionData(entry);
+      state.status = "authenticated";
+    } catch (err) {
+      if (state.abortController.signal.aborted) {
+        state.status = "expired";
+        state.error = "新しいQRコードが発行されたため終了しました";
+        return;
+      }
+      const msg = err?.message || String(err);
+      if (/Timeout|timed out|expired|410/i.test(msg)) {
+        state.status = "expired";
+        state.error = "QRコードの有効期限が切れました。更新ボタンを押してください。";
+      } else {
+        state.status = "error";
+        state.error = `QRログインエラー: ${msg}`;
+      }
+    } finally {
+      state.bgRunning = false;
+    }
+  })();
+}
+
+function adoptQrStateIfNeeded(loginId, qrStateToken) {
+  if (loginId && qrLogins.has(loginId)) {
+    return qrLogins.get(loginId);
+  }
+  const decoded = decodeQrState(qrStateToken);
+  if (!decoded) return null;
+  const effectiveId = loginId || decoded.l || crypto.randomBytes(12).toString("hex");
+  if (qrLogins.has(effectiveId)) {
+    return qrLogins.get(effectiveId);
+  }
+  const device = normalizeDevice(decoded.d);
+  const certificate = decoded.c || undefined;
+  const abortController = new AbortController();
+  const storage = new MemoryStorage(certificate ? { qrCert: certificate } : {});
+  const base = installE2EEEnhancements(
+    new BaseClient({
+      device,
+      storage,
+      fetch: createProxySafeFetch(abortController.signal),
+    }),
+    storage
+  );
+  const adopted = {
+    loginId: effectiveId,
+    device,
+    certificate: certificate || "",
+    sqr: String(decoded.s),
+    nonce: String(decoded.n || ""),
+    secretB64: String(decoded.k),
+    status: decoded.t === "waiting_pin" ? "waiting_pin" : "waiting_scan",
+    qrUrl: String(decoded.u || ""),
+    pinCode: String(decoded.p || ""),
+    error: "",
+    sessionId: "",
+    sessionData: null,
+    profile: null,
+    createdAt: Number(decoded.a) || Date.now(),
+    abortController,
+    storage,
+    base,
+    bgRunning: false,
+  };
+  qrLogins.set(effectiveId, adopted);
+  runResilientQrBackground(adopted);
+  return adopted;
+}
+
 // Cleanup stale QR/email flows every 60s
 setInterval(() => {
   const now = Date.now();
@@ -1983,11 +2243,37 @@ const server = http.createServer(async (req, res) => {
         storage
       );
 
+      const sessionRes = await Promise.race([
+        base.loginProcess.createSession(),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error("LINEサーバーへの接続がタイムアウトしました")), 15000)
+        ),
+      ]);
+      const sqr = String(sessionRes?.[1] ?? sessionRes?.authSessionId ?? "");
+      if (!sqr) {
+        throw new Error("LINE QRセッションの作成に失敗しました");
+      }
+      const forSecure = await Promise.race([
+        base.loginProcess.createQrCodeForSecure(sqr),
+        new Promise((_, rej) =>
+          setTimeout(() => rej(new Error("LINEサーバーからのQRコード取得がタイムアウトしました")), 15000)
+        ),
+      ]);
+      const baseQrUrl = String(forSecure?.[1] ?? forSecure?.callbackUrl ?? "");
+      const nonce = String(forSecure?.[4] ?? forSecure?.nonce ?? "");
+      const [secretBytes, secretUrl] = base.e2ee.createSqrSecret();
+      const qrUrl = baseQrUrl + secretUrl;
+      const secretB64 = Buffer.from(secretBytes).toString("base64");
+
       const state = {
         loginId,
         device,
-        status: "creating",
-        qrUrl: "",
+        certificate: certificate || "",
+        sqr,
+        nonce,
+        secretB64,
+        status: "waiting_scan",
+        qrUrl,
         pinCode: "",
         error: "",
         sessionId: "",
@@ -1995,83 +2281,29 @@ const server = http.createServer(async (req, res) => {
         profile: null,
         createdAt: Date.now(),
         abortController,
+        storage,
+        base,
+        bgRunning: false,
       };
       qrLogins.set(loginId, state);
-
-      let resolveQrReady;
-      let rejectQrReady;
-      const qrReadyPromise = new Promise((resolve, reject) => {
-        resolveQrReady = resolve;
-        rejectQrReady = reject;
-      });
-
-      base.on("qrcall", (qrUrl) => {
-        state.qrUrl = qrUrl;
-        state.status = "waiting_scan";
-        resolveQrReady(qrUrl);
-      });
-
-      base.on("pincall", (pin) => {
-        state.pinCode = String(pin || "");
-        state.status = "waiting_pin";
-      });
-
-      // Kick off full SQR2 login flow in background
-      (async () => {
-        try {
-          await base.loginProcess.withQrCode({});
-          await base.loginProcess.ready();
-          const profile = serializeProfile(base.profile);
-          await ensureSelfKeyIndexedByMid(base, storage, profile.mid);
-          const entry = createSessionEntry({
-            base,
-            storage,
-            device,
-            profile,
-          });
-          state.sessionId = entry.sessionId;
-          state.profile = profile;
-          state.sessionData = exportSessionData(entry);
-          state.status = "authenticated";
-        } catch (err) {
-          if (abortController.signal.aborted) {
-            state.status = "expired";
-            state.error = "新しいQRコードが発行されたため終了しました";
-            rejectQrReady(err);
-            return;
-          }
-          const msg = err?.message || String(err);
-          if (/Timeout|timed out|expired|410/i.test(msg)) {
-            state.status = "expired";
-            state.error = "QRコードの有効期限が切れました。更新ボタンを押してください。";
-          } else {
-            state.status = "error";
-            state.error = `QRログインエラー: ${msg}`;
-          }
-          rejectQrReady(err);
-        }
-      })();
-
-      const qrUrl = await Promise.race([
-        qrReadyPromise,
-        new Promise((_, rej) =>
-          setTimeout(() => rej(new Error("LINEサーバーからのQRコード取得がタイムアウトしました")), 15000)
-        ),
-      ]);
+      runResilientQrBackground(state);
 
       return sendJson(res, 200, {
         ok: true,
         loginId,
         qrUrl,
+        qrState: encodeQrState(state),
         device,
         status: state.status,
       });
     }
 
-    // --- QR Login Status ---
-    if (req.method === "GET" && path === "/auth/qr/status") {
-      const loginId = url.searchParams.get("loginId") || "";
-      const st = qrLogins.get(loginId);
+    // --- QR Login Status (supports GET and POST with stateless qrState fallback) ---
+    if ((req.method === "GET" || req.method === "POST") && path === "/auth/qr/status") {
+      const body = req.method === "POST" ? await readJsonBody(req) : {};
+      const loginId = toSafeString(body.loginId || url.searchParams.get("loginId") || "").trim();
+      const qrStateToken = toSafeString(body.qrState || url.searchParams.get("qrState") || "").trim();
+      const st = adoptQrStateIfNeeded(loginId, qrStateToken);
       if (!st) {
         return sendJson(res, 200, {
           ok: true,
@@ -2083,6 +2315,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         status: st.status,
         pinCode: st.pinCode,
+        qrState: st.status === "authenticated" ? "" : encodeQrState(st),
         error: st.error,
         sessionId: st.sessionId,
         sessionData: st.sessionData,

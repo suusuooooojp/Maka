@@ -1956,7 +1956,7 @@ async def openchat_global_middleware(request: Request, call_next):
                     b'if(e.key==="F5"||(e.code==="KeyR"&&(e.ctrlKey||e.metaKey))){var n=Date.now();if(n-l<800){'
                     b'e.preventDefault();return;}l=n;}},{capture:true,passive:false});})();</script>'
                 )
-            if b"/openchat/chat.js" not in body:
+            if b"/openchat/chat.js" not in body and not req_path.startswith("/run-site"):
                 inject_parts.append(b'<script src="/openchat/chat.js" defer></script>')
 
             if inject_parts:
