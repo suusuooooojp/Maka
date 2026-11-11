@@ -14,18 +14,17 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { Buffer } from "node:buffer";
-let BaseClient;
-let MemoryStorage;
-try {
-  ({ BaseClient } = await import("@evex-dev/linejs/base"));
-  ({ MemoryStorage } = await import("@evex-dev/linejs/storage"));
-} catch {
-  ({ BaseClient, MemoryStorage } = await import("./linejs_vendor.mjs"));
-}
+import {
+  BaseClient,
+  Client,
+  MemoryStorage,
+  UndiciAgent,
+  UndiciEnvHttpProxyAgent,
+  undiciFetch,
+} from "./linejs_vendor.mjs";
 
 let SHARED_UNDICI_DISPATCHER = undefined;
 try {
-  const { Agent, EnvHttpProxyAgent } = await import("undici");
   const hasEnvProxy = Boolean(
     process.env.HTTPS_PROXY ||
       process.env.HTTP_PROXY ||
@@ -33,12 +32,12 @@ try {
       process.env.http_proxy
   );
   SHARED_UNDICI_DISPATCHER = hasEnvProxy
-    ? new EnvHttpProxyAgent({
+    ? new UndiciEnvHttpProxyAgent({
         connectTimeout: 20_000,
         headersTimeout: 190_000,
         bodyTimeout: 190_000,
       })
-    : new Agent({
+    : new UndiciAgent({
         connectTimeout: 20_000,
         headersTimeout: 190_000,
         bodyTimeout: 190_000,
@@ -69,6 +68,27 @@ function normalizeDevice(dev) {
 }
 
 const SHARED_FETCH_DISPATCHER = SHARED_UNDICI_DISPATCHER;
+
+function combineAbortSignals(sigA, sigB) {
+  if (!sigA) return sigB;
+  if (!sigB) return sigA;
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([sigA, sigB]);
+  }
+  const ctrl = new AbortController();
+  const onAbort = () => {
+    try {
+      ctrl.abort();
+    } catch {}
+  };
+  if (sigA.aborted || sigB.aborted) {
+    onAbort();
+    return ctrl.signal;
+  }
+  sigA.addEventListener("abort", onAbort, { once: true });
+  sigB.addEventListener("abort", onAbort, { once: true });
+  return ctrl.signal;
+}
 
 function createProxySafeFetch(abortSignal) {
   return async function customFetch(input, init) {
@@ -105,27 +125,47 @@ function createProxySafeFetch(abortSignal) {
       body = init?.body;
     }
 
-    let finalSignal = reqSignal;
-    if (abortSignal) {
-      finalSignal = reqSignal ? AbortSignal.any([reqSignal, abortSignal]) : abortSignal;
-    }
-
+    const finalSignal = combineAbortSignals(reqSignal, abortSignal);
     const fetchOpts = {
       method,
       headers: headersObj,
       body,
       signal: finalSignal,
     };
-    if (SHARED_FETCH_DISPATCHER) {
+    if (SHARED_FETCH_DISPATCHER && typeof undiciFetch === "function") {
       fetchOpts.dispatcher = SHARED_FETCH_DISPATCHER;
+      return undiciFetch(url, fetchOpts);
     }
     return fetch(url, fetchOpts);
   };
 }
 
+/**
+ * Convert a Thrift binary chunk from @evex-dev/linejs into a raw Node Buffer.
+ * IMPORTANT: @evex-dev/linejs's Thrift reader decodes valid-UTF-8 binary fields
+ * (including all 4-byte big-endian keyId chunks like [0,0,0,1]) into UTF-8 strings,
+ * NOT base64! Using Buffer.from(str, "base64") corrupts keyIds to 0 bytes.
+ */
+function chunkToBuffer(chunk) {
+  if (!chunk) return Buffer.alloc(0);
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (chunk instanceof Uint8Array) return Buffer.from(chunk);
+  if (typeof chunk === "string") return Buffer.from(chunk, "utf-8");
+  if (typeof chunk === "object") {
+    if (typeof chunk.__b64 === "string") return Buffer.from(chunk.__b64, "base64");
+    if (chunk.type === "Buffer" && Array.isArray(chunk.data)) return Buffer.from(chunk.data);
+  }
+  return Buffer.from(chunk);
+}
+
+function normalizeMessageChunks(chunks) {
+  if (!Array.isArray(chunks)) return undefined;
+  return chunks.map(chunkToBuffer);
+}
+
 function readInt32BEChunk(chunk) {
-  if (!chunk) return 0;
-  const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const b = chunkToBuffer(chunk);
+  if (!b.length) return 0;
   if (b.length >= 4) return b.readInt32BE(0);
   let val = 0;
   for (let i = 0; i < b.length; i++) val = (val << 8) | b[i];
@@ -171,12 +211,22 @@ function installE2EEEnhancements(base, storage) {
 
   const origGetLocalPubKey = e2ee.getE2EELocalPublicKey.bind(e2ee);
   e2ee.getE2EELocalPublicKey = async function (mid, keyId) {
+    // Self / Keep Memo fast path when key is already in local self keychain
+    if (mid && mid === base.profile?.mid) {
+      if (keyId !== undefined) {
+        const selfById = await e2ee.getE2EESelfKeyDataByKeyId(keyId);
+        if (selfById?.pubKey) return Buffer.from(selfById.pubKey, "base64");
+      } else {
+        const selfLatest = await e2ee.getE2EESelfKeyData(mid);
+        if (selfLatest?.pubKey) return Buffer.from(selfLatest.pubKey, "base64");
+      }
+    }
     try {
       return await origGetLocalPubKey(mid, keyId);
     } catch (err) {
       // 1:1 historical peer public key fallback via TalkService.getE2EEPublicKey
       if (typeof mid === "string" && mid.startsWith("u") && keyId !== undefined) {
-        for (const kv of [1, 2]) {
+        for (const kv of [2, 1]) {
           try {
             const res = await base.talk.getE2EEPublicKey({
               mid,
@@ -185,7 +235,7 @@ function installE2EEEnhancements(base, storage) {
             });
             const rawKey = res?.keyData || res?.publicKey?.keyData;
             if (rawKey) {
-              const keyBuf = Buffer.from(rawKey);
+              const keyBuf = chunkToBuffer(rawKey);
               if (keyBuf.length > 0) {
                 await storage.set(`e2eePublicKeys:${mid}:${keyId}`, keyBuf.toString("base64"));
                 return keyBuf;
@@ -194,29 +244,56 @@ function installE2EEEnhancements(base, storage) {
           } catch {}
         }
       }
-      // Group historical shared key fallback (keyVersion 1)
+      // Group historical shared key fallback (keyVersion 2 then 1)
       if (typeof mid === "string" && (mid.startsWith("c") || mid.startsWith("r"))) {
-        try {
-          let gKey = null;
-          if (keyId !== undefined && Number.isFinite(Number(keyId))) {
-            try {
-              gKey = await base.talk.getE2EEGroupSharedKey({
-                keyVersion: 1,
+        for (const kv of [2, 1]) {
+          try {
+            let gKey = null;
+            if (keyId !== undefined && Number.isFinite(Number(keyId))) {
+              try {
+                gKey = await base.talk.getE2EEGroupSharedKey({
+                  keyVersion: kv,
+                  chatMid: mid,
+                  groupKeyId: Number(keyId),
+                });
+              } catch {}
+            }
+            if (!gKey) {
+              gKey = await base.talk.getLastE2EEGroupSharedKey({
+                keyVersion: kv,
                 chatMid: mid,
-                groupKeyId: Number(keyId),
               });
-            } catch {}
+            }
+            if (gKey) {
+              return await e2ee.unwrapE2EEGroupSharedKey(mid, gKey);
+            }
+          } catch {}
+        }
+      }
+      throw err;
+    }
+  };
+
+  const origEncrypt = e2ee.encryptE2EEMessage.bind(e2ee);
+  e2ee.encryptE2EEMessage = async function (to, data, contentType = 0, specVersion = 2) {
+    try {
+      return await origEncrypt(to, data, contentType, specVersion);
+    } catch (err) {
+      // Keep Memo (self-chat) fallback using own E2EE keypair directly
+      const myMid = base.profile?.mid;
+      if (myMid && to === myMid) {
+        const selfKeyData = await e2ee.getE2EESelfKeyData(myMid);
+        if (selfKeyData?.privKey && selfKeyData?.pubKey && selfKeyData?.keyId !== undefined) {
+          const privBuf = Buffer.from(selfKeyData.privKey, "base64");
+          const pubBuf = Buffer.from(selfKeyData.pubKey, "base64");
+          const shared = Buffer.from(e2ee.generateSharedSecret(privBuf, pubBuf));
+          const kid = Number(selfKeyData.keyId);
+          if (typeof data === "string" || Buffer.isBuffer(data)) {
+            return e2ee.encryptE2EETextMessage(kid, kid, shared, 2, data, to, myMid);
           }
-          if (!gKey) {
-            gKey = await base.talk.getLastE2EEGroupSharedKey({
-              keyVersion: 1,
-              chatMid: mid,
-            });
-          }
-          if (gKey) {
-            return await e2ee.unwrapE2EEGroupSharedKey(mid, gKey);
-          }
-        } catch {}
+          const ctNum = typeof contentType === "number" ? contentType : normalizeContentTypeCode(normalizeContentTypeName(contentType));
+          return e2ee.encryptE2EEMessageByData(kid, kid, shared, 2, data, to, myMid, ctNum);
+        }
       }
       throw err;
     }
@@ -241,19 +318,19 @@ function installE2EEEnhancements(base, storage) {
     const _from = messageObj.from;
     const to = messageObj.to;
     const toType = messageObj.toType;
+    const normChunks = normalizeMessageChunks(messageObj.chunks);
     const isGroupLike = toType !== 0 && toType !== "USER" && !(typeof to === "string" && to.startsWith("u"));
-    if (isGroupLike && _from === myMid && Array.isArray(messageObj.chunks) && messageObj.chunks.length >= 5) {
-      const chunks = messageObj.chunks.map((c) => (typeof c === "string" ? Buffer.from(c, "utf-8") : Buffer.from(c)));
-      const senderKeyId = readInt32BEChunk(chunks[3]);
-      const receiverKeyId = readInt32BEChunk(chunks[4]);
+    if (isGroupLike && _from === myMid && Array.isArray(normChunks) && normChunks.length >= 5) {
+      const senderKeyId = readInt32BEChunk(normChunks[3]);
+      const receiverKeyId = readInt32BEChunk(normChunks[4]);
       const specVersion = String(messageObj.contentMetadata?.e2eeVersion || "2");
       const groupK = await e2ee.getE2EELocalPublicKey(to, receiverKeyId);
       const privK = Buffer.from(groupK.privKey, "base64");
       const pubK = await resolveGroupSenderPubKey(myMid, senderKeyId);
       const decrypted =
         specVersion === "2"
-          ? e2ee.decryptE2EEMessageV2(to, _from, chunks, privK, pubK, parseInt(specVersion, 10), 0)
-          : e2ee.decryptE2EEMessageV1(chunks, privK, pubK);
+          ? e2ee.decryptE2EEMessageV2(to, _from, normChunks, privK, pubK, parseInt(specVersion, 10), 0)
+          : e2ee.decryptE2EEMessageV1(normChunks, privK, pubK);
       const text = decrypted?.text || "";
       const meta = {};
       for (const [k, val] of Object.entries(decrypted || {})) {
@@ -262,7 +339,7 @@ function installE2EEEnhancements(base, storage) {
       }
       return [text, meta];
     }
-    return await origDecText({ ...messageObj, contentType: 0 }, isSelf);
+    return await origDecText({ ...messageObj, chunks: normChunks, contentType: 0 }, isSelf);
   };
 
   const origDecData = e2ee.decryptE2EEDataMessage.bind(e2ee);
@@ -271,11 +348,11 @@ function installE2EEEnhancements(base, storage) {
     const _from = messageObj.from;
     const to = messageObj.to;
     const toType = messageObj.toType;
+    const normChunks = normalizeMessageChunks(messageObj.chunks);
     const isGroupLike = toType !== 0 && toType !== "USER" && !(typeof to === "string" && to.startsWith("u"));
-    if (isGroupLike && _from === myMid && Array.isArray(messageObj.chunks) && messageObj.chunks.length >= 5) {
-      const chunks = messageObj.chunks.map((c) => (typeof c === "string" ? Buffer.from(c, "utf-8") : Buffer.from(c)));
-      const senderKeyId = readInt32BEChunk(chunks[3]);
-      const receiverKeyId = readInt32BEChunk(chunks[4]);
+    if (isGroupLike && _from === myMid && Array.isArray(normChunks) && normChunks.length >= 5) {
+      const senderKeyId = readInt32BEChunk(normChunks[3]);
+      const receiverKeyId = readInt32BEChunk(normChunks[4]);
       const specVersion = String(messageObj.contentMetadata?.e2eeVersion || "2");
       const ctCode = typeof messageObj.contentType === "number"
         ? messageObj.contentType
@@ -285,11 +362,11 @@ function installE2EEEnhancements(base, storage) {
       const pubK = await resolveGroupSenderPubKey(myMid, senderKeyId);
       const decrypted =
         specVersion === "2"
-          ? e2ee.decryptE2EEMessageV2(to, _from, chunks, privK, pubK, parseInt(specVersion, 10), ctCode)
-          : e2ee.decryptE2EEMessageV1(chunks, privK, pubK);
+          ? e2ee.decryptE2EEMessageV2(to, _from, normChunks, privK, pubK, parseInt(specVersion, 10), ctCode)
+          : e2ee.decryptE2EEMessageV1(normChunks, privK, pubK);
       return decrypted || {};
     }
-    return await origDecData(messageObj, isSelf);
+    return await origDecData({ ...messageObj, chunks: normChunks }, isSelf);
   };
 
   return base;
@@ -495,8 +572,10 @@ function exportSessionData(entry) {
 
 function createSessionEntry({ sessionId, base, storage, device, profile, syncState }) {
   const sid = sessionId || crypto.randomBytes(16).toString("hex");
+  const client = new Client(base);
   const entry = {
     sessionId: sid,
+    client,
     base,
     storage,
     device,
@@ -507,6 +586,13 @@ function createSessionEntry({ sessionId, base, storage, device, profile, syncSta
     squareMembersMap: new Map(),
     opMessagesByChat: new Map(),
     decryptedMsgCache: new Map(),
+    unsentMsgIds: new Set(),
+    boxesCache: { ts: 0, boxes: [] },
+    sseClients: new Set(),
+    eventSeq: 0,
+    recentEvents: [],
+    syncLoopRunning: false,
+    syncAbort: new AbortController(),
     syncState: {
       revision: BigInt(syncState?.revision || 0),
       globalRev: BigInt(syncState?.globalRev || 0),
@@ -519,7 +605,48 @@ function createSessionEntry({ sessionId, base, storage, device, profile, syncSta
     if (nextToken) base.authToken = nextToken;
   });
   sessions.set(sid, entry);
+  ensureBackgroundSyncLoop(entry);
   return entry;
+}
+
+function stopSessionEntry(sid) {
+  const existing = sessions.get(sid);
+  if (!existing) return;
+  sessions.delete(sid);
+  try {
+    existing.syncAbort?.abort();
+  } catch {}
+  for (const res of existing.sseClients) {
+    try {
+      res.end();
+    } catch {}
+  }
+  existing.sseClients.clear();
+}
+
+function emitSessionRealtimeEvent(entry, payload) {
+  const seq = ++entry.eventSeq;
+  const fullEvent = {
+    seq,
+    ts: Date.now(),
+    ...payload,
+  };
+  entry.recentEvents.push(fullEvent);
+  if (entry.recentEvents.length > 80) {
+    entry.recentEvents.shift();
+  }
+  if (entry.sseClients.size > 0) {
+    const serialized = `event: talk_event\ndata: ${JSON.stringify(fullEvent, (_k, v) =>
+      typeof v === "bigint" ? v.toString() : v
+    )}\n\n`;
+    for (const res of [...entry.sseClients]) {
+      try {
+        res.write(serialized);
+      } catch {
+        entry.sseClients.delete(res);
+      }
+    }
+  }
 }
 
 async function withSessionLock(entry, fn) {
@@ -541,6 +668,8 @@ async function getOrRestoreSession({ sessionId, sessionData, accessToken, device
   if (sessionId && sessions.has(sessionId)) {
     const existing = sessions.get(sessionId);
     if (existing.base.authToken) {
+      existing.updatedAt = Date.now();
+      ensureBackgroundSyncLoop(existing);
       return existing;
     }
   }
@@ -639,7 +768,8 @@ function normalizeToTypeName(tt, toMid) {
   }
   if (tt === 1) return "ROOM";
   if (tt === 2) return "GROUP";
-  if (toMid && (toMid.startsWith("c") || toMid.startsWith("r"))) return "GROUP";
+  if (toMid && toMid.startsWith("r")) return "ROOM";
+  if (toMid && toMid.startsWith("c")) return "GROUP";
   return "USER";
 }
 
@@ -666,10 +796,21 @@ function normalizeEpochMs(val) {
   return n;
 }
 
+function resolveChatMidForMessage(entry, rawMsg) {
+  const myMid = entry.profile?.mid || "";
+  const fromMid = toSafeString(rawMsg.from || rawMsg._from || "");
+  const toMid = toSafeString(rawMsg.to || "");
+  const toType = normalizeToTypeName(rawMsg.toType, toMid);
+  if (toType === "GROUP" || toType === "ROOM") return toMid;
+  if (fromMid === myMid) return toMid || fromMid;
+  return fromMid || toMid;
+}
+
 async function decryptAndSerializeMessage(entry, rawMsg) {
   if (!rawMsg) return null;
   const raw = asRecord(rawMsg);
   const msgId = toSafeString(raw.id);
+  if (msgId && entry.unsentMsgIds.has(msgId)) return null;
   const myMid = entry.profile?.mid || "";
 
   if (msgId && entry.decryptedMsgCache.has(msgId)) {
@@ -696,29 +837,24 @@ async function decryptAndSerializeMessage(entry, rawMsg) {
   const ctName = normalizeContentTypeName(raw.contentType);
   const ctCode = normalizeContentTypeCode(ctName);
   const meta = { ...(asRecord(raw.contentMetadata)) };
-  const hasChunks = Array.isArray(raw.chunks) && raw.chunks.length > 0;
+  const normChunks = normalizeMessageChunks(raw.chunks);
+  const hasChunks = Array.isArray(normChunks) && normChunks.length > 0;
   const wasEncrypted = Boolean(hasChunks || meta.e2eeVersion);
 
   let text = typeof raw.text === "string" ? raw.text : "";
-  let decryptedOk = !wasEncrypted;
+  let decryptedOk = !wasEncrypted || Boolean(text && !hasChunks);
+
+  const rawWithBufferChunks = hasChunks ? { ...raw, chunks: normChunks } : raw;
 
   if (wasEncrypted && hasChunks) {
     const msgClone = {
-      ...raw,
+      ...rawWithBufferChunks,
       from: fromMid,
       to: toMid,
       toType,
       contentType: ctName,
       contentMetadata: { ...meta },
-      chunks: raw.chunks.map((c) =>
-        Buffer.isBuffer(c)
-          ? c
-          : c instanceof Uint8Array
-            ? Buffer.from(c)
-            : typeof c === "string"
-              ? Buffer.from(c, "base64")
-              : Buffer.from(c)
-      ),
+      chunks: normChunks,
     };
 
     try {
@@ -782,7 +918,7 @@ async function decryptAndSerializeMessage(entry, rawMsg) {
     : entry.contactsMap.get(fromMid) || { displayName: fromMid.slice(0, 8), picturePath: "" };
 
   const createdTime = normalizeEpochMs(raw.createdTime || raw.deliveredTime || 0);
-  const deliveredTime = normalizeEpochMs(raw.deliveredTime || raw.createdTime || 0) || createdTime;
+  const deliveredTime = normalizeEpochMs(raw.deliveredTime || 0);
   const reactions = Array.isArray(raw.reactions)
     ? raw.reactions.map((r) => ({
         actorMid: toSafeString(r.userMid || r.actorMid || ""),
@@ -813,7 +949,7 @@ async function decryptAndSerializeMessage(entry, rawMsg) {
     wasEncrypted,
     decryptedOk,
     reactions,
-    rawForMedia: [1, 2, 3, 14].includes(ctCode) ? raw : undefined,
+    rawForMedia: [1, 2, 3, 14].includes(ctCode) ? rawWithBufferChunks : undefined,
   };
 
   if (msgId && (!wasEncrypted || decryptedOk)) {
@@ -827,67 +963,254 @@ async function decryptAndSerializeMessage(entry, rawMsg) {
 }
 
 function recordOpMessage(entry, rawMsg) {
-  if (!rawMsg || !rawMsg.id) return;
-  const myMid = entry.profile?.mid || "";
-  const fromMid = toSafeString(rawMsg.from || rawMsg._from || "");
-  const toMid = toSafeString(rawMsg.to || "");
-  const toType = normalizeToTypeName(rawMsg.toType, toMid);
-  const chatMid =
-    toType === "GROUP" || toType === "ROOM"
-      ? toMid
-      : fromMid === myMid
-        ? toMid
-        : fromMid;
-  if (!chatMid) return;
+  if (!rawMsg || !rawMsg.id) return "";
+  const msgId = toSafeString(rawMsg.id);
+  entry.unsentMsgIds.delete(msgId);
+  const chatMid = resolveChatMidForMessage(entry, rawMsg);
+  if (!chatMid) return "";
   let map = entry.opMessagesByChat.get(chatMid);
   if (!map) {
     map = new Map();
     entry.opMessagesByChat.set(chatMid, map);
   }
-  map.set(toSafeString(rawMsg.id), rawMsg);
-  if (map.size > 150) {
+  const normalizedRaw = Array.isArray(rawMsg.chunks)
+    ? { ...rawMsg, chunks: normalizeMessageChunks(rawMsg.chunks) }
+    : rawMsg;
+  map.set(msgId, normalizedRaw);
+  if (map.size > 200) {
     const oldest = map.keys().next().value;
     map.delete(oldest);
   }
+  entry.boxesCache.ts = 0;
+  return chatMid;
 }
 
-async function syncOperationsIncremental(entry) {
+function removeUnsentMessageFromState(entry, chatMidHint, messageId) {
+  const msgId = toSafeString(messageId);
+  if (!msgId) return "";
+  entry.unsentMsgIds.add(msgId);
+  if (entry.unsentMsgIds.size > 500) {
+    const first = entry.unsentMsgIds.values().next().value;
+    entry.unsentMsgIds.delete(first);
+  }
+  entry.decryptedMsgCache.delete(msgId);
+  entry.boxesCache.ts = 0;
+  let foundChat = chatMidHint || "";
+  for (const [cmid, map] of entry.opMessagesByChat.entries()) {
+    if (map.has(msgId)) {
+      map.delete(msgId);
+      if (!foundChat) foundChat = cmid;
+    }
+  }
+  return foundChat;
+}
+
+async function processSyncResponse(entry, res) {
+  // Initial sync (revision === 0) or full-sync reset returns fullSyncResponse.nextRevision!
+  const fullNextRev = res?.fullSyncResponse?.nextRevision;
+  if (fullNextRev !== undefined && fullNextRev !== null) {
+    const nr = BigInt(fullNextRev);
+    if (nr > entry.syncState.revision) {
+      entry.syncState.revision = nr;
+    }
+  }
+
+  const ge = res?.operationResponse?.globalEvents;
+  if (ge?.lastRevision !== undefined) {
+    entry.syncState.globalRev = BigInt(ge.lastRevision);
+  }
+  const ie = res?.operationResponse?.individualEvents;
+  if (ie?.lastRevision !== undefined) {
+    entry.syncState.individualRev = BigInt(ie.lastRevision);
+  }
+
+  const ops = res?.operationResponse?.operations || [];
+  for (const op of ops) {
+    if (op.revision !== undefined) {
+      const r = BigInt(op.revision);
+      if (r > entry.syncState.revision) entry.syncState.revision = r;
+    }
+    const opType = op.type;
+    if (
+      (opType === "SEND_MESSAGE" ||
+        opType === "RECEIVE_MESSAGE" ||
+        opType === 25 ||
+        opType === 26) &&
+      op.message
+    ) {
+      const chatMid = recordOpMessage(entry, op.message);
+      const fromMid = toSafeString(op.message.from || op.message._from || "");
+      if (fromMid.startsWith("u") && !entry.contactsMap.has(fromMid)) {
+        await resolveContactsBatch(entry, [fromMid]).catch(() => {});
+      }
+      const serialized = await decryptAndSerializeMessage(entry, op.message).catch(() => null);
+      if (serialized && chatMid) {
+        const { rawForMedia: _omit, ...cleanMsg } = serialized;
+        emitSessionRealtimeEvent(entry, {
+          type: "message",
+          chatMid,
+          message: cleanMsg,
+        });
+      }
+    } else if (
+      (opType === "NOTIFIED_EDIT_MESSAGE" || opType === "EDIT_MESSAGE") &&
+      op.message
+    ) {
+      const msgId = toSafeString(op.message.id);
+      if (msgId) entry.decryptedMsgCache.delete(msgId);
+      const chatMid = recordOpMessage(entry, op.message);
+      const serialized = await decryptAndSerializeMessage(entry, op.message).catch(() => null);
+      if (serialized && chatMid) {
+        const { rawForMedia: _omit, ...cleanMsg } = serialized;
+        emitSessionRealtimeEvent(entry, {
+          type: "message_edit",
+          chatMid,
+          message: cleanMsg,
+        });
+      }
+    } else if (
+      opType === "NOTIFIED_DESTROY_MESSAGE" ||
+      opType === "DESTROY_MESSAGE" ||
+      opType === 65
+    ) {
+      const hintChat = toSafeString(op.param1 || "");
+      const msgId = toSafeString(op.param2 || op.message?.id || "");
+      const chatMid = removeUnsentMessageFromState(entry, hintChat, msgId);
+      if (msgId) {
+        emitSessionRealtimeEvent(entry, {
+          type: "message_unsend",
+          chatMid,
+          messageId: msgId,
+        });
+      }
+    } else if (
+      opType === "SEND_REACTION" ||
+      opType === "NOTIFIED_SEND_REACTION"
+    ) {
+      const msgId = toSafeString(op.param1 || "");
+      const chatMid = toSafeString(op.param2 || "");
+      if (msgId) entry.decryptedMsgCache.delete(msgId);
+      emitSessionRealtimeEvent(entry, {
+        type: "reaction",
+        chatMid,
+        messageId: msgId,
+      });
+    } else if (
+      opType === "SEND_CHAT_CHECKED" ||
+      opType === "NOTIFIED_READ_MESSAGE" ||
+      opType === 40 ||
+      opType === 55
+    ) {
+      const chatMid = toSafeString(op.param1 || "");
+      if (chatMid) {
+        emitSessionRealtimeEvent(entry, {
+          type: "read",
+          chatMid,
+        });
+      }
+    }
+  }
+}
+
+async function seedInitialSyncRevision(entry) {
+  if (entry.syncState.revision > 0n) return;
   try {
     const res = await entry.base.talk.sync({
       limit: 100,
-      revision: entry.syncState.revision,
+      revision: 0n,
       globalRev: entry.syncState.globalRev,
       individualRev: entry.syncState.individualRev,
-      timeout: 5000,
+      timeout: 0,
     });
-    const ops = res?.operationResponse?.operations || [];
-    for (const op of ops) {
-      if (op.revision !== undefined) {
-        const r = BigInt(op.revision);
-        if (r > entry.syncState.revision) entry.syncState.revision = r;
+    await processSyncResponse(entry, res);
+  } catch {}
+  if (entry.syncState.revision === 0n) {
+    try {
+      const lastRev = await entry.base.talk.getLastOpRevision();
+      if (lastRev !== undefined && lastRev !== null) {
+        entry.syncState.revision = BigInt(lastRev);
       }
-      const opType = op.type;
-      if (
-        (opType === "SEND_MESSAGE" ||
-          opType === "RECEIVE_MESSAGE" ||
-          opType === 25 ||
-          opType === 26) &&
-        op.message
-      ) {
-        recordOpMessage(entry, op.message);
-      }
-    }
-    const ge = res?.operationResponse?.globalEvents;
-    if (ge?.lastRevision !== undefined) {
-      entry.syncState.globalRev = BigInt(ge.lastRevision);
-    }
-    const ie = res?.operationResponse?.individualEvents;
-    if (ie?.lastRevision !== undefined) {
-      entry.syncState.individualRev = BigInt(ie.lastRevision);
-    }
-  } catch {
-    // Non-fatal: messageBox and getRecentMessagesV2 still work
+    } catch {}
   }
+}
+
+function ensureBackgroundSyncLoop(entry) {
+  if (entry.syncLoopRunning || entry.syncAbort.signal.aborted) return;
+  entry.syncLoopRunning = true;
+
+  (async () => {
+    let consecutiveErrors = 0;
+    try {
+      while (
+        sessions.get(entry.sessionId) === entry &&
+        !entry.syncAbort.signal.aborted &&
+        entry.base.authToken
+      ) {
+        // Pause background polling if session has been completely inactive > 15m with no SSE clients
+        if (
+          entry.sseClients.size === 0 &&
+          Date.now() - entry.updatedAt > 15 * 60 * 1000
+        ) {
+          break;
+        }
+        try {
+          if (entry.syncState.revision === 0n) {
+            await seedInitialSyncRevision(entry);
+          }
+          const res = await entry.base.talk.sync({
+            limit: 100,
+            revision: entry.syncState.revision,
+            globalRev: entry.syncState.globalRev,
+            individualRev: entry.syncState.individualRev,
+            timeout: 15_000,
+          });
+          consecutiveErrors = 0;
+          await processSyncResponse(entry, res);
+        } catch (err) {
+          consecutiveErrors++;
+          const msg = err?.message || String(err);
+          if (/AUTHENTICATION_FAILED|INVALID_MID|NOT_AUTHORIZED_DEVICE/i.test(msg)) {
+            break;
+          }
+          const backoffMs = Math.min(1000 * Math.pow(1.6, consecutiveErrors), 12_000);
+          await new Promise((r) => setTimeout(r, backoffMs));
+        }
+        await new Promise((r) => setTimeout(r, 80));
+      }
+    } finally {
+      entry.syncLoopRunning = false;
+    }
+  })();
+}
+
+async function getMessageBoxesCached(entry, maxAgeMs = 3500) {
+  const now = Date.now();
+  if (entry.boxesCache.boxes.length > 0 && now - entry.boxesCache.ts < maxAgeMs) {
+    return entry.boxesCache.boxes;
+  }
+  let res = await entry.base.talk
+    .getMessageBoxes({
+      messageBoxListRequest: {
+        activeOnly: false,
+        unreadOnly: false,
+        messageBoxCountLimit: 300,
+        withUnreadCount: true,
+        lastMessagesPerMessageBoxCount: 5,
+      },
+    })
+    .catch(() => null);
+
+  if (!res || !Array.isArray(res.messageBoxes)) {
+    res = await entry.base.talk
+      .getMessageBoxes({ messageBoxListRequest: {} })
+      .catch(() => ({ messageBoxes: [] }));
+  }
+
+  const boxes = Array.isArray(res?.messageBoxes) ? res.messageBoxes : [];
+  if (boxes.length > 0) {
+    entry.boxesCache = { ts: Date.now(), boxes };
+  }
+  return boxes;
 }
 
 async function resolveContactsBatch(entry, mids) {
@@ -1016,34 +1339,18 @@ async function buildOverview(entry) {
     entry.profile = serializeProfile(await entry.base.talk.getProfile());
     await ensureSelfKeyIndexedByMid(entry.base, entry.storage, entry.profile.mid);
   }
+  ensureBackgroundSyncLoop(entry);
 
-  const [, contacts, { groups, invitedGroups }, boxResult, squareResult] = await Promise.all([
-    syncOperationsIncremental(entry),
+  const [, contacts, { groups, invitedGroups }, boxes, squareResult] = await Promise.all([
+    seedInitialSyncRevision(entry),
     fetchFriendsList(entry),
     fetchGroupsList(entry),
-    entry.base.talk
-      .getMessageBoxes({
-        messageBoxListRequest: {
-          activeOnly: false,
-          unreadOnly: false,
-          messageBoxCountLimit: 200,
-          withUnreadCount: true,
-          lastMessagesPerMessageBoxCount: 2,
-        },
-      })
-      .catch(async () => {
-        try {
-          return await entry.base.talk.getMessageBoxes({ messageBoxListRequest: {} });
-        } catch {
-          return { messageBoxes: [] };
-        }
-      }),
+    getMessageBoxesCached(entry, 1500),
     entry.base.square
       .getJoinedSquareChats({ request: { limit: 100 } })
       .catch(() => null),
   ]);
 
-  const boxes = boxResult?.messageBoxes || [];
   const unknownUserMids = [];
   const unknownGroupMids = [];
 
@@ -1128,7 +1435,7 @@ async function buildOverview(entry) {
       }
     }
 
-    const lastDeliveredTime = toSafeNumber(
+    const lastDeliveredTime = normalizeEpochMs(
       b.lastDeliveredMessageId?.deliveredTime || lastMessage?.createdTime || 0
     );
 
@@ -1144,7 +1451,7 @@ async function buildOverview(entry) {
       lastDeliveredMessageId: b.lastDeliveredMessageId
         ? {
             messageId: String(b.lastDeliveredMessageId.messageId),
-            deliveredTime: String(b.lastDeliveredMessageId.deliveredTime || 0),
+            deliveredTime: String(b.lastDeliveredMessageId.deliveredTime ?? 0),
           }
         : null,
     });
@@ -1155,7 +1462,11 @@ async function buildOverview(entry) {
     if (chatRoomsByMid.has(chatMid) || opMap.size === 0) continue;
     const isGroup = chatMid.startsWith("c") || chatMid.startsWith("r");
     const gInfo = isGroup ? entry.groupsMap.get(chatMid) : null;
-    const uInfo = !isGroup ? entry.contactsMap.get(chatMid) : null;
+    const uInfo = !isGroup
+      ? chatMid === entry.profile.mid
+        ? { displayName: "Keepメモ (自分)", picturePath: entry.profile.picturePath }
+        : entry.contactsMap.get(chatMid)
+      : null;
     const latestRaw = [...opMap.values()].sort(
       (a, b) => toSafeNumber(a.createdTime) - toSafeNumber(b.createdTime)
     ).at(-1);
@@ -1319,7 +1630,10 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
     return await fetchSquareChatMessages(entry, { chatMid, count });
   }
 
-  await syncOperationsIncremental(entry);
+  ensureBackgroundSyncLoop(entry);
+  if (entry.syncState.revision === 0n) {
+    await seedInitialSyncRevision(entry);
+  }
 
   const rawById = new Map();
   let fetchedOlderBatch = [];
@@ -1331,7 +1645,7 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
       const cachedMsg =
         entry.messagesCacheByChat?.get(chatMid)?.find?.((x) => String(x?.id) === String(beforeMessageId)) ||
         entry.opMessagesByChat?.get(chatMid)?.get?.(String(beforeMessageId));
-      resolvedBeforeTime = Number(cachedMsg?.deliveredTime || cachedMsg?.createdTime || 0) || Date.now();
+      resolvedBeforeTime = Number(cachedMsg?.deliveredTime || cachedMsg?.createdTime || 0);
     }
     try {
       const prev = await entry.base.talk.getPreviousMessagesV2WithRequest({
@@ -1339,7 +1653,7 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
           messageBoxId: chatMid,
           endMessageId: {
             messageId: BigInt(beforeMessageId),
-            deliveredTime: BigInt(resolvedBeforeTime),
+            deliveredTime: BigInt(resolvedBeforeTime || 0),
           },
           messagesCount: count,
           withReadCount: true,
@@ -1349,89 +1663,85 @@ async function fetchChatMessages(entry, { chatMid, count = 50, beforeMessageId =
       if (Array.isArray(prev)) {
         fetchedOlderBatch = prev;
         for (const m of prev) {
-          if (m?.id && String(m.id) !== String(beforeMessageId)) {
-            rawById.set(String(m.id), m);
+          const midStr = toSafeString(m?.id);
+          if (midStr && midStr !== String(beforeMessageId) && !entry.unsentMsgIds.has(midStr)) {
+            rawById.set(midStr, m);
           }
         }
       }
     } catch {}
   } else {
-    // Initial / recent load: combine getRecentMessagesV2 + getMessageBoxes exact anchor + getPreviousMessagesV2WithRequest + sync ops
-    let recentArr = [];
-    try {
-      const res = await entry.base.talk.getRecentMessagesV2({
-        messageBoxId: chatMid,
-        messagesCount: count,
-      });
-      if (Array.isArray(res)) recentArr = res;
-    } catch {}
+    // Primary @evex-dev/linejs history path: getMessageBoxes -> getPreviousMessagesV2WithRequest
+    // run in parallel with getRecentMessagesV2 + getMessageBoxesByIds + opMessagesByChat merge for 100% coverage!
+    const [boxesResult, recentResult] = await Promise.all([
+      getMessageBoxesCached(entry, 3500).catch(() => []),
+      entry.base.talk
+        .getRecentMessagesV2({
+          messageBoxId: chatMid,
+          messagesCount: count,
+        })
+        .catch(() => []),
+    ]);
 
-    for (const m of recentArr) {
-      if (m?.id) rawById.set(String(m.id), m);
+    if (Array.isArray(recentResult)) {
+      for (const m of recentResult) {
+        const midStr = toSafeString(m?.id);
+        if (midStr && !entry.unsentMsgIds.has(midStr)) rawById.set(midStr, m);
+      }
     }
 
-    if (rawById.size < Math.min(count, 20)) {
-      try {
-        let box = null;
-        if (typeof entry.base.talk.getMessageBoxesByIds === "function") {
-          const byIds = await entry.base.talk
-            .getMessageBoxesByIds({
-              messageBoxIds: [chatMid],
-            })
-            .catch(() => null);
-          const byIdBoxes = Array.isArray(byIds) ? byIds : byIds?.messageBoxes || [];
-          box = byIdBoxes.find((b) => b?.id === chatMid) || byIdBoxes[0] || null;
-        }
-        if (!box) {
-          const boxes = await entry.base.talk
-            .getMessageBoxes({
-              messageBoxListRequest: {
-                activeOnly: false,
-                messageBoxCountLimit: 200,
-                lastMessagesPerMessageBoxCount: 2,
+    let box = (boxesResult || []).find((b) => toSafeString(b?.id) === chatMid) || null;
+    if (!box && typeof entry.base.talk.getMessageBoxesByIds === "function") {
+      const byIds = await entry.base.talk
+        .getMessageBoxesByIds({
+          messageBoxIds: [chatMid],
+        })
+        .catch(() => null);
+      const byIdBoxes = Array.isArray(byIds) ? byIds : byIds?.messageBoxes || [];
+      box = byIdBoxes.find((b) => toSafeString(b?.id) === chatMid) || byIdBoxes[0] || null;
+    }
+    if (!box) {
+      // Refresh boxes uncached once if chatMid was newly active
+      const freshBoxes = await getMessageBoxesCached(entry, 0).catch(() => []);
+      box = (freshBoxes || []).find((b) => toSafeString(b?.id) === chatMid) || null;
+    }
+
+    if (box) {
+      for (const lm of box.lastMessages || []) {
+        const midStr = toSafeString(lm?.id);
+        if (midStr && !entry.unsentMsgIds.has(midStr)) rawById.set(midStr, lm);
+      }
+      const anchor = box.lastDeliveredMessageId;
+      if (anchor?.messageId !== undefined && anchor?.messageId !== null) {
+        try {
+          const prev = await entry.base.talk.getPreviousMessagesV2WithRequest({
+            request: {
+              messageBoxId: toSafeString(box.id) || chatMid,
+              endMessageId: {
+                messageId: BigInt(anchor.messageId),
+                deliveredTime: BigInt(anchor.deliveredTime ?? 0),
               },
-            })
-            .catch(() => null);
-          box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid) || null;
-        }
-        if (!box) {
-          const boxes = await entry.base.talk
-            .getMessageBoxes({ messageBoxListRequest: {} })
-            .catch(() => null);
-          box = (boxes?.messageBoxes || []).find((b) => b.id === chatMid) || null;
-        }
-        if (box) {
-          for (const lm of box.lastMessages || []) {
-            if (lm?.id) rawById.set(String(lm.id), lm);
-          }
-          const anchor = box.lastDeliveredMessageId;
-          if (anchor?.messageId !== undefined) {
-            const prev = await entry.base.talk.getPreviousMessagesV2WithRequest({
-              request: {
-                messageBoxId: chatMid,
-                endMessageId: {
-                  messageId: BigInt(anchor.messageId),
-                  deliveredTime: BigInt(anchor.deliveredTime || Date.now()),
-                },
-                messagesCount: count,
-                withReadCount: true,
-                receivedOnly: false,
-              },
-            });
-            if (Array.isArray(prev)) {
-              for (const m of prev) {
-                if (m?.id) rawById.set(String(m.id), m);
-              }
+              messagesCount: count,
+              withReadCount: true,
+              receivedOnly: false,
+            },
+          });
+          if (Array.isArray(prev)) {
+            for (const m of prev) {
+              const midStr = toSafeString(m?.id);
+              if (midStr && !entry.unsentMsgIds.has(midStr)) rawById.set(midStr, m);
             }
           }
-        }
-      } catch {}
+        } catch {}
+      }
     }
 
     const opMap = entry.opMessagesByChat.get(chatMid);
     if (opMap) {
       for (const [id, m] of opMap.entries()) {
-        if (!rawById.has(id)) rawById.set(id, m);
+        if (!entry.unsentMsgIds.has(id)) {
+          rawById.set(id, m);
+        }
       }
     }
   }
@@ -1552,7 +1862,8 @@ async function downloadMediaBuffer(entry, { chatMid, messageId, contentMetadata 
       });
       const found = (recent || []).find((m) => String(m?.id) === String(messageId));
       if (found?.chunks?.length) {
-        const file = await entry.base.obs.downloadMediaByE2EE(found);
+        const normalizedFound = { ...found, chunks: normalizeMessageChunks(found.chunks) };
+        const file = await entry.base.obs.downloadMediaByE2EE(normalizedFound);
         if (file) {
           const out = Buffer.from(await file.arrayBuffer());
           return { buffer: out, contentType: detectMediaMime(out, file.type) };
@@ -1903,8 +2214,72 @@ const server = http.createServer(async (req, res) => {
     if (req.method === "POST" && path === "/auth/logout") {
       const body = await readJsonBody(req);
       const sid = toSafeString(body.sessionId || "").trim();
-      if (sid) sessions.delete(sid);
+      if (sid) stopSessionEntry(sid);
       return sendJson(res, 200, { ok: true });
+    }
+
+    // --- Real-Time SSE Talk Stream (/SYNC4 push) ---
+    if (req.method === "GET" && path === "/events") {
+      const sid = toSafeString(url.searchParams.get("sessionId") || "").trim();
+      const sinceSeq = Number(url.searchParams.get("since") || 0);
+      const entry = sid ? sessions.get(sid) : null;
+      if (!entry || !entry.base.authToken) {
+        return sendJson(res, 404, { ok: false, error: "Session not active on bridge" });
+      }
+      entry.updatedAt = Date.now();
+      ensureBackgroundSyncLoop(entry);
+
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      res.write(`event: ready\ndata: ${JSON.stringify({ ok: true, seq: entry.eventSeq })}\n\n`);
+
+      if (sinceSeq > 0) {
+        for (const ev of entry.recentEvents) {
+          if (ev.seq > sinceSeq) {
+            res.write(`event: talk_event\ndata: ${JSON.stringify(ev, (_k, v) => (typeof v === "bigint" ? v.toString() : v))}\n\n`);
+          }
+        }
+      }
+
+      entry.sseClients.add(res);
+      const hb = setInterval(() => {
+        try {
+          res.write(": keepalive\n\n");
+        } catch {
+          clearInterval(hb);
+          entry.sseClients.delete(res);
+        }
+      }, 15_000);
+      hb.unref?.();
+
+      req.on("close", () => {
+        clearInterval(hb);
+        entry.sseClients.delete(res);
+      });
+      return;
+    }
+
+    // --- Incremental Event Poll Fallback ---
+    if (req.method === "POST" && path === "/events/poll") {
+      const body = await readJsonBody(req);
+      const sinceSeq = Number(body.since || 0);
+      const entry = await getOrRestoreSession({
+        sessionId: body.sessionId,
+        sessionData: body.sessionData,
+      });
+      entry.updatedAt = Date.now();
+      ensureBackgroundSyncLoop(entry);
+      const events = entry.recentEvents.filter((ev) => ev.seq > sinceSeq);
+      return sendJson(res, 200, {
+        ok: true,
+        seq: entry.eventSeq,
+        events,
+        sessionData: exportSessionData(entry),
+      });
     }
 
     // --- Overview (Chats, Friends, Groups) ---
@@ -1972,6 +2347,9 @@ const server = http.createServer(async (req, res) => {
       const result = await withSessionLock(entry, async () => {
         let sent;
         let usedE2ee = false;
+        const myMid = entry.profile?.mid || entry.base.profile?.mid || "";
+        const hasSelfKeys = countSelfE2EEKeys(entry.storage.getAll(), myMid) > 0;
+
         if (to.startsWith("m")) {
           const sqRes = await entry.base.square.sendMessage({
             squareChatMid: to,
@@ -1980,56 +2358,98 @@ const server = http.createServer(async (req, res) => {
           });
           sent = sqRes?.createdSquareMessage?.message || {
             id: String(Date.now()),
-            from: entry.profile?.mid,
+            from: myMid,
             to,
             text,
             createdTime: Date.now(),
           };
-        } else if ((to.startsWith("u") || to.startsWith("c")) && to !== entry.profile?.mid) {
-          try {
-            sent = await entry.base.talk.sendMessage({
-              to,
-              text,
-              relatedMessageId: replyTo,
-              e2ee: true,
-            });
-            usedE2ee = true;
-          } catch (e2eeErr) {
-            const msg = e2eeErr?.message || String(e2eeErr);
-            if (/Not support E2EE|E2EE_NOT_SUPPORTED|NoE2EEKey/i.test(msg)) {
+        } else {
+          let lastSendErr = null;
+          // 1. Prefer Letter Sealing E2EE when self keys exist (1:1, Keep Memo, Group)
+          if (hasSelfKeys && (to.startsWith("u") || to.startsWith("c"))) {
+            try {
+              sent = await entry.base.talk.sendMessage({
+                to,
+                text,
+                relatedMessageId: replyTo,
+                e2ee: true,
+              });
+              usedE2ee = true;
+            } catch (e2eeErr) {
+              lastSendErr = e2eeErr;
+            }
+          }
+          // 2. Fallback to @evex-dev/linejs auto-negotiated sendMessage (plain + server E2EE retry)
+          if (!sent) {
+            try {
+              sent = await entry.base.talk.sendMessage({
+                to,
+                text,
+                relatedMessageId: replyTo,
+              });
+              usedE2ee = Boolean(sent?.chunks?.length || sent?.contentMetadata?.e2eeVersion);
+            } catch (plainErr) {
+              lastSendErr = plainErr;
+            }
+          }
+          // 3. Fallback to explicit plain sendMessage (Official Accounts / legacy rooms)
+          if (!sent) {
+            try {
               sent = await entry.base.talk.sendMessage({
                 to,
                 text,
                 relatedMessageId: replyTo,
                 e2ee: false,
               });
-            } else {
-              throw e2eeErr;
+              usedE2ee = false;
+            } catch (explicitPlainErr) {
+              lastSendErr = explicitPlainErr;
             }
           }
-        } else {
-          sent = await entry.base.talk.sendMessage({
-            to,
-            text,
-            relatedMessageId: replyTo,
-            e2ee: false,
-          });
+          // 4. Final fallback to @evex-dev/linejs Client.sendCompactMessage (/CA5 | /ECA5)
+          if (!sent && !replyTo) {
+            try {
+              sent = await entry.client.sendCompactMessage(to, text);
+              usedE2ee = Boolean(sent?.chunks?.length || sent?.contentMetadata?.e2eeVersion);
+            } catch (compactErr) {
+              lastSendErr = compactErr;
+            }
+          }
+          if (!sent && lastSendErr) {
+            throw lastSendErr;
+          }
         }
+
         if (sent) {
-          const msgObj = { ...sent, text, from: entry.profile?.mid, to };
+          const msgObj = {
+            ...sent,
+            id: toSafeString(sent.id || Date.now()),
+            text,
+            from: myMid,
+            to,
+            createdTime: sent.createdTime || Date.now(),
+          };
           recordOpMessage(entry, msgObj);
           const serialized = await decryptAndSerializeMessage(entry, msgObj);
+          let cleanMsg = null;
           if (serialized) {
             serialized.text = text;
             serialized.isMe = true;
             serialized.wasEncrypted = usedE2ee;
+            serialized.decryptedOk = true;
             if (!serialized.createdTime) serialized.createdTime = Date.now();
-            delete serialized.rawForMedia;
+            const { rawForMedia: _omit, ...rest } = serialized;
+            cleanMsg = rest;
+            emitSessionRealtimeEvent(entry, {
+              type: "message",
+              chatMid: to,
+              message: cleanMsg,
+            });
           }
           return {
             ok: true,
             encrypted: usedE2ee,
-            message: serialized,
+            message: cleanMsg,
             sessionData: exportSessionData(entry),
           };
         }
@@ -2050,30 +2470,48 @@ const server = http.createServer(async (req, res) => {
         sessionData: body.sessionData,
       });
       const result = await withSessionLock(entry, async () => {
-        const sent = await entry.base.talk.sendMessage({
-          to,
-          contentType: "STICKER",
-          contentMetadata: {
-            STKID: stkId,
-            STKPKGID: pkgId,
-            STKVER: ver,
-          },
-        });
-        if (sent) recordOpMessage(entry, sent);
-        const serialized = await decryptAndSerializeMessage(entry, sent || {
+        let sent;
+        if (to.startsWith("m")) {
+          const sqRes = await entry.base.square.sendMessage({
+            squareChatMid: to,
+            contentType: "STICKER",
+            contentMetadata: { STKID: stkId, STKPKGID: pkgId, STKVER: ver },
+          });
+          sent = sqRes?.createdSquareMessage?.message;
+        } else {
+          sent = await entry.base.talk.sendMessage({
+            to,
+            contentType: "STICKER",
+            contentMetadata: {
+              STKID: stkId,
+              STKPKGID: pkgId,
+              STKVER: ver,
+            },
+          });
+        }
+        const fallbackRaw = sent || {
           id: String(Date.now()),
           from: entry.profile?.mid,
           to,
           contentType: "STICKER",
           contentMetadata: { STKID: stkId, STKPKGID: pkgId, STKVER: ver },
           createdTime: Date.now(),
-        });
+        };
+        recordOpMessage(entry, fallbackRaw);
+        const serialized = await decryptAndSerializeMessage(entry, fallbackRaw);
+        let cleanMsg = null;
         if (serialized) {
           serialized.isMe = true;
           if (!serialized.createdTime) serialized.createdTime = Date.now();
-          delete serialized.rawForMedia;
+          const { rawForMedia: _omit, ...rest } = serialized;
+          cleanMsg = rest;
+          emitSessionRealtimeEvent(entry, {
+            type: "message",
+            chatMid: to,
+            message: cleanMsg,
+          });
         }
-        return { ok: true, message: serialized, sessionData: exportSessionData(entry) };
+        return { ok: true, message: cleanMsg, sessionData: exportSessionData(entry) };
       });
       return sendJson(res, 200, result);
     }
@@ -2105,7 +2543,9 @@ const server = http.createServer(async (req, res) => {
       });
       const result = await withSessionLock(entry, async () => {
         let sent;
-        if (to.startsWith("u") || to.startsWith("c")) {
+        const myMid = entry.profile?.mid || entry.base.profile?.mid || "";
+        const hasSelfKeys = countSelfE2EEKeys(entry.storage.getAll(), myMid) > 0;
+        if (hasSelfKeys && (to.startsWith("u") || to.startsWith("c"))) {
           try {
             sent = await entry.base.obs.uploadMediaByE2EE({
               data: blob,
@@ -2119,6 +2559,7 @@ const server = http.createServer(async (req, res) => {
         } else {
           await entry.base.obs.uploadObjTalk(to, oType, blob, undefined, filename);
         }
+        entry.boxesCache.ts = 0;
         if (sent) recordOpMessage(entry, sent);
         return { ok: true, sessionData: exportSessionData(entry) };
       });
@@ -2174,8 +2615,15 @@ const server = http.createServer(async (req, res) => {
 
         if (action === "unsend") {
           const msgId = toSafeString(body.messageId).trim();
+          const chatMidHint = toSafeString(body.chatMid || "").trim();
           await entry.base.talk.unsendMessage({
             seq: await entry.base.getReqseq(),
+            messageId: msgId,
+          });
+          const chatMid = removeUnsentMessageFromState(entry, chatMidHint, msgId);
+          emitSessionRealtimeEvent(entry, {
+            type: "message_unsend",
+            chatMid,
             messageId: msgId,
           });
           return { ok: true };

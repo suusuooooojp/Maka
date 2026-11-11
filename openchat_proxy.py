@@ -7662,15 +7662,8 @@ _CLIENT_JS = r"""
     });
   }
 
-  // Start initialization
+  // Start initialization (defer background sync/WS on heavy media/game boots when chat is closed)
   loadLocalCache();
-  syncWithServer().finally(() => {
-    initialLoadDone = true;
-    ensureInitialNameClaimed();
-    flushUnsent();
-  });
-  setTimeout(() => { initialLoadDone = true; flushUnsent(); }, 1500);
-  connectWs();
 
   const savedOpen = (() => {
     try {
@@ -7679,11 +7672,36 @@ _CLIENT_JS = r"""
       return false;
     }
   })();
+
+  const isHeavyBootPage = /^\/(tver|cloudmoon)(\/|$)/i.test(window.location.pathname || '');
+  let networkStarted = false;
+  function startOpenChatNetwork() {
+    if (networkStarted) return;
+    networkStarted = true;
+    syncWithServer().finally(() => {
+      initialLoadDone = true;
+      ensureInitialNameClaimed();
+      flushUnsent();
+    });
+    setTimeout(() => { initialLoadDone = true; flushUnsent(); }, 1500);
+    connectWs();
+  }
+
+  if (toggleBtn) {
+    toggleBtn.addEventListener('click', startOpenChatNetwork, { capture: true });
+  }
+
   if (savedOpen) {
+    startOpenChatNetwork();
     toggleChat(true);
+  } else if (isHeavyBootPage) {
+    setTimeout(startOpenChatNetwork, 2800);
+  } else {
+    startOpenChatNetwork();
   }
 
   setInterval(() => {
+    if (!networkStarted) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       pollHistory();
       connectWs();
@@ -7691,6 +7709,7 @@ _CLIENT_JS = r"""
   }, 2500);
 
   setInterval(() => {
+    if (!networkStarted) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
       pollHistory();
     }

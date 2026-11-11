@@ -168,9 +168,9 @@ def _spawn_bridge_sync() -> str:
     if not os.path.exists(_BRIDGE_SCRIPT):
         raise RuntimeError(f"Bridge script missing: {_BRIDGE_SCRIPT}")
 
-    linejs_vendor = os.path.join(_APP_DIR, "linejs_vendor.mjs")
+    vendor_bundle = os.path.join(_APP_DIR, "linejs_vendor.mjs")
     linejs_pkg = os.path.join(_APP_DIR, "node_modules", "@evex-dev", "linejs", "package.json")
-    if not os.path.exists(linejs_vendor) and not os.path.exists(linejs_pkg):
+    if not os.path.exists(vendor_bundle) and not os.path.exists(linejs_pkg):
         npm_bin = shutil.which("npm") or "/usr/bin/npm"
         if os.path.exists(npm_bin):
             subprocess.run(
@@ -250,6 +250,17 @@ async def _ensure_bridge_url() -> str:
             return _BRIDGE_BASE_URL
         _terminate_bridge_proc()
         return await asyncio.to_thread(_spawn_bridge_sync)
+
+
+@router.on_event("startup")
+async def _prewarm_linejs_bridge() -> None:
+    async def _bg() -> None:
+        try:
+            await _ensure_bridge_url()
+        except Exception:
+            pass
+
+    asyncio.create_task(_bg())
 
 
 async def _get_bridge_client() -> httpx.AsyncClient:
@@ -536,6 +547,70 @@ async def line_auth_logout(request: Request) -> JSONResponse:
         with _STATE_LOCK:
             _PERSISTED_SESSIONS.pop(sid, None)
     data, code = await _bridge_json("POST", "/auth/logout", {"sessionId": sid})
+    return JSONResponse(data, status_code=code)
+
+
+@router.get("/line/api/events")
+async def line_realtime_events(
+    request: Request,
+    sessionId: str = Query(""),
+    since: int = Query(0),
+) -> StreamingResponse:
+    """Proxy real-time /SYNC4 talk events over Server-Sent Events."""
+    sid = (sessionId or "").strip()
+
+    async def _stream():
+        if not sid:
+            yield 'event: error_msg\ndata: {"ok":false,"error":"missing sessionId"}\n\n'
+            return
+        # Ensure session is restored on the bridge if bridge restarted
+        sdata = _resolve_session_data(sid, None)
+        if sdata:
+            await _bridge_json("POST", "/auth/restore", {"sessionId": sid, "sessionData": sdata})
+
+        base_url = await _ensure_bridge_url()
+        stream_timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(trust_env=False, timeout=stream_timeout) as sclient:
+            try:
+                async with sclient.stream(
+                    "GET",
+                    f"{base_url}/events",
+                    params={"sessionId": sid, "since": str(max(0, since))},
+                ) as resp:
+                    if resp.status_code != 200:
+                        yield f'event: error_msg\ndata: {{"ok":false,"status":{resp.status_code}}}\n\n'
+                        return
+                    async for chunk in resp.aiter_text():
+                        if await request.is_disconnected():
+                            break
+                        if chunk:
+                            yield chunk
+            except Exception:
+                return
+
+    return StreamingResponse(
+        _stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/line/api/events/poll")
+async def line_realtime_events_poll(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sid = str(body.get("sessionId") or "").strip() or None
+    payload = dict(body)
+    sdata = _resolve_session_data(sid, body.get("sessionData"))
+    if sdata:
+        payload["sessionData"] = sdata
+    data, code = await _bridge_json("POST", "/events/poll", payload)
     return JSONResponse(data, status_code=code)
 
 
@@ -1607,6 +1682,153 @@ async function restoreFromInput() {
   }
 }
 
+let talkEventSource = null;
+let talkEventLastSeq = 0;
+let talkReconnectTimer = null;
+
+function stopTalkRealtimeStream() {
+  if (talkReconnectTimer) {
+    clearTimeout(talkReconnectTimer);
+    talkReconnectTimer = null;
+  }
+  if (talkEventSource) {
+    try { talkEventSource.close(); } catch (e) {}
+    talkEventSource = null;
+  }
+}
+
+function updateUnreadTotalBadge() {
+  const totalUnread = chatsData.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
+  const unreadEl = document.getElementById("totalUnreadBadge");
+  if (totalUnread > 0) {
+    unreadEl.style.display = "inline-block";
+    unreadEl.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
+  } else {
+    unreadEl.style.display = "none";
+  }
+}
+
+function upsertSidebarFromMessage(chatMid, msg, isIncomingUnread) {
+  if (!chatMid || !msg) return;
+  let chatEntry = chatsData.find(c => c.chatMid === chatMid);
+  const ts = Number(msg.createdTime || msg.deliveredTime || Date.now());
+  if (!chatEntry) {
+    const isGroup = chatMid.startsWith("c") || chatMid.startsWith("r");
+    const gInfo = groupsData.find(g => g.chatMid === chatMid);
+    const fInfo = contactsData.find(f => f.mid === chatMid);
+    const title = chatMid === (myProfile && myProfile.mid)
+      ? "Keepメモ (自分)"
+      : (isGroup ? (gInfo && gInfo.chatName) : (fInfo && fInfo.displayName)) || msg.senderName || chatMid.slice(0, 10);
+    const picturePath = (isGroup ? (gInfo && gInfo.picturePath) : (fInfo && fInfo.picturePath)) || msg.senderPicture || "";
+    chatEntry = {
+      chatMid,
+      title,
+      picturePath,
+      isGroup,
+      memberCount: (gInfo && gInfo.memberCount) || 0,
+      unreadCount: 0,
+      lastMessage: null,
+      lastTime: ts
+    };
+    chatsData.unshift(chatEntry);
+  }
+  chatEntry.lastMessage = {
+    id: msg.id,
+    text: msg.text,
+    createdTime: ts,
+    from: msg.from
+  };
+  chatEntry.lastTime = Math.max(Number(chatEntry.lastTime || 0), ts);
+  if (chatMid === currentChatMid) {
+    chatEntry.unreadCount = 0;
+  } else if (isIncomingUnread) {
+    chatEntry.unreadCount = (chatEntry.unreadCount || 0) + 1;
+  }
+  chatsData.sort((a, b) => (b.lastTime || 0) - (a.lastTime || 0));
+  updateUnreadTotalBadge();
+  renderCurrentList();
+}
+
+function handleTalkRealtimeEvent(ev) {
+  if (!ev || typeof ev !== "object") return;
+  if (ev.seq && Number(ev.seq) > talkEventLastSeq) {
+    talkEventLastSeq = Number(ev.seq);
+  }
+  const type = ev.type;
+  const chatMid = ev.chatMid || "";
+
+  if ((type === "message" || type === "message_edit") && ev.message && chatMid) {
+    const msg = ev.message;
+    const st = ensureChatHistoryState(chatMid);
+    const alreadyHad = st.byId.has(String(msg.id));
+    mergeMessagesIntoState(st, [msg]);
+    st.lastRenderKey = "";
+    const isUnread = type === "message" && !alreadyHad && !msg.isMe && chatMid !== currentChatMid;
+    upsertSidebarFromMessage(chatMid, msg, isUnread);
+    if (chatMid === currentChatMid) {
+      renderChatMessages(chatMid, false, false);
+      if (!msg.isMe && msg.id && !chatMid.startsWith("m")) {
+        fetch("/line/api/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, sessionData, action: "mark_read", chatMid, messageId: String(msg.id) })
+        }).catch(() => {});
+      }
+    }
+  } else if (type === "message_unsend" && ev.messageId) {
+    const targetChats = chatMid ? [chatMid] : Object.keys(chatHistoryMap);
+    for (const cm of targetChats) {
+      const st = chatHistoryMap[cm];
+      if (st && st.byId.has(String(ev.messageId))) {
+        st.byId.delete(String(ev.messageId));
+        mergeMessagesIntoState(st, []);
+        st.lastRenderKey = "";
+        if (cm === currentChatMid) {
+          renderChatMessages(cm, false, false);
+        }
+      }
+    }
+  } else if (type === "reaction" && chatMid === currentChatMid) {
+    loadMessages(currentChatMid, false);
+  }
+}
+
+function startTalkRealtimeStream() {
+  stopTalkRealtimeStream();
+  if (!sessionId || typeof window.EventSource !== "function") return;
+  try {
+    const qs = new URLSearchParams({
+      sessionId,
+      since: String(talkEventLastSeq || 0)
+    });
+    const es = new EventSource(`/line/api/events?${qs.toString()}`);
+    talkEventSource = es;
+
+    es.addEventListener("ready", (e) => {
+      try {
+        const d = JSON.parse(e.data || "{}");
+        if (d.seq && !talkEventLastSeq) talkEventLastSeq = Number(d.seq);
+      } catch (err) {}
+    });
+
+    es.addEventListener("talk_event", (e) => {
+      try {
+        const payload = JSON.parse(e.data || "{}");
+        handleTalkRealtimeEvent(payload);
+      } catch (err) {}
+    });
+
+    es.onerror = () => {
+      stopTalkRealtimeStream();
+      if (sessionId) {
+        talkReconnectTimer = setTimeout(() => {
+          if (sessionId) startTalkRealtimeStream();
+        }, 3500);
+      }
+    };
+  } catch (e) {}
+}
+
 function onLoginSuccess() {
   stopQrFlow();
   if (emailPollTimer) { clearInterval(emailPollTimer); emailPollTimer = null; }
@@ -1617,9 +1839,25 @@ function onLoginSuccess() {
   document.getElementById("btnLogout").style.display = "inline-flex";
   initStickerDrawer();
   refreshOverview();
+  startTalkRealtimeStream();
   if (chatPollTimer) clearInterval(chatPollTimer);
-  chatPollTimer = setInterval(() => {
-    if (currentChatMid) loadMessages(currentChatMid, false);
+  chatPollTimer = setInterval(async () => {
+    // Fallback poll if EventSource is unavailable or temporarily reconnecting
+    if (!talkEventSource || talkEventSource.readyState !== 1) {
+      try {
+        const pr = await fetch("/line/api/events/poll", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, sessionData, since: talkEventLastSeq || 0 })
+        });
+        const pd = await pr.json();
+        if (pd && pd.ok && Array.isArray(pd.events)) {
+          for (const ev of pd.events) handleTalkRealtimeEvent(ev);
+          if (pd.seq) talkEventLastSeq = Math.max(talkEventLastSeq, Number(pd.seq));
+        }
+      } catch (e) {}
+      if (currentChatMid) loadMessages(currentChatMid, false);
+    }
   }, 6000);
 }
 
@@ -1655,15 +1893,7 @@ async function refreshOverview() {
       badge.textContent = "linejs v3.6.4";
     }
 
-    const totalUnread = chatsData.reduce((acc, c) => acc + (c.unreadCount || 0), 0);
-    const unreadEl = document.getElementById("totalUnreadBadge");
-    if (totalUnread > 0) {
-      unreadEl.style.display = "inline-block";
-      unreadEl.textContent = totalUnread > 99 ? "99+" : String(totalUnread);
-    } else {
-      unreadEl.style.display = "none";
-    }
-
+    updateUnreadTotalBadge();
     renderCurrentList();
   } catch (e) {
   } finally {
@@ -1786,6 +2016,12 @@ async function openChatRoom(chatMid, title, picturePath, isGroup) {
   document.getElementById("activeChatSub").textContent = e2eeInfo.ready
     ? (isGroup ? "🔒 グループ E2EE 対応" : "🔒 Letter Sealing (E2EE) 対応")
     : "標準トーク";
+
+  const existingChat = chatsData.find(c => c.chatMid === chatMid);
+  if (existingChat && existingChat.unreadCount > 0) {
+    existingChat.unreadCount = 0;
+    updateUnreadTotalBadge();
+  }
 
   renderCurrentList();
   const state = ensureChatHistoryState(chatMid);
@@ -1920,7 +2156,7 @@ function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
     return;
   }
 
-  if (state.hasMore && state.oldestMessageId && state.oldestDeliveredTime > 0) {
+  if (state.hasMore && state.oldestMessageId) {
     const moreWrap = document.createElement("div");
     moreWrap.style.cssText = "display:flex;justify-content:center;padding:6px 0 10px;";
     const moreBtn = document.createElement("button");
@@ -2041,12 +2277,8 @@ async function loadMessages(chatMid, markRead, forceScroll) {
     }
     if (state.messages.length > 0) {
       const latest = state.messages[state.messages.length - 1];
-      const chatEntry = chatsData.find(c => c.chatMid === chatMid);
-      if (chatEntry && latest) {
-        chatEntry.lastMessage = latest;
-        chatEntry.lastTime = latest.createdTime || latest.deliveredTime || chatEntry.lastTime;
-        if (markRead) chatEntry.unreadCount = 0;
-        renderCurrentList();
+      if (latest) {
+        upsertSidebarFromMessage(chatMid, latest, false);
       }
     }
     renderChatMessages(chatMid, Boolean(markRead || forceScroll), false);
@@ -2062,7 +2294,7 @@ async function loadMessages(chatMid, markRead, forceScroll) {
 async function loadOlderMessages(chatMid) {
   if (!chatMid) return;
   const state = ensureChatHistoryState(chatMid);
-  if (state.loadingOlder || !state.oldestMessageId || !state.oldestDeliveredTime) return;
+  if (state.loadingOlder || !state.oldestMessageId) return;
   state.loadingOlder = true;
   state.lastRenderKey = "";
   renderChatMessages(chatMid, false, false);
@@ -2078,7 +2310,7 @@ async function loadOlderMessages(chatMid) {
         count: 60,
         markRead: false,
         beforeMessageId: state.oldestMessageId,
-        beforeDeliveredTime: state.oldestDeliveredTime
+        beforeDeliveredTime: state.oldestDeliveredTime || 0
       })
     });
     const data = await resp.json();
@@ -2095,7 +2327,7 @@ async function loadOlderMessages(chatMid) {
     mergeMessagesIntoState(state, older);
     state.hasMore = Boolean(data.hasMore);
     if (data.oldestMessageId) state.oldestMessageId = data.oldestMessageId;
-    if (data.oldestDeliveredTime) state.oldestDeliveredTime = Number(data.oldestDeliveredTime);
+    if (data.oldestDeliveredTime !== undefined) state.oldestDeliveredTime = Number(data.oldestDeliveredTime || 0);
     state.lastRenderKey = "";
     if (chatMid === currentChatMid) {
       renderChatMessages(chatMid, false, true);
@@ -2128,6 +2360,7 @@ function handleComposerKey(e) {
 
 async function sendCurrentMessage() {
   if (!currentChatMid) return;
+  const targetChat = currentChatMid;
   const input = document.getElementById("msgInput");
   const text = input.value.trim();
   if (!text) return;
@@ -2145,7 +2378,7 @@ async function sendCurrentMessage() {
       body: JSON.stringify({
         sessionId,
         sessionData,
-        chatMid: currentChatMid,
+        chatMid: targetChat,
         text,
         replyToId: replyId
       })
@@ -2158,8 +2391,17 @@ async function sendCurrentMessage() {
       return;
     }
     if (data.sessionData) saveVault(sessionId, data.sessionData);
-    await loadMessages(currentChatMid, true);
-    refreshOverview();
+    if (data.message) {
+      const st = ensureChatHistoryState(targetChat);
+      mergeMessagesIntoState(st, [data.message]);
+      st.lastRenderKey = "";
+      upsertSidebarFromMessage(targetChat, data.message, false);
+      if (targetChat === currentChatMid) {
+        renderChatMessages(targetChat, true, false);
+      }
+    } else {
+      await loadMessages(targetChat, true, true);
+    }
   } catch (e) {
     btn.disabled = false;
     input.value = text;
@@ -2186,6 +2428,7 @@ function toggleStickerDrawer() {
 
 async function sendSticker(packageId, stickerId) {
   if (!currentChatMid) return;
+  const targetChat = currentChatMid;
   document.getElementById("stickerDrawer").style.display = "none";
   try {
     const resp = await fetch("/line/api/send_sticker", {
@@ -2194,14 +2437,24 @@ async function sendSticker(packageId, stickerId) {
       body: JSON.stringify({
         sessionId,
         sessionData,
-        chatMid: currentChatMid,
+        chatMid: targetChat,
         packageId,
         stickerId
       })
     });
     const data = await resp.json();
     if (data && data.sessionData) saveVault(sessionId, data.sessionData);
-    await loadMessages(currentChatMid, true);
+    if (data && data.ok && data.message) {
+      const st = ensureChatHistoryState(targetChat);
+      mergeMessagesIntoState(st, [data.message]);
+      st.lastRenderKey = "";
+      upsertSidebarFromMessage(targetChat, data.message, false);
+      if (targetChat === currentChatMid) {
+        renderChatMessages(targetChat, true, false);
+      }
+    } else {
+      await loadMessages(targetChat, true, true);
+    }
   } catch (e) {}
 }
 
@@ -2278,7 +2531,7 @@ async function unsendMsg(messageId) {
   const resp = await fetch("/line/api/action", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, sessionData, action: "unsend", messageId })
+    body: JSON.stringify({ sessionId, sessionData, action: "unsend", chatMid: currentChatMid, messageId })
   });
   const data = await resp.json();
   if (!data.ok) {
@@ -2288,8 +2541,8 @@ async function unsendMsg(messageId) {
     st.byId.delete(String(messageId));
     mergeMessagesIntoState(st, []);
     st.lastRenderKey = "";
+    renderChatMessages(currentChatMid, false, false);
   }
-  await loadMessages(currentChatMid, false);
 }
 
 async function acceptGroupInvite(chatMid) {
@@ -2454,6 +2707,7 @@ function closeModal() {
 }
 
 function showLoginScreen() {
+  stopTalkRealtimeStream();
   if (chatPollTimer) {
     clearInterval(chatPollTimer);
     chatPollTimer = null;
@@ -2468,6 +2722,7 @@ function showLoginScreen() {
 
 async function logoutLine() {
   if (!confirm("LINEからログアウトしますか？")) return;
+  stopTalkRealtimeStream();
   try {
     await fetch("/line/api/auth/logout", {
       method: "POST",
@@ -2484,6 +2739,7 @@ async function logoutLine() {
   sessionId = null;
   sessionData = null;
   currentChatMid = null;
+  talkEventLastSeq = 0;
   showLoginScreen();
 }
 

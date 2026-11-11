@@ -715,7 +715,7 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
           } catch (_) {}
         }
 
-        // 2. Request a fresh SID for the same running Android instance via /phone/connect
+        // 2. Request a fresh SID for the same running Android instance via /phone/connect (poll across queue / reward states)
         if (androidId) {
           const rawParams = lastConn.params;
           const paramsStr = (typeof rawParams === 'string' && rawParams.startsWith('{'))
@@ -729,35 +729,47 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
             params: paramsStr,
             ad_unblock: true
           };
-          try {
-            const connResp = await origFetch(buildCmApiUrl('/cloudmoon/api/phone/connect'), {
-              method: 'POST',
-              headers: apiHeaders,
-              body: JSON.stringify(connectPayload)
-            });
-            const connJson = await connResp.json();
-            if (connJson && connJson.code === 0 && connJson.data) {
-              let newSid = connJson.data.sid || '';
-              if (!newSid && connJson.data.enter_url) {
+          for (let attempt = 0; attempt < 8; attempt++) {
+            try {
+              const connResp = await origFetch(buildCmApiUrl('/cloudmoon/api/phone/connect'), {
+                method: 'POST',
+                headers: apiHeaders,
+                body: JSON.stringify(connectPayload)
+              });
+              const connJson = await connResp.json();
+              if (connJson && connJson.code === 0 && connJson.data) {
+                let newSid = connJson.data.sid || '';
+                if (!newSid && connJson.data.enter_url) {
+                  try {
+                    const enterUrl = new URL(connJson.data.enter_url, window.location.origin);
+                    newSid = enterUrl.searchParams.get('sid') || '';
+                  } catch (_) {}
+                }
+                if (newSid) {
+                  const quality = localStorage.getItem('quality') || new URLSearchParams(window.location.search).get('quality') || 'HD';
+                  window.__cm_intentional_exit = true;
+                  window.location.replace('/run-site/?sid=' + encodeURIComponent(newSid) + '&quality=' + encodeURIComponent(quality));
+                  return;
+                }
+              } else if (connJson && (connJson.code === 30002 || connJson.code === 30003 || connJson.code === 30004 || connJson.code === 10005)) {
                 try {
-                  const enterUrl = new URL(connJson.data.enter_url, window.location.origin);
-                  newSid = enterUrl.searchParams.get('sid') || '';
+                  await origFetch(buildCmApiUrl('/cloudmoon/api/web/ad'), {
+                    method: 'POST',
+                    headers: apiHeaders,
+                    body: JSON.stringify({ game_name: gamePkg, game: gamePkg })
+                  });
                 } catch (_) {}
               }
-              if (newSid) {
-                const quality = localStorage.getItem('quality') || new URLSearchParams(window.location.search).get('quality') || 'HD';
-                window.__cm_intentional_exit = true;
-                window.location.replace('/run-site/?sid=' + encodeURIComponent(newSid) + '&quality=' + encodeURIComponent(quality));
-                return;
-              }
-            }
-          } catch (_) {}
+            } catch (_) {}
+            await new Promise(function(r) { setTimeout(r, 2200); });
+          }
         }
       }
     } catch (_) {}
 
-    // Safe fallback: NEVER reload a consumed single-use /run-site/?sid=... URL (which causes Init error freeze)!
-    // Instead clear the badge and attempt an in-place ICE restart if PC is still alive, or return cleanly to /cloudmoon/ only if session is completely dead.
+    // Safe fallback: NEVER reload a consumed single-use /run-site/?sid=... URL, and NEVER leave a kicked-out dead pod frozen on screen.
+    const reasonStr = String(reason || '');
+    const isKickout = reasonStr.includes('kickout') || reasonStr.includes('no_time') || reasonStr.includes('time_run_out') || reasonStr.includes('time_up') || reasonStr.includes('connection_too_long');
     setTimeout(function() {
       window.__cm_reconnecting = false;
       try {
@@ -766,16 +778,16 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       } catch (_) {}
       try {
         const pc = window.__cm_pc;
-        if (pc && pc.connectionState !== 'closed' && pc.connectionState !== 'failed') {
+        if (!isKickout && pc && pc.connectionState !== 'closed' && pc.connectionState !== 'failed') {
           if (typeof pc.restartIce === 'function') pc.restartIce();
           return;
         }
-        if (reason === 'pc_connection_failed' || reason === 'datachannel_closed' || reason === 'cleanup_redirect' || reason === 'redirect') {
+        if (isKickout || reason === 'pc_connection_failed' || reason === 'datachannel_closed' || reason === 'cleanup_redirect' || reason === 'redirect') {
           window.__cm_intentional_exit = true;
           window.location.replace('/cloudmoon/');
         }
       } catch (_) {}
-    }, 1200);
+    }, 1000);
   };
 
   try {
@@ -937,18 +949,20 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
     };
   } catch (e) {}
 
-  // 5. Gentle DataChannel keepalive, non-destructive RTP H.264 stream healer & 20s background reward refill
+  // 5. Real DataChannel keepalive, non-destructive media resume & background reward refill
   try {
-    // 5a. Gentle DataChannel `adBlock>false` heartbeat every 25s (only when buffer is clear)
+    // 5a. Real DataChannel `adBlock>false` heartbeat every 25s over RTCDataChannel + local activity event
     setInterval(function() {
       try {
-        if (window.__cm_dc && window.__cm_dc.readyState === 'open' && (window.__cm_dc.bufferedAmount || 0) === 0) {
+        const dc = window.__cm_dc;
+        if (dc && dc.readyState === 'open' && (dc.bufferedAmount || 0) < 16384) {
+          dc.send('adBlock>false');
           window.dispatchEvent(new CustomEvent('webrtc-dc-send', { detail: 'adBlock>false' }));
         }
       } catch (_) {}
     }, 25000);
 
-    // 5c. Periodic Background Free Playtime Refill (every 20 seconds with proper `game_name` field)
+    // 5c. Periodic Background Free Playtime Refill (server serializes per-token reward claims)
     const claimPlaytimeRefill = function() {
       try {
         const s = getStoredSession();
@@ -967,62 +981,22 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
         }
       } catch (_) {}
     };
-    setInterval(claimPlaytimeRefill, 20000);
-    setTimeout(claimPlaytimeRefill, 3000);
-    setTimeout(claimPlaytimeRefill, 10000);
+    setInterval(claimPlaytimeRefill, 45000);
+    setTimeout(claimPlaytimeRefill, 5000);
 
-    // 5c-2. Non-destructive RTP-aware H.264 Video & Audio Stream Healer on /run-site
-    // Uses inbound-rtp stats (framesReceived vs framesDecoded) so static game menus NEVER trigger false reloads,
-    // and heals wedged H.264 decoders in-place by rebinding srcObject (triggering an instant PLI keyframe) without dropping gameplay!
+    // 5c-2. Non-destructive media resume monitor on /run-site:
+    // NEVER detach `v.srcObject = null` (which destroys Chromium's H.264 decoder state while waiting for an IDR keyframe and freezes gameplay!).
     if ((window.location.pathname || '').startsWith('/run-site')) {
-      let prevFramesRecv = -1;
-      let prevFramesDec = -1;
-      let decodeWedgedCount = 0;
-      let lastHealAt = 0;
-      setInterval(async function() {
+      setInterval(function() {
         try {
+          if (document.hidden) return;
           const v = document.getElementById('remote-video');
           const a = document.getElementById('remote-audio');
-          if (v && v.srcObject && v.paused && !document.hidden) {
+          if (v && v.srcObject && v.paused) {
             v.play().catch(function() {});
           }
-          if (a && a.srcObject && a.paused && !document.hidden) {
+          if (a && a.srcObject && a.paused) {
             a.play().catch(function() {});
-          }
-          const pc = window.__cm_pc;
-          if (!pc || typeof pc.getStats !== 'function' || pc.connectionState !== 'connected' || document.hidden) {
-            decodeWedgedCount = 0;
-            return;
-          }
-          const stats = await pc.getStats();
-          let recv = -1;
-          let dec = -1;
-          stats.forEach(function(r) {
-            if (r.type === 'inbound-rtp' && (r.kind === 'video' || r.mediaType === 'video')) {
-              if (typeof r.framesReceived === 'number') recv = r.framesReceived;
-              if (typeof r.framesDecoded === 'number') dec = r.framesDecoded;
-            }
-          });
-          if (recv >= 0 && dec >= 0) {
-            if (prevFramesRecv >= 0 && prevFramesDec >= 0) {
-              const dRecv = recv - prevFramesRecv;
-              const dDec = dec - prevFramesDec;
-              if (dRecv >= 15 && dDec <= 0) {
-                decodeWedgedCount++;
-                if (decodeWedgedCount >= 2 && Date.now() - lastHealAt > 10000 && v && v.srcObject) {
-                  decodeWedgedCount = 0;
-                  lastHealAt = Date.now();
-                  const stream = v.srcObject;
-                  v.srcObject = null;
-                  v.srcObject = stream;
-                  v.play().catch(function() {});
-                }
-              } else {
-                decodeWedgedCount = 0;
-              }
-            }
-            prevFramesRecv = recv;
-            prevFramesDec = dec;
           }
         } catch (_) {}
       }, 3000);
@@ -1564,13 +1538,13 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             js_text = js_text.replace(old_host, '(window.location.origin+"/cloudmoon/api")')
 
     # --- Universal AdBlock Bait, Free-Time Limit & HD Quality Unlock ---
-    # 1. Neutralize xe() in DU-wofq6.js so $userADBlock (ae) is ALWAYS false
+    # 1. Neutralize xe()/Ne() adsbygoogle bait detector regardless of minified function name so $userADBlock is ALWAYS false
     js_text = js_text.replace(
         "function xe(){return new Promise",
         "function xe(){return Promise.resolve(!1);return new Promise",
     )
     js_text = re.sub(
-        r'function ([A-Za-z_$][\w$]*)\(\)\{return new Promise\((?=[A-Za-z_$][\w$]*=>\{[^}]{0,220}pub_300x250)',
+        r"function ([A-Za-z_$][\w$]*)\(\)\{return new Promise\((?=[A-Za-z_$][\w$]*=>\{[^}]{0,340}pub_300x250)",
         r"function \1(){return Promise.resolve(!1);return new Promise(",
         js_text,
     )
@@ -1749,8 +1723,10 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'localStorage.setItem("enableHighLight","false")',
         )
 
-        # ICE candidate pre-gathering (iceCandidatePoolSize:4) and resilient adaptive jitter buffer (28..150ms)
-        # Prevents H.264 decoder starvation & mid-stream video freezes on Wi-Fi/LTE jitter while preserving native 3s stats cadence
+        # ICE candidate pre-gathering (iceCandidatePoolSize:4) and native WebRTC adaptive jitter buffer:
+        # Upstream _applyDelay() clamps RTCRtpReceiver.jitterBufferTarget to 15..28ms (< 1 frame at 30fps),
+        # which starves H.264 P-frame assembly right after game launch when large scene frames arrive in bursts.
+        # Leaving jitterBufferTarget unset lets Chromium/WebKit's native WebRTC adaptive jitter buffer run smoothly!
         js_text = js_text.replace(
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all"}',
             'let a={iceServers:t,bundlePolicy:"max-bundle",rtcpMuxPolicy:"require",iceTransportPolicy:"all",iceCandidatePoolSize:4}',
@@ -1759,9 +1735,16 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'let a={iceServers:t,bundlePolicy:`max-bundle`,rtcpMuxPolicy:`require`,iceTransportPolicy:`all`}',
             'let a={iceServers:t,bundlePolicy:`max-bundle`,rtcpMuxPolicy:`require`,iceTransportPolicy:`all`,iceCandidatePoolSize:4}',
         )
-        js_text = js_text.replace(
-            "minDelayMs:15,maxDelayMs:100,",
-            "minDelayMs:28,maxDelayMs:150,",
+        js_text = re.sub(
+            r"_applyDelay\(([A-Za-z_$][\w$]*)\)\{let ([A-Za-z_$][\w$]*)=this\.videoReceiver;",
+            r"_applyDelay(\1){return;let \2=this.videoReceiver;",
+            js_text,
+        )
+        # Bound syncAccelerateDC() so it sends initial orientation 4 times instead of flooding SCTP at 20 msgs/sec forever
+        js_text = re.sub(
+            r"syncAccelerateDC\(\)\{this\.syncAccelerateDCTimer&&clearInterval\(this\.syncAccelerateDCTimer\),this\.syncAccelerateDCTimer=setInterval\(\(\)=>\{([A-Za-z_$][\w$]*)\?\.send\(this\.syncAccelerate\),\1\?\.send\(this\.syncRotate\)\},100\)\}",
+            r"syncAccelerateDC(){this.syncAccelerateDCTimer&&clearInterval(this.syncAccelerateDCTimer);let _sc=0;this.syncAccelerateDCTimer=setInterval(()=>{\1?.send(this.syncAccelerate),\1?.send(this.syncRotate);if(++_sc>=4){clearInterval(this.syncAccelerateDCTimer);this.syncAccelerateDCTimer=null}},120)}",
+            js_text,
         )
         js_text = js_text.replace(
             "et.set(e.currentRoundTripTime*1e3)",
@@ -1897,11 +1880,11 @@ async def cloudmoon_ws_proxy(websocket: WebSocket, target_host: str, target_path
             ssl=ssl_ctx,
             origin=TARGET_ORIGIN,
             user_agent_header=websocket.headers.get("user-agent") or "Mozilla/5.0",
-            open_timeout=8,
+            open_timeout=12,
             ping_interval=20,
-            ping_timeout=20,
+            ping_timeout=45,
             compression=None,
-            max_queue=64,
+            max_queue=128,
         ) as upstream_ws:
             try:
                 import socket as _sock
@@ -2060,68 +2043,92 @@ async def _background_cm_session_refill_loop() -> None:
                 pass
 
 
+_CM_REWARD_LOCKS: Dict[str, asyncio.Lock] = {}
+_CM_LAST_REWARD_AT: Dict[str, float] = {}
+
+
 async def _auto_claim_upstream_reward(
     client: httpx.AsyncClient,
     req_headers: Dict[str, str],
     game_pkg: str = "com.roblox.client",
     rounds: int = 2,
+    force: bool = False,
 ) -> None:
-    """Automatically claims server-side free playtime rewards on api.prod.cloudmoonapp.com for the user's token."""
-    if not req_headers.get("x-user-token"):
+    """Automatically claims server-side free playtime rewards on api.prod.cloudmoonapp.com for the user's token.
+    Serialized per token so concurrent calls never overwrite an active rewardHash before its cooldown matures."""
+    token = req_headers.get("x-user-token") or ""
+    if not token:
         return
     pkg = game_pkg or "com.roblox.client"
     _register_active_cm_session(req_headers, pkg)
-    headers = dict(req_headers)
-    headers["Content-Type"] = "application/json"
-    for _ in range(max(1, rounds)):
-        try:
-            # Upstream /web/ad expects `game_name` (Hn in 2.D2AbakOU.js sends `{"game_name": t.gameName}`)
-            ad_resp = await client.post(
-                f"{API_ORIGIN}/web/ad?device_type=web&site=cm",
-                headers=headers,
-                content=json.dumps({"game_name": pkg}).encode("utf-8"),
-                timeout=5.0,
-            )
-            if ad_resp.status_code == 200:
-                ad_json = ad_resp.json()
-                ad_data = ad_json.get("data") if isinstance(ad_json, dict) else None
-                if isinstance(ad_data, dict):
-                    reward_hash = ad_data.get("rewardHash") or ""
-                    ad_source = ad_data.get("adSource") if ad_data.get("adSource") is not None else ""
-                    if reward_hash:
-                        rw_resp = await client.post(
-                            f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
-                            headers=headers,
-                            content=json.dumps({"hash": reward_hash, "source": ad_source}).encode("utf-8"),
-                            timeout=5.0,
-                        )
-                        rw_ok = False
-                        if rw_resp.status_code == 200:
-                            try:
-                                rw_ok = rw_resp.json().get("code") == 0
-                            except Exception:
-                                pass
-                        if not rw_ok:
-                            # Some upstream reward hashes enforce a brief cooldown before claiming
-                            await asyncio.sleep(3.0)
-                            for alt_source in (ad_source or "playwire", "adsense_new", "admob"):
-                                rw_retry = await client.post(
-                                    f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
-                                    headers=headers,
-                                    content=json.dumps({"hash": reward_hash, "source": alt_source}).encode("utf-8"),
-                                    timeout=5.0,
-                                )
-                                if rw_retry.status_code == 200:
-                                    try:
-                                        if rw_retry.json().get("code") == 0:
-                                            break
-                                    except Exception:
-                                        pass
-                    else:
-                        break
-        except Exception as exc:
-            print(f"[CloudMoon AutoReward] Warning: {exc}", flush=True)
-            break
+
+    if len(_CM_REWARD_LOCKS) > 256:
+        for old_tok in list(_CM_REWARD_LOCKS.keys())[:128]:
+            if old_tok not in _ACTIVE_CM_SESSIONS:
+                _CM_REWARD_LOCKS.pop(old_tok, None)
+                _CM_LAST_REWARD_AT.pop(old_tok, None)
+
+    lock = _CM_REWARD_LOCKS.setdefault(token, asyncio.Lock())
+    if not force and lock.locked():
+        return
+
+    async with lock:
+        now = time.time()
+        if not force and (now - _CM_LAST_REWARD_AT.get(token, 0.0)) < 14.0:
+            return
+        _CM_LAST_REWARD_AT[token] = now
+
+        headers = dict(req_headers)
+        headers["Content-Type"] = "application/json"
+        for _ in range(max(1, rounds)):
+            try:
+                # Upstream /web/ad expects `game_name` (Hn in 2.D2AbakOU.js sends `{"game_name": t.gameName}`)
+                ad_resp = await client.post(
+                    f"{API_ORIGIN}/web/ad?device_type=web&site=cm",
+                    headers=headers,
+                    content=json.dumps({"game_name": pkg}).encode("utf-8"),
+                    timeout=5.0,
+                )
+                if ad_resp.status_code == 200:
+                    ad_json = ad_resp.json()
+                    ad_data = ad_json.get("data") if isinstance(ad_json, dict) else None
+                    if isinstance(ad_data, dict):
+                        reward_hash = ad_data.get("rewardHash") or ""
+                        ad_source = ad_data.get("adSource") if ad_data.get("adSource") is not None else ""
+                        if reward_hash:
+                            rw_resp = await client.post(
+                                f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
+                                headers=headers,
+                                content=json.dumps({"hash": reward_hash, "source": ad_source}).encode("utf-8"),
+                                timeout=5.0,
+                            )
+                            rw_ok = False
+                            if rw_resp.status_code == 200:
+                                try:
+                                    rw_ok = rw_resp.json().get("code") == 0
+                                except Exception:
+                                    pass
+                            if not rw_ok:
+                                # Upstream reward hashes enforce a ~3s cooldown before claiming
+                                await asyncio.sleep(3.2)
+                                for alt_source in (ad_source or "playwire", "adsense_new", "admob"):
+                                    rw_retry = await client.post(
+                                        f"{API_ORIGIN}/ad/gpt_reward?device_type=web&site=cm",
+                                        headers=headers,
+                                        content=json.dumps({"hash": reward_hash, "source": alt_source}).encode("utf-8"),
+                                        timeout=5.0,
+                                    )
+                                    if rw_retry.status_code == 200:
+                                        try:
+                                            if rw_retry.json().get("code") == 0:
+                                                break
+                                        except Exception:
+                                            pass
+                        else:
+                            break
+            except Exception as exc:
+                print(f"[CloudMoon AutoReward] Warning: {exc}", flush=True)
+                break
 
 
 @router.api_route(
@@ -2322,7 +2329,7 @@ async def cloudmoon_api_proxy(request: Request, path: str) -> Response:
             conn_resp = upstream.json()
             if isinstance(conn_resp, dict) and conn_resp.get("code") in (30002, 30003, 30004, 10005):
                 print(f"[CloudMoon Connect] Got code {conn_resp.get('code')}, auto-claiming reward & retrying...", flush=True)
-                await _auto_claim_upstream_reward(client, req_headers, connect_game_pkg, rounds=3)
+                await _auto_claim_upstream_reward(client, req_headers, connect_game_pkg, rounds=3, force=True)
                 retry_up = await client.request(
                     method=request.method,
                     url=target_url,
