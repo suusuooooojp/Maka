@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import ipaddress
 import json
 import os
@@ -39,10 +40,7 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-_HAS_PROXY_ENV = any(
-    os.getenv(k)
-    for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
-)
+_DNS_RESOLVE_MAP: dict[str, bytes] = {}
 
 
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
@@ -51,10 +49,13 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not _HAS_PROXY_ENV:
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+            resolve_opt = getattr(CurlOpt, "RESOLVE", None)
+            if resolve_opt is not None and _DNS_RESOLVE_MAP:
+                curl.setopt(resolve_opt, list(_DNS_RESOLVE_MAP.values()))
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
             curl.setopt(connect_timeout_ms, 3500)
@@ -125,7 +126,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261113-ig-v22"
+RUNTIME_REV = "20261112-ig-v21"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -356,6 +357,11 @@ def _patch_controller_sw(source: bytes) -> bytes:
         "e.postMessage({$controller$swrevive:{}})}},100)"
     )
     text = text.replace(old_timer, new_timer, 1)
+    old_cookie_wait = (
+        'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
+        'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
+    )
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
     return text.encode("utf-8")
 
 
@@ -467,8 +473,8 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'deleteProperty:(t,r)=>(t.removeItem(_pfx()+r),!0)},'
         "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
         "delete t.localStorage,delete t.sessionStorage,"
-        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!0,enumerable:!0}),'
-        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!0,enumerable:!0})}'
+        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!1,enumerable:!0}),'
+        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!1,enumerable:!0})}'
     )
     if old_storage_mod in text:
         text = text.replace(old_storage_mod, new_storage_mod, 1)
@@ -736,64 +742,70 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     return text.encode("utf-8")
 
 
-@router.get("/instagram/runtime/scramjet.js", include_in_schema=False)
-async def ig_scramjet_js():
+_PATCHED_RUNTIME_CACHE: dict[str, bytes] = {}
+_PATCHED_RUNTIME_GZIP_CACHE: dict[str, bytes] = {}
+
+
+async def _ensure_patched_runtime(asset_name: str, patcher) -> tuple[bytes, bytes] | None:
+    cached = _PATCHED_RUNTIME_CACHE.get(asset_name)
+    cached_gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
+    if cached is not None and cached_gz is not None:
+        return cached, cached_gz
     import app as host_app
 
-    resp = await host_app.scramjet_asset("scramjet.js")
+    resp = await host_app.scramjet_asset(asset_name)
     if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_scramjet_js(bytes(resp.body))
+        return None
+    patched = patcher(bytes(resp.body))
+    gz = gzip.compress(patched, compresslevel=6)
+    _PATCHED_RUNTIME_CACHE[asset_name] = patched
+    _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
+    return patched, gz
+
+
+async def _serve_patched_runtime(asset_name: str, patcher, request: Request) -> Response:
+    pair = await _ensure_patched_runtime(asset_name, patcher)
+    if pair is None:
+        import app as host_app
+
+        return await host_app.scramjet_asset(asset_name)
+    patched, gz = pair
+    ae = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" in ae:
+        return Response(
+            gz,
+            media_type="application/javascript",
+            headers={
+                "Cache-Control": "public, max-age=86400, immutable",
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding",
+            },
+        )
     return Response(
         patched,
         media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
+
+
+@router.get("/instagram/runtime/scramjet.js", include_in_schema=False)
+async def ig_scramjet_js(request: Request):
+    return await _serve_patched_runtime("scramjet.js", _patch_scramjet_js, request)
 
 
 @router.get("/instagram/runtime/controller.api.js", include_in_schema=False)
-async def ig_controller_api():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.api.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_api(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def ig_controller_api(request: Request):
+    return await _serve_patched_runtime("controller.api.js", _patch_controller_api, request)
 
 
 @router.get("/instagram/runtime/controller.sw.js", include_in_schema=False)
-async def ig_controller_sw():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.sw.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_sw(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def ig_controller_sw(request: Request):
+    return await _serve_patched_runtime("controller.sw.js", _patch_controller_sw, request)
 
 
 @router.get("/instagram/runtime/controller.inject.js", include_in_schema=False)
-async def ig_controller_inject():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.inject.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_inject(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def ig_controller_inject(request: Request):
+    return await _serve_patched_runtime("controller.inject.js", _patch_controller_inject, request)
 
 
 async def _ig_sw_override(request: Request) -> Response:
@@ -830,17 +842,21 @@ function isDirectMediaTarget(target) {{
   if (p.startsWith('/rsrc.php/') && !/\\.(webp|png|jpg|jpeg|gif|avif|ico|svg|mp4|m4v|m4s|m3u8|woff2|woff|ttf)(\\?|$)/i.test(p)) return false;
   return true;
 }}
-function isImmutableRsrcBundle(target) {{
-  if (!target || !isDirectMediaHost(target.hostname)) return false;
-  const p = String(target.pathname || '');
-  return p.startsWith('/rsrc.php/') && /\\.(js|mjs|css)(\\?|$)/i.test(p);
-}}
 function isCacheableImageTarget(target) {{
   if (!target || !isDirectMediaHost(target.hostname)) return false;
   const p = String(target.pathname || '');
   if (p.includes('/o1/v/') || /\\.(mp4|m4v|m4s|m3u8)(\\?|$)/i.test(p)) return false;
   if (target.searchParams.has('bytestart') || target.searchParams.has('byteend')) return false;
   return true;
+}}
+function isImmutableRewrittenTarget(target, req) {{
+  if (!target || !req || req.method !== 'GET' || req.headers.get('range')) return false;
+  const dest = String(req.destination || '');
+  if (dest === 'document' || dest === 'iframe') return false;
+  const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
+  const p = String(target.pathname || '');
+  if (isDirectMediaHost(h) && p.startsWith('/rsrc.php/') && /\\.(js|mjs|css)(\\?|$)/i.test(p)) return true;
+  return false;
 }}
 function normalizeMediaTarget(target) {{
   try {{
@@ -865,8 +881,13 @@ function decodeRepeated(value) {{
   }}
   return out;
 }}
+function stripDollarRaw(s) {{
+  return String(s || '').replace(/([?&])\\$[A-Za-z0-9_]+=[^&#]*/g, '$1').replace(/\\?&/g, '?').replace(/[?&]+$/g, '');
+}}
 function stripScramjetParams(target) {{
   try {{
+    const cleaned = stripDollarRaw(target.href);
+    if (cleaned !== target.href) target = new URL(cleaned);
     for (const k of [...target.searchParams.keys()]) {{
       if (k.startsWith('$')) target.searchParams.delete(k);
     }}
@@ -879,7 +900,7 @@ function extractAnyVirtualUrl(url) {{
     if (u.pathname === '/instagram/runtime/media-relay') {{
       const kv = u.searchParams.get('k');
       const uv = kv ? decodeMediaKey(kv) : u.searchParams.get('url');
-      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(uv)));
+      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(stripDollarRaw(uv))));
     }}
     const marker = '/instagram/~/sj/';
     const i = u.pathname.indexOf(marker);
@@ -888,15 +909,15 @@ function extractAnyVirtualUrl(url) {{
     const directMatch = rawAfter.match(/(?:^|\\/)(https?(?:%3A|:)(?:%2F|\\/){{2}}.*)$/i);
     if (directMatch && directMatch[1]) {{
       try {{
-        const decoded = decodeRepeated(directMatch[1]);
-        const target = normalizeMediaTarget(new URL(decoded));
+        const decoded = stripDollarRaw(decodeRepeated(directMatch[1]));
+        let target = normalizeMediaTarget(new URL(decoded));
         if (u.search) {{
           const extra = new URLSearchParams(u.search);
           for (const [k, v] of extra.entries()) {{
             if (!k.startsWith('$') && !target.searchParams.has(k)) target.searchParams.set(k, v);
           }}
         }}
-        stripScramjetParams(target);
+        target = stripScramjetParams(target);
         target.hash = '';
         return target;
       }} catch {{}}
@@ -904,7 +925,7 @@ function extractAnyVirtualUrl(url) {{
     const tail = decodeRepeated(rawAfter);
     const bits = tail.split('/');
     for (let n = Math.min(3, bits.length); n >= 0; n--) {{
-      const candidate = decodeRepeated(bits.slice(n).join('/'));
+      const candidate = stripDollarRaw(decodeRepeated(bits.slice(n).join('/')));
       try {{
         const target = stripScramjetParams(normalizeMediaTarget(new URL(candidate)));
         target.hash = '';
@@ -919,10 +940,10 @@ function checkShortCircuit(target) {{
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
   if (
-    (h === 'graph.instagram.com' && p.includes('logging_client_events')) ||
+    h === 'graph.instagram.com' && p.includes('logging_client_events') ||
     p.startsWith('/ajax/bz') ||
     p.startsWith('/ajax/qm') ||
-    (h === 'www.facebook.com' && (p.startsWith('/ig_xsite_user_info') || p.startsWith('/ig_xsite_user_obid')))
+    (h === 'www.facebook.com' && (p.startsWith('/ig_xsite_user_info') || p.startsWith('/ig_xsite_user_obid') || p.startsWith('/tr')))
   ) {{
     return new Response('{{}}', {{
       status: 200,
@@ -1065,8 +1086,8 @@ self.addEventListener('fetch', event => {{
       }}
     }}
     if (typeof $scramjetController !== 'undefined' && $scramjetController.shouldRoute(event)) {{
-      if (event.request.method === 'GET' && anyTarget && isImmutableRsrcBundle(anyTarget) && typeof caches !== 'undefined') {{
-        const cacheKey = event.request.url;
+      if (anyTarget && isImmutableRewrittenTarget(anyTarget, event.request) && typeof caches !== 'undefined') {{
+        const cacheKey = reqUrlObj.origin + reqUrlObj.pathname + reqUrlObj.search;
         event.respondWith((async () => {{
           let rwCache = null;
           try {{
@@ -1074,11 +1095,11 @@ self.addEventListener('fetch', event => {{
             const hit = await rwCache.match(cacheKey);
             if (hit) return hit;
           }} catch {{}}
-          const resp = await $scramjetController.route(event);
-          if (rwCache && resp && resp.status === 200) {{
-            try {{ rwCache.put(cacheKey, resp.clone()).catch(() => {{}}); }} catch {{}}
+          const routed = await $scramjetController.route(event);
+          if (rwCache && routed && routed.status === 200) {{
+            try {{ await rwCache.put(cacheKey, routed.clone()); }} catch {{}}
           }}
-          return resp;
+          return routed;
         }})());
         return;
       }}
@@ -1208,54 +1229,19 @@ class _NullHttpxCookies(httpx.Cookies):
         pass
 
 
-_RELAY_HTTP_CLIENT: httpx.AsyncClient | None = None
-_RELAY_HTTP_CLIENT_LOCK = asyncio.Lock()
-
-
-async def _get_relay_http_client() -> httpx.AsyncClient:
-    """Fast non-redirecting cookieless client for Instagram HTML, API, and rsrc.php static bundles."""
-    global _RELAY_HTTP_CLIENT
-    if _RELAY_HTTP_CLIENT is not None and not _RELAY_HTTP_CLIENT.is_closed:
-        return _RELAY_HTTP_CLIENT
-    async with _RELAY_HTTP_CLIENT_LOCK:
-        if _RELAY_HTTP_CLIENT is None or _RELAY_HTTP_CLIENT.is_closed:
-            limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=45.0)
-            timeout = httpx.Timeout(connect=4.0, read=20.0, write=12.0, pool=8.0)
-            if not _HAS_PROXY_ENV:
-                transport = httpx.AsyncHTTPTransport(
-                    retries=1,
-                    limits=limits,
-                )
-                client = httpx.AsyncClient(
-                    transport=transport,
-                    cookies=_NullHttpxCookies(),
-                    follow_redirects=False,
-                    timeout=timeout,
-                )
-            else:
-                client = httpx.AsyncClient(
-                    cookies=_NullHttpxCookies(),
-                    follow_redirects=False,
-                    limits=limits,
-                    timeout=timeout,
-                )
-            client._cookies = _NullHttpxCookies()
-            _RELAY_HTTP_CLIENT = client
-    return _RELAY_HTTP_CLIENT
-
-
 async def _get_media_http_client() -> httpx.AsyncClient:
-    """Shared cookieless persistent IPv4 client for Instagram images and Reel videos."""
+    """Shared cookieless persistent IPv4 client for Instagram HTML, API, images, and Reel videos."""
     global _MEDIA_HTTP_CLIENT
     if _MEDIA_HTTP_CLIENT is not None and not _MEDIA_HTTP_CLIENT.is_closed:
         return _MEDIA_HTTP_CLIENT
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
-            timeout = httpx.Timeout(connect=5.0, read=40.0, write=15.0, pool=10.0)
-            if not _HAS_PROXY_ENV:
+            timeout = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0)
+            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
-                    retries=1,
+                    local_address="0.0.0.0",
+                    retries=2,
                     limits=limits,
                 )
                 client = httpx.AsyncClient(
@@ -1277,23 +1263,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
 
 
 _PUBLIC_HOST_CACHE: dict[tuple[str, int], float] = {}
-_TRUSTED_PUBLIC_SUFFIXES = (
-    "instagram.com",
-    "cdninstagram.com",
-    "fbcdn.net",
-    "facebook.com",
-    "facebook.net",
-    "fbsbx.com",
-    "meta.com",
-    "meta.ai",
-    "threads.net",
-    "google.com",
-    "gstatic.com",
-    "googleapis.com",
-    "googleusercontent.com",
-    "apple.com",
-    "cdn-apple.com",
-)
 
 
 async def _ensure_public_host(hostname: str, port: int) -> None:
@@ -1325,14 +1294,37 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     cached = _PUBLIC_HOST_CACHE.get(key)
     if cached and (now - cached) < 300.0:
         return
-    if any(host == sfx or host.endswith("." + sfx) for sfx in _TRUSTED_PUBLIC_SUFFIXES):
-        _PUBLIC_HOST_CACHE[key] = now
-        return
-    if not _HAS_PROXY_ENV:
+    _trusted_suffixes = (
+        "instagram.com",
+        "cdninstagram.com",
+        "fbcdn.net",
+        "facebook.com",
+        "facebook.net",
+        "fbsbx.com",
+        "meta.com",
+        "meta.ai",
+        "threads.net",
+        "google.com",
+        "gstatic.com",
+        "googleapis.com",
+        "googleusercontent.com",
+        "apple.com",
+        "cdn-apple.com",
+    )
+    is_trusted = any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes)
+    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
         loop = asyncio.get_running_loop()
-        infos = await loop.run_in_executor(
-            None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-        )
+        infos = []
+        try:
+            infos = await loop.run_in_executor(
+                None, lambda: socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            )
+        except Exception:
+            if not is_trusted:
+                infos = await loop.run_in_executor(
+                    None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+                )
+        ipv4_addrs: list[str] = []
         for _, _, _, _, sockaddr in infos:
             ip_text = sockaddr[0]
             try:
@@ -1345,7 +1337,15 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
                 or ip.is_link_local
                 or ip.is_multicast
             ):
-                raise PermissionError(f"non-public address {ip_text}")
+                if not is_trusted:
+                    raise PermissionError(f"non-public address {ip_text}")
+                continue
+            if isinstance(ip, ipaddress.IPv4Address) and ip_text not in ipv4_addrs:
+                ipv4_addrs.append(ip_text)
+        if ipv4_addrs:
+            if len(_DNS_RESOLVE_MAP) > 256:
+                _DNS_RESOLVE_MAP.clear()
+            _DNS_RESOLVE_MAP[f"{host}:{port}"] = f"{host}:{port}:{','.join(ipv4_addrs[:6])}".encode("ascii")
     _PUBLIC_HOST_CACHE[key] = now
 
 
@@ -1408,20 +1408,26 @@ def _decode_media_key(k: str) -> str:
         return ""
 
 
+_EMBEDDED_DOLLAR_RE = re.compile(r"([?&])\$[A-Za-z0-9_]+=[^&#]*")
+
+
 def _strip_dollar_query(raw_url: str) -> str:
-    if "?" not in raw_url:
+    if "$" not in raw_url:
         return raw_url
+    cleaned = _EMBEDDED_DOLLAR_RE.sub(r"\1", raw_url).replace("?&", "?").rstrip("?&")
+    if "?" not in cleaned:
+        return cleaned
     try:
-        p = urlparse(raw_url)
+        p = urlparse(cleaned)
         if not p.query:
-            return raw_url
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
         clean_parts = [
             part for part in p.query.split("&")
             if part and not unquote(part.split("=", 1)[0]).startswith("$")
         ]
         return urlunparse((p.scheme, p.netloc, p.path, p.params, "&".join(clean_parts), ""))
     except Exception:
-        return raw_url
+        return cleaned
 
 
 async def _serve_ig_media_url(raw_url: str, request: Request) -> Response:
@@ -1672,7 +1678,7 @@ async def ig_sj_direct_fallback(rest: str, request: Request):
         if (
             (host == "graph.instagram.com" and "logging_client_events" in path)
             or path.startswith(("/ajax/bz", "/ajax/qm"))
-            or (host == "www.facebook.com" and path.startswith("/ig_xsite_user_info"))
+            or (host == "www.facebook.com" and path.startswith(("/ig_xsite_user_info", "/ig_xsite_user_obid", "/tr")))
         ):
             return Response(
                 b"{}",
@@ -1749,11 +1755,7 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
             rb"\g<1>1",
             html_bytes,
         )
-    if b"data:" not in html_bytes or not (
-        b"data:text/javascript" in html_bytes
-        or b"data:application/x-javascript" in html_bytes
-        or b"data:application/javascript" in html_bytes
-    ):
+    if b"data:" not in html_bytes:
         return html_bytes
     try:
         text = html_bytes.decode("utf-8")
@@ -1793,10 +1795,6 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
 
 
 _CURL_DISABLED_UNTIL: float = 0.0
-_IG_PREFETCH_SEMAPHORE = asyncio.Semaphore(8)
-_IG_STATIC_URL_RE = re.compile(
-    rb'https:(?:\\/|/){2}static\.cdninstagram\.com(?:\\/|/)rsrc\.php(?:\\/|/)[^"\'\s<>\\]+\.(?:js|css)(?:\?[^"\'\s<>\\]*)?'
-)
 
 
 async def _ig_raw_single_request(
@@ -1810,18 +1808,17 @@ async def _ig_raw_single_request(
     fresh_curl: bool,
     impersonate_profile: str,
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
-    global _CURL_DISABLED_UNTIL
     if not use_httpx and StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
         ephemeral: StatelessCurlSession | None = None
         session = None
         try:
-            curl_timeout = min(float(timeout), 4.5) if not fresh_curl else min(float(timeout), 10.0)
+            curl_timeout = max(5.0, float(timeout))
             if fresh_curl:
                 ephemeral = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=int(max(5.0, curl_timeout)),
+                    timeout=int(max(15.0, curl_timeout)),
                     max_clients=4,
                 )
                 session = ephemeral
@@ -1842,7 +1839,6 @@ async def _ig_raw_single_request(
             raw_multi = list(upstream.headers.multi_items())
             return status, status_text, resp_body, raw_multi
         except Exception:
-            _CURL_DISABLED_UNTIL = time.time() + 300.0
             if not fresh_curl and session is not None:
                 try:
                     asyncio.create_task(_reset_curl_session(session))
@@ -1856,14 +1852,13 @@ async def _ig_raw_single_request(
                 except Exception:
                     pass
 
-    client = await _get_relay_http_client()
+    client = await _get_media_http_client()
     upstream = await client.request(
         method=method,
         url=url,
         headers=headers,
         content=body if body else None,
         follow_redirects=False,
-        timeout=min(float(timeout), 12.0),
     )
     status = int(upstream.status_code)
     status_text = str(upstream.reason_phrase or "OK")
@@ -1872,195 +1867,101 @@ async def _ig_raw_single_request(
     return status, status_text, resp_body, raw_multi
 
 
-async def _prefetch_single_ig_asset(asset_url: str) -> None:
-    now = time.time()
-    cached = _STATIC_ASSET_CACHE.get(asset_url)
-    if cached and (now - cached[0]) < _STATIC_ASSET_TTL:
-        return
-    async with _IG_PREFETCH_SEMAPHORE:
-        cached = _STATIC_ASSET_CACHE.get(asset_url)
-        if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
-            return
-        try:
-            client = await _get_relay_http_client()
-            resp = await client.get(
-                asset_url,
-                headers={
-                    "User-Agent": _DESKTOP_CHROME_UA,
-                    "Accept": "*/*",
-                    "Accept-Encoding": "gzip, deflate",
-                    "Origin": "https://www.instagram.com",
-                    "Referer": "https://www.instagram.com/",
-                },
-            )
-            if resp.status_code == 200 and 0 < len(resp.content) <= _STATIC_ASSET_MAX_BYTES:
-                out_headers: list[list[str]] = []
-                for k, v in resp.headers.multi_items():
-                    kl = k.lower()
-                    if kl in _RELAY_STRIP_RESP_HEADERS or kl == "set-cookie" or kl.startswith(":"):
-                        continue
-                    out_headers.append([k, v])
-                out_headers.append(["access-control-allow-origin", "*"])
-                out_headers.append(["cross-origin-resource-policy", "cross-origin"])
-                if len(_STATIC_ASSET_CACHE) >= _STATIC_ASSET_MAX_ITEMS:
-                    oldest_key = next(iter(_STATIC_ASSET_CACHE))
-                    _STATIC_ASSET_CACHE.pop(oldest_key, None)
-                _STATIC_ASSET_CACHE[asset_url] = (
-                    time.time(),
-                    200,
-                    "OK",
-                    out_headers,
-                    bytes(resp.content),
-                )
-        except Exception:
-            pass
-
-
-async def _prefetch_ig_static_from_html(html_bytes: bytes) -> None:
-    if not html_bytes:
-        return
-    try:
-        urls: list[str] = []
-        seen: set[str] = set()
-        for m in _IG_STATIC_URL_RE.finditer(html_bytes):
-            raw = m.group(0).replace(b"\\/", b"/").replace(b"&amp;", b"&")
-            try:
-                u = raw.decode("ascii")
-            except Exception:
-                continue
-            if u not in seen:
-                seen.add(u)
-                urls.append(u)
-                if len(urls) >= 28:
-                    break
-        if urls:
-            await asyncio.gather(*(_prefetch_single_ig_asset(u) for u in urls), return_exceptions=True)
-    except Exception:
-        pass
-
-
 async def _ig_upstream_request(
     method: str,
     url: str,
     headers: dict[str, str],
     body: bytes | None = None,
     *,
-    timeout: float = 15.0,
-    prefer_httpx: bool = True,
+    timeout: float = 22.0,
+    prefer_httpx: bool = False,
     fresh_curl: bool = False,
     impersonate_profile: str = "chrome131",
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
-    cur_url = url
-    cur_headers = dict(headers)
-    for _hop in range(4):
-        parsed = urlparse(cur_url)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        if host:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    if host:
+        try:
+            await _ensure_public_host(host, port)
+        except PermissionError:
+            raise
+        except Exception:
+            pass
+
+    used_httpx = prefer_httpx or (StatelessCurlSession is None) or (time.time() < _CURL_DISABLED_UNTIL)
+    try:
+        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+            method,
+            url,
+            headers,
+            body,
+            timeout=timeout,
+            use_httpx=used_httpx,
+            fresh_curl=fresh_curl,
+            impersonate_profile=impersonate_profile,
+        )
+    except Exception:
+        used_httpx = not used_httpx
+        status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
+            method,
+            url,
+            headers,
+            body,
+            timeout=timeout,
+            use_httpx=used_httpx,
+            fresh_curl=fresh_curl,
+            impersonate_profile=impersonate_profile,
+        )
+
+    if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
+        m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
+        if m_rd:
+            rd_path = m_rd.group(1).decode("utf-8", "ignore")
+            rd_headers = dict(headers)
+            rd_headers["Sec-Fetch-Dest"] = "empty"
+            rd_headers["Sec-Fetch-Mode"] = "cors"
+            rd_headers["Sec-Fetch-Site"] = "same-origin"
+            rd_headers["Origin"] = f"https://{host}"
+            rd_headers["Referer"] = url
             try:
-                await _ensure_public_host(host, port)
-            except PermissionError:
-                raise
+                _, _, _, rd_multi = await _ig_raw_single_request(
+                    "POST",
+                    f"https://{host}{rd_path}",
+                    rd_headers,
+                    None,
+                    timeout=12.0,
+                    use_httpx=used_httpx,
+                    fresh_curl=False,
+                    impersonate_profile=impersonate_profile,
+                )
+                extra_set_cookies: list[tuple[str, str]] = []
+                rd_cookie_pairs: list[str] = []
+                for rk, rv in rd_multi:
+                    if rk.lower() == "set-cookie":
+                        extra_set_cookies.append((rk, rv))
+                        c_nv = rv.split(";", 1)[0].strip()
+                        if c_nv:
+                            rd_cookie_pairs.append(c_nv)
+                retry_headers = dict(headers)
+                if rd_cookie_pairs:
+                    cur_c = retry_headers.get("Cookie", "")
+                    retry_headers["Cookie"] = (
+                        f"{cur_c}; {'; '.join(rd_cookie_pairs)}" if cur_c else "; ".join(rd_cookie_pairs)
+                    )
+                status, status_text, resp_body, retry_multi = await _ig_raw_single_request(
+                    method,
+                    url,
+                    retry_headers,
+                    body,
+                    timeout=timeout,
+                    use_httpx=used_httpx,
+                    fresh_curl=False,
+                    impersonate_profile=impersonate_profile,
+                )
+                raw_multi = extra_set_cookies + retry_multi
             except Exception:
                 pass
-
-        used_httpx = prefer_httpx or (StatelessCurlSession is None) or (time.time() < _CURL_DISABLED_UNTIL)
-        try:
-            status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
-                method,
-                cur_url,
-                cur_headers,
-                body,
-                timeout=timeout,
-                use_httpx=used_httpx,
-                fresh_curl=fresh_curl,
-                impersonate_profile=impersonate_profile,
-            )
-        except Exception:
-            used_httpx = not used_httpx
-            status, status_text, resp_body, raw_multi = await _ig_raw_single_request(
-                method,
-                cur_url,
-                cur_headers,
-                body,
-                timeout=timeout,
-                use_httpx=used_httpx,
-                fresh_curl=fresh_curl,
-                impersonate_profile=impersonate_profile,
-            )
-
-        if status == 403 and host in ("www.instagram.com", "instagram.com") and b"/__rd_verify_" in resp_body:
-            m_rd = re.search(rb"""fetch\(['"](/__rd_verify_[^'"]+)['"]""", resp_body)
-            if m_rd:
-                rd_path = m_rd.group(1).decode("utf-8", "ignore")
-                rd_headers = dict(cur_headers)
-                rd_headers["Sec-Fetch-Dest"] = "empty"
-                rd_headers["Sec-Fetch-Mode"] = "cors"
-                rd_headers["Sec-Fetch-Site"] = "same-origin"
-                rd_headers["Origin"] = f"https://{host}"
-                rd_headers["Referer"] = cur_url
-                try:
-                    _, _, _, rd_multi = await _ig_raw_single_request(
-                        "POST",
-                        f"https://{host}{rd_path}",
-                        rd_headers,
-                        None,
-                        timeout=8.0,
-                        use_httpx=used_httpx,
-                        fresh_curl=False,
-                        impersonate_profile=impersonate_profile,
-                    )
-                    extra_set_cookies: list[tuple[str, str]] = []
-                    rd_cookie_pairs: list[str] = []
-                    for rk, rv in rd_multi:
-                        if rk.lower() == "set-cookie":
-                            extra_set_cookies.append((rk, rv))
-                            c_nv = rv.split(";", 1)[0].strip()
-                            if c_nv:
-                                rd_cookie_pairs.append(c_nv)
-                    retry_headers = dict(cur_headers)
-                    if rd_cookie_pairs:
-                        cur_c = retry_headers.get("Cookie", "")
-                        retry_headers["Cookie"] = (
-                            f"{cur_c}; {'; '.join(rd_cookie_pairs)}" if cur_c else "; ".join(rd_cookie_pairs)
-                        )
-                    status, status_text, resp_body, retry_multi = await _ig_raw_single_request(
-                        method,
-                        cur_url,
-                        retry_headers,
-                        body,
-                        timeout=timeout,
-                        use_httpx=used_httpx,
-                        fresh_curl=False,
-                        impersonate_profile=impersonate_profile,
-                    )
-                    raw_multi = extra_set_cookies + retry_multi
-                except Exception:
-                    pass
-
-        if method in ("GET", "HEAD") and status in (301, 302, 303, 307, 308):
-            loc = ""
-            for k, v in raw_multi:
-                if k.lower() == "location":
-                    loc = v
-                    break
-            if loc:
-                target_url = urljoin(cur_url, loc)
-                target_parsed = urlparse(target_url)
-                target_host = (target_parsed.hostname or "").lower().rstrip(".")
-                if target_host in IG_HOSTS or target_host in AUTH_HOSTS or target_host.endswith((".instagram.com", ".facebook.com")):
-                    new_cookies = []
-                    for k, v in raw_multi:
-                        if k.lower() == "set-cookie":
-                            c_nv = v.split(";", 1)[0].strip()
-                            if c_nv:
-                                new_cookies.append(c_nv)
-                    if new_cookies:
-                        existing = cur_headers.get("Cookie", "")
-                        cur_headers["Cookie"] = f"{existing}; {'; '.join(new_cookies)}" if existing else "; ".join(new_cookies)
-                    cur_url = target_url
-                    continue
-        break
 
     return status, status_text, resp_body, raw_multi
 
@@ -2582,7 +2483,7 @@ async def ig_http_relay(request: Request):
     if (
         (host == "graph.instagram.com" and "logging_client_events" in req_path)
         or req_path.startswith(("/ajax/bz", "/ajax/qm"))
-        or (host == "www.facebook.com" and req_path.startswith(("/ig_xsite_user_info", "/ig_xsite_user_obid")))
+        or (host == "www.facebook.com" and req_path.startswith(("/ig_xsite_user_info", "/ig_xsite_user_obid", "/tr")))
     ):
         return _pack_relay_response(
             200,
@@ -2810,12 +2711,13 @@ async def ig_http_relay(request: Request):
                 b"" if method == "HEAD" else c_body,
             )
 
-    cacheable = _is_cacheable_static_asset(method, url)
+    cacheable = (not has_range) and _is_cacheable_static_asset(method, url)
     if cacheable:
         cached = _STATIC_ASSET_CACHE.get(url)
         if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
             _, c_status, c_text, c_headers, c_body = cached
-            return _pack_relay_response(c_status, c_text, c_headers, c_body)
+            return _pack_relay_response(c_status, c_text, c_headers, b"" if method == "HEAD" else c_body)
+        header_dict.pop("Cookie", None)
 
     try:
         is_credential_login = (
@@ -2828,8 +2730,8 @@ async def ig_http_relay(request: Request):
             url=url,
             headers=header_dict,
             body=req_body if req_body else None,
-            timeout=16.0,
-            prefer_httpx=not is_credential_login,
+            timeout=25.0,
+            prefer_httpx=False,
             fresh_curl=is_credential_login,
             impersonate_profile=impersonate_profile,
         )
@@ -2841,9 +2743,9 @@ async def ig_http_relay(request: Request):
             headers={"Cache-Control": "no-store"},
         )
 
-    # If Instagram returns 404 or 429 on /ajax/bulk-route-definitions/ or /ajax/route-definition/,
+    # If Instagram returns 429 on /ajax/bulk-route-definitions/ or /ajax/route-definition/,
     # return valid Comet responses so client-side navigation falls back to clean full-page load.
-    if status in (404, 429) and req_path.startswith("/ajax/bulk-route-definitions"):
+    if status == 429 and req_path.startswith("/ajax/bulk-route-definitions"):
         return _pack_relay_response(
             200,
             "OK",
@@ -2854,7 +2756,7 @@ async def ig_http_relay(request: Request):
             ],
             b'for (;;);{"__ar":1,"payload":{}}',
         )
-    if status in (404, 429) and req_path.startswith("/ajax/route-definition"):
+    if status == 429 and req_path.startswith("/ajax/route-definition"):
         return _pack_relay_response(
             200,
             "OK",
@@ -2897,15 +2799,6 @@ async def ig_http_relay(request: Request):
             "access-control-expose-headers",
         ):
             continue
-        if kl == "location":
-            try:
-                loc_u = urljoin(url, v)
-                loc_p = urlparse(loc_u)
-                lh = (loc_p.hostname or "").lower()
-                if lh in ("www.instagram.com", "instagram.com"):
-                    v = f"/instagram{loc_p.path}" + (f"?{loc_p.query}" if loc_p.query else "")
-            except Exception:
-                pass
         if kl == "set-cookie":
             has_set_cookie = True
             v = _normalize_ig_set_cookie(v, host)
@@ -2924,8 +2817,6 @@ async def ig_http_relay(request: Request):
         out_headers.append(["access-control-expose-headers", "*"])
 
     if is_html and status == 200 and resp_body:
-        if host in ("www.instagram.com", "instagram.com"):
-            asyncio.create_task(_prefetch_ig_static_from_html(resp_body))
         if b"modulepreload" in resp_body:
             resp_body = re.sub(
                 rb'<link\b[^>]*\brel=["\']?modulepreload["\']?[^>]*>',
@@ -2934,6 +2825,10 @@ async def ig_http_relay(request: Request):
                 flags=re.I,
             )
         resp_body = _inline_ig_data_scripts(resp_body)
+        try:
+            asyncio.get_running_loop().create_task(_prefetch_ig_static_from_html(resp_body))
+        except Exception:
+            pass
     elif req_path in ("/api/graphql", "/graphql/query") and resp_body:
         if b'"is_silent":false' in resp_body:
             resp_body = resp_body.replace(b'"is_silent":false', b'"is_silent":true')
@@ -2966,7 +2861,6 @@ async def ig_http_relay(request: Request):
     if (
         cacheable
         and not has_set_cookie
-        and not cookie_parts
         and status == 200
         and 0 < len(resp_body) <= _STATIC_ASSET_MAX_BYTES
     ):
@@ -2982,6 +2876,88 @@ async def ig_http_relay(request: Request):
         )
 
     return _pack_relay_response(status, status_text, out_headers, resp_body)
+
+
+_IG_HTML_RSRC_RE = re.compile(
+    rb"""https:(?:\\/\\/|//)(?:static\.cdninstagram\.com|[a-z0-9.-]+\.fbcdn\.net)(?:\\/|/)rsrc\.php(?:\\/|/)[^"'\s<>\\]+\.(?:js|css)(?:\?[^"'\s<>\\]*)?""",
+    re.I,
+)
+_IG_PREFETCH_SEMAPHORE: asyncio.Semaphore | None = None
+
+
+async def _prefetch_single_ig_rsrc(asset_url: str) -> None:
+    global _IG_PREFETCH_SEMAPHORE
+    if not _is_cacheable_static_asset("GET", asset_url):
+        return
+    cached = _STATIC_ASSET_CACHE.get(asset_url)
+    if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+        return
+    if _IG_PREFETCH_SEMAPHORE is None:
+        _IG_PREFETCH_SEMAPHORE = asyncio.Semaphore(14)
+    async with _IG_PREFETCH_SEMAPHORE:
+        cached = _STATIC_ASSET_CACHE.get(asset_url)
+        if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+            return
+        try:
+            client = await _get_media_http_client()
+            resp = await client.get(
+                asset_url,
+                headers={
+                    "User-Agent": _DESKTOP_CHROME_UA,
+                    "Accept": "*/*",
+                    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                    "Referer": "https://www.instagram.com/",
+                    "Origin": "https://www.instagram.com",
+                },
+            )
+            if resp.status_code != 200:
+                return
+            body = bytes(resp.content or b"")
+            if not (0 < len(body) <= _STATIC_ASSET_MAX_BYTES):
+                return
+            out_hdrs: list[list[str]] = []
+            for k, v in resp.headers.multi_items():
+                kl = k.lower()
+                if kl in _RELAY_STRIP_RESP_HEADERS or kl == "set-cookie" or kl.startswith(":"):
+                    continue
+                out_hdrs.append([k, v])
+            if len(_STATIC_ASSET_CACHE) >= _STATIC_ASSET_MAX_ITEMS:
+                _STATIC_ASSET_CACHE.pop(next(iter(_STATIC_ASSET_CACHE)), None)
+            _STATIC_ASSET_CACHE[asset_url] = (
+                time.time(),
+                200,
+                str(resp.reason_phrase or "OK"),
+                out_hdrs,
+                body,
+            )
+        except Exception:
+            pass
+
+
+async def _prefetch_ig_static_from_html(html_bytes: bytes) -> None:
+    if not html_bytes:
+        return
+    urls: list[str] = []
+    seen: set[str] = set()
+    for m in _IG_HTML_RSRC_RE.finditer(html_bytes):
+        try:
+            raw_u = (
+                m.group(0)
+                .decode("utf-8", "ignore")
+                .replace("\\/", "/")
+                .replace("\\u0025", "%")
+                .replace("\\u0026", "&")
+                .replace("&amp;", "&")
+            )
+            if raw_u not in seen:
+                seen.add(raw_u)
+                urls.append(raw_u)
+            if len(urls) >= 48:
+                break
+        except Exception:
+            continue
+    if urls:
+        await asyncio.gather(*(_prefetch_single_ig_rsrc(u) for u in urls), return_exceptions=True)
 
 
 async def _ig_buffered_wisp_endpoint(websocket: WebSocket) -> None:
@@ -3218,7 +3194,7 @@ _install_ig_routes()
 
 
 def _target_from_input(raw: str) -> str:
-    value = (raw or "").strip()
+    value = _strip_dollar_query((raw or "").strip())
     if not value:
         return IG_HOME
     low = value.lower()
@@ -3229,7 +3205,7 @@ def _target_from_input(raw: str) -> str:
     if low in ("login", "/login"):
         return IG_LOGIN
     if value.startswith("/") and len(value) > 1:
-        return "https://www.instagram.com" + value
+        return _strip_dollar_query("https://www.instagram.com" + value)
     if value.startswith(("http://", "https://")):
         try:
             u = urlparse(value)
@@ -3237,7 +3213,7 @@ def _target_from_input(raw: str) -> str:
             if h == "instagram.com":
                 h = "www.instagram.com"
             if h in IG_HOSTS or h in AUTH_HOSTS:
-                return urlunparse(("https", h, u.path or "/", "", u.query, ""))
+                return _strip_dollar_query(urlunparse(("https", h, u.path or "/", "", u.query, "")))
         except Exception:
             pass
     if value.startswith("@") and len(value) > 1:
@@ -3273,7 +3249,9 @@ def _shell_html(initial_target: str) -> str:
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preload" href="/instagram/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/instagram/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/instagram/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin="anonymous">
 <script>
 if ("serviceWorker" in navigator) {{
   window.__shSwRegP = navigator.serviceWorker.register(
@@ -3319,6 +3297,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   const MEDIA_RELAY_ENDPOINT = "/instagram/runtime/media-relay";
   const STATIC_CACHE_NAME = "sh-ig-static-{RUNTIME_REV}";
   const MEDIA_CACHE_NAME = "sh-ig-media-{RUNTIME_REV}";
+  const REWRITTEN_CACHE_NAME = "sh-ig-rewritten-{RUNTIME_REV}";
   const IG_MEDIA_SUFFIXES = ["cdninstagram.com", "fbcdn.net"];
   const SESSION_KEY = "schoolhub.instagram.target.v1";
   const SW_GUARD = "schoolhub.instagram.sw-reload.v1";
@@ -3340,8 +3319,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   let ready = false;
   let navigationToken = 0;
   let lastUrl = INITIAL;
-  let lastRelayActivityAt = Date.now();
-  let activeRelayInflight = 0;
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
@@ -3393,17 +3370,26 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
     }}
   }}
 
+  function stripEmbeddedDollarParams(str) {{
+    return String(str || "").replace(/([?&])\\$[A-Za-z0-9_]+=[^&#]*/g, "$1").replace(/\\?&/g, "?").replace(/[?&]+$/g, "");
+  }}
+
   function syncOuterHistoryUrl(cleanedUrl) {{
     try {{
-      const u = new URL(cleanedUrl);
+      const safeUrl = stripEmbeddedDollarParams(cleanedUrl);
+      const u = new URL(safeUrl);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       if (h === "www.instagram.com" || h === "instagram.com") {{
         const p = u.pathname || "/";
         if (/^\\/(runtime\\/|~\\/sj\\/|wisp(\\/|$)|sw\\.js$|health$)/i.test(p)) return;
-        const desired = "/instagram" + (p.startsWith("/") ? p : "/" + p) + (u.search || "");
+        for (const k of [...u.searchParams.keys()]) {{
+          if (k.startsWith("$")) u.searchParams.delete(k);
+        }}
+        const cleanSearch = stripEmbeddedDollarParams(u.search || "");
+        const desired = "/instagram" + (p.startsWith("/") ? p : "/" + p) + cleanSearch;
         const current = location.pathname + location.search;
         if (desired !== current) {{
-          history.replaceState({{ shIgTarget: cleanedUrl }}, "", desired);
+          history.replaceState({{ shIgTarget: u.href }}, "", desired);
         }}
       }}
     }} catch (_) {{}}
@@ -3411,7 +3397,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
 
   function remember(url) {{
     if (!url) return;
-    const s = String(url);
+    const s = cleanTargetUrl(String(url)) || stripEmbeddedDollarParams(String(url));
+    if (!s) return;
     lastUrl = s;
     syncOuterHistoryUrl(s);
     if (!hasAuthCookie() && (s.includes("/accounts/password/") || s.includes("/accounts/emailsignup") || s.includes("facebook.com/"))) {{
@@ -3431,7 +3418,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         try {{ localStorage.removeItem(SESSION_KEY); }} catch (_) {{}}
         return INITIAL;
       }}
-      const saved = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
+      const saved = cleanTargetUrl(sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY) || "");
       if (saved && !saved.includes("/accounts/login")) return saved;
       return AUTH_HOME;
     }} catch (_) {{
@@ -3470,7 +3457,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   function cleanTargetUrl(rawUrl) {{
     if (!rawUrl || typeof rawUrl !== "string") return "";
     try {{
-      const u = new URL(rawUrl);
+      const preCleaned = stripEmbeddedDollarParams(rawUrl);
+      const u = new URL(preCleaned);
       if (u.protocol !== "http:" && u.protocol !== "https:") return "";
       for (const k of [...u.searchParams.keys()]) {{
         if (k.startsWith("$")) u.searchParams.delete(k);
@@ -3574,7 +3562,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         (h === "graph.instagram.com" && p.includes("logging_client_events")) ||
         p.startsWith("/ajax/bz") ||
         p.startsWith("/ajax/qm") ||
-        (h === "www.facebook.com" && (p.startsWith("/ig_xsite_user_info") || p.startsWith("/ig_xsite_user_obid")))
+        (h === "www.facebook.com" && (p.startsWith("/ig_xsite_user_info") || p.startsWith("/ig_xsite_user_obid") || p.startsWith("/tr")))
       ) {{
         const b = new TextEncoder().encode("{{}}").buffer;
         return {{
@@ -3655,7 +3643,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
     constructor() {{
       this.wispClient = null;
       this.wispPromise = null;
-      this.staticInflight = new Map();
     }}
     async init() {{
       return;
@@ -3694,7 +3681,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const sc = checkTransportShortCircuit(urlStr);
       if (sc) return sc;
 
-      lastRelayActivityAt = Date.now();
       const list = normalizeHeadersList(headers, urlStr);
       const rangeEntry = list.find(([k]) => k.toLowerCase() === "range");
 
@@ -3716,10 +3702,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
                 }};
               }}
               const r = await fetch(relayUrl, {{ method: "GET", credentials: "omit", signal }});
-              lastRelayActivityAt = Date.now();
               if (r && r.status < 400) {{
                 if (r.status === 200) {{
-                  try {{ cache.put(relayUrl, r.clone()).catch(() => {{}}); }} catch (_) {{}}
+                  try {{ await cache.put(relayUrl, r.clone()); }} catch (_) {{}}
                 }}
                 return {{
                   body: await r.arrayBuffer(),
@@ -3733,7 +3718,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
           const fwdHeaders = {{}};
           if (rangeEntry && rangeEntry[1]) fwdHeaders["Range"] = rangeEntry[1];
           const r = await fetch(relayUrl, {{ method: m, headers: fwdHeaders, credentials: "omit", signal }});
-          lastRelayActivityAt = Date.now();
           if (r && r.status < 400) {{
             return {{
               body: m === "HEAD" ? new ArrayBuffer(0) : await r.arrayBuffer(),
@@ -3761,34 +3745,29 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         }} catch (_) {{}}
       }}
 
-      if (canClientCache && !rangeEntry && this.staticInflight.has(urlStr)) {{
-        try {{
-          const shared = await this.staticInflight.get(urlStr);
-          return {{
-            body: shared.body.slice(0),
-            headers: shared.headers,
-            status: shared.status,
-            statusText: shared.statusText,
-          }};
-        }} catch (_) {{}}
-      }}
+      try {{
+        const bodyBytes = await serializeRequestBody(body);
+        const metaBytes = new TextEncoder().encode(JSON.stringify({{
+          url: urlStr,
+          method: m,
+          headers: list,
+        }}));
+        const frameBuf = new Uint8Array(4 + metaBytes.byteLength + bodyBytes.byteLength);
+        new DataView(frameBuf.buffer).setUint32(0, metaBytes.byteLength, false);
+        frameBuf.set(metaBytes, 4);
+        frameBuf.set(bodyBytes, 4 + metaBytes.byteLength);
 
-      const doRelayFetch = async () => {{
-        activeRelayInflight += 1;
-        lastRelayActivityAt = Date.now();
-        try {{
-          const bodyBytes = await serializeRequestBody(body);
-          const metaBytes = new TextEncoder().encode(JSON.stringify({{
-            url: urlStr,
-            method: m,
-            headers: list,
-          }}));
-          const frameBuf = new Uint8Array(4 + metaBytes.byteLength + bodyBytes.byteLength);
-          new DataView(frameBuf.buffer).setUint32(0, metaBytes.byteLength, false);
-          frameBuf.set(metaBytes, 4);
-          frameBuf.set(bodyBytes, 4 + metaBytes.byteLength);
-
-          let resp = await fetch(RELAY_ENDPOINT, {{
+        let resp = await fetch(RELAY_ENDPOINT, {{
+          method: "POST",
+          credentials: "omit",
+          cache: "no-store",
+          headers: {{ "content-type": "application/octet-stream" }},
+          body: frameBuf,
+          signal,
+        }});
+        if (!resp.ok) {{
+          await new Promise((r) => setTimeout(r, 350));
+          resp = await fetch(RELAY_ENDPOINT, {{
             method: "POST",
             credentials: "omit",
             cache: "no-store",
@@ -3796,119 +3775,84 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
             body: frameBuf,
             signal,
           }});
-          if (!resp.ok) {{
-            await new Promise((r) => setTimeout(r, 350));
-            resp = await fetch(RELAY_ENDPOINT, {{
-              method: "POST",
-              credentials: "omit",
-              cache: "no-store",
-              headers: {{ "content-type": "application/octet-stream" }},
-              body: frameBuf,
-              signal,
-            }});
+        }}
+        if (!resp.ok) throw new Error("HTTP relay status " + resp.status);
+        const rawBuf = await resp.arrayBuffer();
+        if (rawBuf.byteLength < 4) throw new Error("HTTP relay short buffer");
+        const metaLen = new DataView(rawBuf).getUint32(0, false);
+        if (rawBuf.byteLength < 4 + metaLen) throw new Error("HTTP relay truncated meta");
+        const metaJson = new TextDecoder().decode(new Uint8Array(rawBuf, 4, metaLen));
+        const meta = JSON.parse(metaJson);
+        const payloadBytes = new Uint8Array(rawBuf, 4 + metaLen);
+        const statusNum = Number(meta.status || 200);
+        if (statusNum === 502 && payloadBytes.byteLength < 512) {{
+          const errPreview = new TextDecoder().decode(payloadBytes);
+          if (errPreview.startsWith("upstream error:")) {{
+            throw new Error(errPreview);
           }}
-          if (!resp.ok) throw new Error("HTTP relay status " + resp.status);
-          const rawBuf = await resp.arrayBuffer();
-          lastRelayActivityAt = Date.now();
-          if (rawBuf.byteLength < 4) throw new Error("HTTP relay short buffer");
-          const metaLen = new DataView(rawBuf).getUint32(0, false);
-          if (rawBuf.byteLength < 4 + metaLen) throw new Error("HTTP relay truncated meta");
-          const metaJson = new TextDecoder().decode(new Uint8Array(rawBuf, 4, metaLen));
-          const meta = JSON.parse(metaJson);
-          const payloadBytes = new Uint8Array(rawBuf, 4 + metaLen);
-          const statusNum = Number(meta.status || 200);
-          if (statusNum === 502 && payloadBytes.byteLength < 512) {{
-            const errPreview = new TextDecoder().decode(payloadBytes);
-            if (errPreview.startsWith("upstream error:")) {{
-              throw new Error(errPreview);
-            }}
-          }}
-          const respBody = (m === "HEAD" || meta.status === 204 || meta.status === 304)
-            ? new ArrayBuffer(0)
-            : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
-          const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
-          let explicitClearAuth = false;
-          const setCookieEntries = [];
-          for (const [k, v] of respHeaders) {{
-            if (!k) continue;
-            const kl = k.toLowerCase();
-            if (kl === "x-sh-clear-auth" && String(v).trim() === "1") {{
+        }}
+        const respBody = (m === "HEAD" || meta.status === 204 || meta.status === 304)
+          ? new ArrayBuffer(0)
+          : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
+        const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
+        let explicitClearAuth = false;
+        const setCookieEntries = [];
+        for (const [k, v] of respHeaders) {{
+          if (!k) continue;
+          const kl = k.toLowerCase();
+          if (kl === "x-sh-clear-auth" && String(v).trim() === "1") {{
+            explicitClearAuth = true;
+          }} else if (kl === "set-cookie" && v) {{
+            const scStr = String(v);
+            if (/^sessionid=(?:""|deleted|;|$)/i.test(scStr.trim()) || (/^sessionid=/i.test(scStr.trim()) && /max-age=0|1970/i.test(scStr))) {{
               explicitClearAuth = true;
-            }} else if (kl === "set-cookie" && v) {{
-              const scStr = String(v);
-              if (/^sessionid=(?:""|deleted|;|$)/i.test(scStr.trim()) || (/^sessionid=/i.test(scStr.trim()) && /max-age=0|1970/i.test(scStr))) {{
-                explicitClearAuth = true;
-              }}
-              setCookieEntries.push({{ url: urlStr, cookie: scStr }});
             }}
+            setCookieEntries.push({{ url: urlStr, cookie: scStr }});
           }}
-          if (explicitClearAuth) {{
-            globalThis.__shExplicitClear = true;
-            try {{
-              sessionStorage.removeItem(SESSION_KEY);
-              localStorage.removeItem(SESSION_KEY);
-              sessionStorage.removeItem("__sh_cookie_vault_instagram");
-              localStorage.removeItem("__sh_cookie_vault_instagram");
-              if (controller?.cookieJar?.load) controller.cookieJar.load("[]");
-            }} catch (_) {{}}
-            setTimeout(() => {{ globalThis.__shExplicitClear = false; }}, 4000);
-          }}
-          if (setCookieEntries.length > 0 && controller?.cookieJar) {{
-            try {{
-              controller.applyCookieSyncEntries(setCookieEntries);
-              Promise.resolve(controller.persistCookies?.()).catch(() => {{}});
-              Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
-            }} catch (_) {{}}
-          }} else if (explicitClearAuth && controller?.persistCookies) {{
-            try {{ Promise.resolve(controller.persistCookies()).catch(() => {{}}); }} catch (_) {{}}
-          }}
-          if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
-            const cachedCopy = respBody.slice(0);
-            (async () => {{
-              try {{
-                const hObj = new Headers();
-                for (const [k, v] of respHeaders) {{
-                  if (k && k.toLowerCase() !== "set-cookie") {{
-                    try {{ hObj.append(k, v); }} catch (_) {{}}
-                  }}
-                }}
-                const cache = await caches.open(STATIC_CACHE_NAME);
-                await cache.put(urlStr, new Response(cachedCopy, {{ status: 200, headers: hObj }}));
-              }} catch (_) {{}}
-            }})();
-          }}
-          return {{
-            body: respBody,
-            headers: respHeaders,
-            status: statusNum,
-            statusText: String(meta.statusText || "OK"),
-          }};
-        }} catch (relayError) {{
-          console.warn("[SchoolHub Instagram] relay fallback to wisp for", urlStr, relayError);
-          const wisp = await this.ensureWispClient();
-          return await wisp.request(remote, method, body, list, signal);
-        }} finally {{
-          activeRelayInflight = Math.max(0, activeRelayInflight - 1);
-          lastRelayActivityAt = Date.now();
         }}
-      }};
-
-      if (canClientCache && !rangeEntry) {{
-        const p = doRelayFetch();
-        this.staticInflight.set(urlStr, p);
-        try {{
-          const out = await p;
-          return {{
-            body: out.body.slice(0),
-            headers: out.headers,
-            status: out.status,
-            statusText: out.statusText,
-          }};
-        }} finally {{
-          this.staticInflight.delete(urlStr);
+        if (explicitClearAuth) {{
+          globalThis.__shExplicitClear = true;
+          try {{
+            sessionStorage.removeItem(SESSION_KEY);
+            localStorage.removeItem(SESSION_KEY);
+            sessionStorage.removeItem("__sh_cookie_vault_instagram");
+            localStorage.removeItem("__sh_cookie_vault_instagram");
+            if (controller?.cookieJar?.load) controller.cookieJar.load("[]");
+          }} catch (_) {{}}
+          setTimeout(() => {{ globalThis.__shExplicitClear = false; }}, 4000);
         }}
+        if (setCookieEntries.length > 0 && controller?.cookieJar) {{
+          try {{
+            controller.applyCookieSyncEntries(setCookieEntries);
+            Promise.resolve(controller.persistCookies?.()).catch(() => {{}});
+            Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
+          }} catch (_) {{}}
+        }} else if (explicitClearAuth && controller?.persistCookies) {{
+          Promise.resolve(controller.persistCookies()).catch(() => {{}});
+        }}
+        if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
+          try {{
+            const hObj = new Headers();
+            for (const [k, v] of respHeaders) {{
+              if (k && k.toLowerCase() !== "set-cookie") {{
+                try {{ hObj.append(k, v); }} catch (_) {{}}
+              }}
+            }}
+            const cache = await caches.open(STATIC_CACHE_NAME);
+            await cache.put(urlStr, new Response(respBody.slice(0), {{ status: 200, headers: hObj }}));
+          }} catch (_) {{}}
+        }}
+        return {{
+          body: respBody,
+          headers: respHeaders,
+          status: statusNum,
+          statusText: String(meta.statusText || "OK"),
+        }};
+      }} catch (relayError) {{
+        console.warn("[SchoolHub Instagram] relay fallback to wisp for", urlStr, relayError);
+        const wisp = await this.ensureWispClient();
+        return await wisp.request(remote, method, body, list, signal);
       }}
-      return await doRelayFetch();
     }}
     connect(url, protocols, requestHeaders, onopen, onmessage, onclose, onerror) {{
       this.ensureWispClient()
@@ -3954,10 +3898,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
 
   function decodeProxiedTail(rawTail) {{
     if (!rawTail) return "";
-    let candidate = rawTail;
+    let candidate = stripEmbeddedDollarParams(rawTail);
     const outerScramIdx = candidate.indexOf("?$");
     if (outerScramIdx >= 0) candidate = candidate.slice(0, outerScramIdx);
-    for (let k = 0; k < 3; k++) {{
+    for (let k = 0; k < 4; k++) {{
+      candidate = stripEmbeddedDollarParams(candidate);
       const cleaned = cleanTargetUrl(candidate);
       if (cleaned) return cleaned;
       try {{
@@ -4102,28 +4047,24 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const href = String(win?.location?.href || "");
       const doc = frameEl.contentDocument;
       if (!doc || href === "about:blank") {{
-        const activelyFetching = activeRelayInflight > 0 || (Date.now() - lastRelayActivityAt) < 5000;
-        return {{ healthy: false, loading: activelyFetching, errorPage: false }};
+        return {{ healthy: false, loading: false, errorPage: false }};
       }}
       const body = doc.body;
       const title = String(doc.title || "").trim();
       const text = String(body?.innerText || "").replace(/\\s+/g, " ").trim();
       if (
         text.startsWith("upstream error:") ||
-        text.startsWith("relay gateway error") ||
         text.startsWith("Internal Service Worker Error") ||
         text.startsWith("Service Worker route required")
       ) {{
         return {{ healthy: false, loading: false, errorPage: true }};
       }}
       const hasIgRoot = Boolean(
-        doc.querySelector("main, nav, article, form, input[name='email'], input[name='username'], input[name='password'], video, img[src*='media-relay'], a[href*='/accounts/login'], [role='main'], [role='dialog']")
+        doc.querySelector("main, form, input, [id^='mount_'], svg[aria-label], video, img[src*='media-relay'], a[href*='/accounts/']")
       );
-      const hasSsrMount = Boolean(doc.getElementById("splash-screen") || doc.querySelector("[id^='mount_']"));
       const isProxied = href.includes(PREFIX);
-      const activelyFetching = activeRelayInflight > 0 || (Date.now() - lastRelayActivityAt) < 6000;
-      const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive" || activelyFetching);
-      const healthy = Boolean(isProxied && (hasIgRoot || hasSsrMount || text.length > 20 || (title.length > 1 && !activelyFetching)));
+      const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive");
+      const healthy = Boolean(isProxied && (hasIgRoot || text.length > 24 || title.length > 1));
       return {{ healthy, loading, errorPage: false }};
     }} catch (_) {{
       return {{ healthy: false, loading: false, errorPage: false }};
@@ -4151,7 +4092,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         return;
       }}
       if (snap.loading) {{
-        armHealthCheck(token, 8000);
+        armHealthCheck(token, 10000);
         return;
       }}
       recover("blank-or-unhydrated");
@@ -4192,7 +4133,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
     return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/instagram/sw.js") || String(c.scriptURL || "").includes("instagram")));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -4200,53 +4141,57 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
-
-    let settled = false;
-    let pollTimer = 0;
-    let fallbackTimer = 0;
-    let onChange = null;
-
-    await new Promise((resolve) => {{
-      const finish = () => {{
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        clearTimeout(fallbackTimer);
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }};
-
-      onChange = () => {{
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }};
-      navigator.serviceWorker.addEventListener("controllerchange", onChange);
-
-      pollTimer = setInterval(() => {{
-        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }}, 35);
-
-      if (navigator.serviceWorker.ready) {{
-        navigator.serviceWorker.ready.then((r) => {{
-          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
-          if (isOurSw(navigator.serviceWorker.controller)) finish();
-        }}).catch(() => {{}});
-      }}
-
-      fallbackTimer = setTimeout(finish, 1800);
-    }});
-
+    const pendingSw = reg?.installing || reg?.waiting;
+    if (pendingSw) {{
+      await new Promise((resolve) => {{
+        let done = false;
+        const finish = () => {{
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          navigator.serviceWorker.removeEventListener("controllerchange", finish);
+          resolve();
+        }};
+        navigator.serviceWorker.addEventListener("controllerchange", finish);
+        pendingSw.addEventListener("statechange", () => {{
+          if (pendingSw.state === "activated") {{
+            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
+            if (isOurSw(navigator.serviceWorker.controller)) finish();
+          }} else if (pendingSw.state === "redundant") {{
+            finish();
+          }}
+        }});
+        const t = setTimeout(finish, 3500);
+      }});
+    }}
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-    if (navigator.serviceWorker.controller) {{
+    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    let settled = false;
+    let timer = 0;
+    let onChange = null;
+    await new Promise((resolve) => {{
+      onChange = () => {{
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }};
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
+      timer = setTimeout(() => {{
+        if (settled) return;
+        settled = true;
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }}, CONTROL_WAIT);
+    }});
+    if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -4254,7 +4199,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+    throw new Error("Instagram Service Worker did not take control");
   }}
 
   async function recover(reason) {{
@@ -4282,7 +4227,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       recoveryTimer = 0;
       try {{
         try {{ controller?.setupMessagePort?.(); }} catch (_) {{}}
-        const target = readFrameTarget() || lastUrl || HOME;
+        const target = cleanTargetUrl(readFrameTarget() || lastUrl || HOME) || HOME;
         lastUrl = target;
         remember(target);
         frame.go(target);
@@ -4319,7 +4264,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const token = navigationToken;
       const snap = currentDocumentHealthy();
       if (snap.healthy) showHealthy();
-      else armHealthCheck(token, HEALTH_DELAY);
+      else armHealthCheck(token, 18000);
     }});
     frameEl.addEventListener("error", () => {{ recover("iframe-error"); }});
     startFrameMonitor();
@@ -4337,9 +4282,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   function navigateTo(targetUrl) {{
     if (!frame || !targetUrl) return;
     navigationToken += 1;
-    lastUrl = targetUrl;
-    remember(targetUrl);
-    frame.go(targetUrl);
+    const cleanTarget = cleanTargetUrl(targetUrl) || targetUrl;
+    lastUrl = cleanTarget;
+    remember(cleanTarget);
+    frame.go(cleanTarget);
     armHealthCheck(navigationToken, HEALTH_DELAY);
   }}
 
@@ -4351,7 +4297,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         return;
       }}
       const sub = location.pathname.startsWith("/instagram/") ? location.pathname.slice("/instagram/".length) : "";
-      const target = sub ? ("https://www.instagram.com/" + sub + (location.search || "")) : (hasAuthCookie() ? AUTH_HOME : HOME);
+      const target = sub ? ("https://www.instagram.com/" + sub + stripEmbeddedDollarParams(location.search || "")) : (hasAuthCookie() ? AUTH_HOME : HOME);
       if (frame && target !== (readFrameTarget() || lastUrl)) {{
         navigateTo(target);
       }}
@@ -4370,7 +4316,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
           const cKeys = await caches.keys();
           await Promise.all(
             cKeys
-              .filter((k) => k.startsWith("sh-ig-") || k.startsWith("scramjet-http-cache"))
+              .filter((k) => (k.startsWith("sh-ig-") && k !== STATIC_CACHE_NAME && k !== MEDIA_CACHE_NAME && k !== REWRITTEN_CACHE_NAME) || k.startsWith("scramjet-http-cache"))
               .map((k) => caches.delete(k).catch(() => {{}}))
           );
           localStorage.setItem(revKey, "{RUNTIME_REV}");
@@ -4413,14 +4359,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         created = await createController("libcurl");
         transportName = "libcurl";
       }} catch (_) {{
-        try {{
-          created = await createController("epoxy");
-          transportName = "epoxy";
-        }} catch (_) {{}}
+        created = await createController("epoxy");
+        transportName = "epoxy";
       }}
-    }}
-    if (!created || !created.instance) {{
-      throw new Error("All Scramjet transport controllers failed to initialize");
     }}
 
     controller = created.instance;
@@ -4449,6 +4390,36 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
 </script>
 </body>
 </html>"""
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        await asyncio.gather(
+            _ensure_patched_runtime("scramjet.js", _patch_scramjet_js),
+            _ensure_patched_runtime("controller.api.js", _patch_controller_api),
+            _ensure_patched_runtime("controller.sw.js", _patch_controller_sw),
+            _ensure_patched_runtime("controller.inject.js", _patch_controller_inject),
+            _serve_virtual_wasm_js(),
+            return_exceptions=True,
+        )
+        status, _, html_bytes, _ = await _ig_upstream_request(
+            method="GET",
+            url=IG_HOME,
+            headers={
+                "User-Agent": _DESKTOP_CHROME_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+            },
+            body=None,
+            timeout=12.0,
+            prefer_httpx=False,
+            fresh_curl=False,
+            impersonate_profile="chrome131",
+        )
+        if status == 200 and html_bytes:
+            await _prefetch_ig_static_from_html(html_bytes)
+    except Exception:
+        pass
 
 
 @router.get("/instagram", include_in_schema=False)
@@ -4487,41 +4458,12 @@ async def ig_deeplink(subpath: str, request: Request):
     low = clean.lower()
     if low.startswith(("runtime/", "~/sj/", "wisp")) or low in ("sw.js", "health"):
         return Response("Not found", status_code=404, media_type="text/plain; charset=utf-8")
-    qs = request.url.query
-    target = f"https://www.instagram.com/{clean}" + (f"?{qs}" if qs else "")
+    raw_qs = request.url.query
+    target = _strip_dollar_query(f"https://www.instagram.com/{clean}" + (f"?{raw_qs}" if raw_qs else ""))
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
-
-
-async def _ig_startup_prewarm_worker() -> None:
-    await asyncio.sleep(0.5)
-    try:
-        client = await _get_relay_http_client()
-        resp = await client.get(
-            "https://www.instagram.com/",
-            headers={
-                "User-Agent": _DESKTOP_CHROME_UA,
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-                "Sec-Fetch-Dest": "document",
-                "Sec-Fetch-Mode": "navigate",
-                "Sec-Fetch-Site": "none",
-                "Sec-Fetch-User": "?1",
-                "Upgrade-Insecure-Requests": "1",
-            },
-        )
-        if resp.status_code == 200 and resp.content:
-            await _prefetch_ig_static_from_html(bytes(resp.content))
-    except Exception:
-        pass
-
-
-@router.on_event("startup")
-async def _ig_prewarm_on_startup() -> None:
-    asyncio.create_task(_ig_startup_prewarm_worker())
-
 

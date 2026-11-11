@@ -45,24 +45,13 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-def _has_proxy_env() -> bool:
-    return bool(
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("http_proxy")
-        or os.getenv("all_proxy")
-    )
-
-
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (_has_proxy_env() or TVER_UPSTREAM_PROXY):
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy") or TVER_UPSTREAM_PROXY):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
@@ -129,7 +118,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261113-tver15"
+RUNTIME_REV = "20261112-tver14"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -337,6 +326,11 @@ def _patch_controller_sw(source: bytes) -> bytes:
         "e.postMessage({$controller$swrevive:{}})}},100)"
     )
     text = text.replace(old_timer, new_timer, 1)
+    old_cookie_wait = (
+        'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
+        'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
+    )
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
     return text.encode("utf-8")
 
 
@@ -557,7 +551,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'if(A.pathname==="/tver/runtime/media-relay"&&(A.searchParams.has("k")||A.searchParams.has("url")))return t.prefix.origin+A.pathname+A.search;'
         'const _mh=A.hostname.toLowerCase().replace(/\\.$/,""),_mp=String(A.pathname||"");'
         'const _isImg=(_mh==="image-cdn.tver.jp"||(_mh==="statics.tver.jp"&&/\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(_mp)));'
-        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp"))&&/\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(_mp));'
+        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(_mp)||((_mh.endsWith(".tver.jp")||_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp")||_mh.endsWith(".uliza.jp")||_mh.endsWith(".stream.ne.jp")||_mh.endsWith(".jstream.jp"))&&/\\.(mp4|m4a|m4v)(\\?|$)/i.test(_mp))));'
         'if((_isImg||_isHls)&&!o?.isModule&&o?.destination!=="script"&&o?.destination!=="worker"&&o?.destination!=="sharedworker"&&o?.destination!=="document"){'
         'return t.prefix.origin+"/tver/runtime/media-relay?k="+btoa(encodeURIComponent(A.href).split("").reverse().join("")).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"")'
         '}'
@@ -675,20 +669,6 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _uad=navigator.userAgentData,_brands=_uad.brands||[];'
         'try{Object.defineProperty(_np,"userAgentData",{get:()=>({brands:_brands,mobile:false,platform:_tvChPlat,getHighEntropyValues:async()=>({brands:_brands,mobile:false,platform:_tvChPlat,platformVersion:"15.0.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"131.0.0.0"}),toJSON:()=>({brands:_brands,mobile:false,platform:_tvChPlat})}),enumerable:true,configurable:true})}catch(_){}'
         '}}}'
-        'if(typeof document!=="undefined"){'
-        'const _oGei=typeof Document!=="undefined"&&Document.prototype?Document.prototype.getElementById:null;'
-        'const _ensureTvAd=()=>{try{const existing=_oGei?_oGei.call(document,"chee4au4yieYohs9"):null;if(!existing){const d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement)?.appendChild(d);}}catch(_){}};'
-        '_ensureTvAd();'
-        'document.addEventListener("DOMContentLoaded",_ensureTvAd,{once:true});'
-        'document.addEventListener("readystatechange",_ensureTvAd);'
-        'if(_oGei&&typeof Document!=="undefined"&&Document.prototype){try{Document.prototype.getElementById=function(id){if(id==="chee4au4yieYohs9")_ensureTvAd();return _oGei.call(this,id);};}catch(_){}}'
-        'if(typeof Node!=="undefined"&&Node.prototype){'
-        'const _isDs=(n)=>{try{if(!n||n.nodeType!==1||String(n.tagName||"").toUpperCase()!=="SCRIPT")return false;const s=String(n.getAttribute?.("src")||n.src||"");return /doubleserve\\.js/i.test(s);}catch(_){return false;}};'
-        'const _shimDs=(n)=>{try{_ensureTvAd();n.removeAttribute("src");setTimeout(()=>{try{_ensureTvAd();n.dispatchEvent(new Event("load"));}catch(_){}},0);}catch(_){}};'
-        'const _oAp=Node.prototype.appendChild,_oIb=Node.prototype.insertBefore;'
-        'if(_oAp){Node.prototype.appendChild=function(c){if(_isDs(c)){_shimDs(c);}return _oAp.call(this,c);};}'
-        'if(_oIb){Node.prototype.insertBefore=function(c,r){if(_isDs(c)){_shimDs(c);}return _oIb.call(this,c,r);};}'
-        '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
         'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)&&!/Chrome\\\\//i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
@@ -773,26 +753,12 @@ const TVER_MEDIA_CACHE = 'sh-tver-media-{RUNTIME_REV}';
 const TVER_REWRITTEN_CACHE = 'sh-tver-rewritten-{RUNTIME_REV}';
 const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
 const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
-const DOUBLESERVE_JS = '(function(){{try{{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){{var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement).appendChild(d);}}}}catch(_){{}}}})();';
-const directBlockedHosts = new Map();
-function isHostDirectBlocked(host) {{
-  const exp = directBlockedHosts.get(host);
-  if (!exp) return false;
-  if (Date.now() < exp) return true;
-  directBlockedHosts.delete(host);
-  return false;
-}}
-function markHostDirectBlocked(host) {{
-  if (host) directBlockedHosts.set(host, Date.now() + 300000);
-}}
-async function fetchDirectWithTimeout(urlStr, opts, timeoutMs) {{
+const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
+const blockedDirectHosts = new Set();
+function fetchWithFastTimeout(url, opts, ms) {{
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), timeoutMs || 2800);
-  try {{
-    return await fetch(urlStr, Object.assign({{}}, opts, {{ signal: ac.signal }}));
-  }} finally {{
-    clearTimeout(timer);
-  }}
+  const timer = setTimeout(() => ac.abort(), ms);
+  return fetch(url, Object.assign({{}}, opts, {{ signal: ac.signal }})).finally(() => clearTimeout(timer));
 }}
 const MAX_CONCURRENT_IMAGE_FETCHES = 4;
 let _activeImageFetches = 0;
@@ -843,16 +809,17 @@ function isStreamCdnTarget(target) {{
   const p = String(target.pathname || '');
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   if (h.endsWith('.api.streaks.jp')) return false;
-  const isCdnHost = (
-    h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') || h.endsWith('.akamaihd.net') ||
-    h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') || h.endsWith('.brightcove.com') ||
-    h.endsWith('.brightcove.net') || h.endsWith('.streaks.jp') || h.endsWith('.llnwd.net') ||
-    h.endsWith('.edgekey.net') || h.endsWith('.edgesuite.net') || h.endsWith('.cdngc.net') ||
-    h.endsWith('.footprint.net') || h === 'localhost' || h === '127.0.0.1'
-  );
-  if (!isCdnHost) return false;
-  if (/\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-  if (/\\/(keys?|aes128|hlscrypt|license)(\\/|$)/i.test(p)) return true;
+  if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
+  if ((
+      h.endsWith('.tver.jp') || h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') ||
+      h.endsWith('.akamaihd.net') || h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') ||
+      h.endsWith('.brightcove.com') || h.endsWith('.brightcove.net') || h.endsWith('.streaks.jp') ||
+      h.endsWith('.uliza.jp') || h.endsWith('.stream.ne.jp') || h.endsWith('.jstream.jp') ||
+      h.endsWith('.llnwd.net') || h.endsWith('.edgekey.net') || h.endsWith('.edgesuite.net') ||
+      h.endsWith('.cdngc.net') || h.endsWith('.footprint.net') || h === 'localhost' || h === '127.0.0.1'
+  ) && /\\.(mp4|m4a|m4v)(\\?|$)/i.test(p)) {{
+    return true;
+  }}
   return false;
 }}
 function isDirectMediaTarget(target) {{
@@ -927,8 +894,13 @@ function decodeRepeated(value) {{
   }}
   return out;
 }}
+function stripDollarRaw(s) {{
+  return String(s || '').replace(/([?&])\\$[A-Za-z0-9_]+=[^&#]*/g, '$1').replace(/\\?&/g, '?').replace(/[?&]+$/g, '');
+}}
 function stripScramjetParams(target) {{
   try {{
+    const cleaned = stripDollarRaw(target.href);
+    if (cleaned !== target.href) target = new URL(cleaned);
     for (const k of [...target.searchParams.keys()]) {{
       if (k.startsWith('$')) target.searchParams.delete(k);
     }}
@@ -941,7 +913,7 @@ function extractAnyVirtualUrl(url) {{
     if (u.pathname === '/tver/runtime/media-relay') {{
       const kv = u.searchParams.get('k');
       const uv = kv ? decodeMediaKey(kv) : u.searchParams.get('url');
-      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(uv)));
+      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(stripDollarRaw(uv))));
     }}
     const marker = '/tver/~/sj/';
     const i = u.pathname.indexOf(marker);
@@ -950,15 +922,15 @@ function extractAnyVirtualUrl(url) {{
     const directMatch = rawAfter.match(/(?:^|\\/)(https?(?:%3A|:)(?:%2F|\\/){{2}}.*)$/i);
     if (directMatch && directMatch[1]) {{
       try {{
-        const decoded = decodeRepeated(directMatch[1]);
-        const target = normalizeMediaTarget(new URL(decoded));
+        const decoded = stripDollarRaw(decodeRepeated(directMatch[1]));
+        let target = normalizeMediaTarget(new URL(decoded));
         if (u.search) {{
           const extra = new URLSearchParams(u.search);
           for (const [k, v] of extra.entries()) {{
             if (!k.startsWith('$') && !target.searchParams.has(k)) target.searchParams.set(k, v);
           }}
         }}
-        stripScramjetParams(target);
+        target = stripScramjetParams(target);
         target.hash = '';
         return target;
       }} catch {{}}
@@ -966,7 +938,7 @@ function extractAnyVirtualUrl(url) {{
     const tail = decodeRepeated(rawAfter);
     const bits = tail.split('/');
     for (let n = Math.min(3, bits.length); n >= 0; n--) {{
-      const candidate = decodeRepeated(bits.slice(n).join('/'));
+      const candidate = stripDollarRaw(decodeRepeated(bits.slice(n).join('/')));
       try {{
         const target = stripScramjetParams(normalizeMediaTarget(new URL(candidate)));
         target.hash = '';
@@ -976,23 +948,21 @@ function extractAnyVirtualUrl(url) {{
   }} catch {{}}
   return null;
 }}
-function checkShortCircuit(target, reqOrigin) {{
+function checkShortCircuit(target) {{
   if (!target) return null;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
-  const corsOrigin = (reqOrigin && reqOrigin !== 'null') ? reqOrigin : self.location.origin;
   if (h === 'platform-api.tver.jp' && p === '/service/api/v1/callAffinity') {{
     return new Response(EMPTY_AFFINITY_JSON, {{
       status: 200,
       headers: {{
         'Content-Type': 'application/json; charset=utf-8',
-        'Access-Control-Allow-Origin': corsOrigin,
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Credentials': 'true',
-        'Vary': 'Origin',
       }},
     }});
   }}
-  if ((h === 'tver.jp' || h === 'www.tver.jp' || h === 's.tver.jp') && p.toLowerCase().endsWith('/doubleserve.js')) {{
+  if (((h === 'tver.jp' || h === 'www.tver.jp') && p === '/doubleserve.js') || (h === 's.tver.jp' && p === '/ads/doubleserve.js')) {{
     return new Response(DOUBLESERVE_JS, {{
       status: 200,
       headers: {{
@@ -1009,9 +979,8 @@ function checkShortCircuit(target, reqOrigin) {{
       status: 200,
       headers: {{
         'Content-Type': 'application/xml; charset=utf-8',
-        'Access-Control-Allow-Origin': corsOrigin,
+        'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Credentials': 'true',
-        'Vary': 'Origin',
       }},
     }});
   }}
@@ -1044,7 +1013,6 @@ function checkShortCircuit(target, reqOrigin) {{
     h === 'www.google-analytics.com' || h === 'region1.google-analytics.com' ||
     h === 'analytics.google.com' || h === 'stats.g.doubleclick.net' ||
     h.endsWith('.karte.io') || h.endsWith('.braze.com') ||
-    h === 'firebaseremoteconfig.googleapis.com' || h.endsWith('.firebaseremoteconfig.googleapis.com') ||
     h === 'js-sec.indexww.com' || h === 'c.amazon-adsystem.com' || h.endsWith('.amazon-adsystem.com')
   ) {{
     const isJs = /\\.js(\\?|$)/i.test(p) || p.includes('/js');
@@ -1140,24 +1108,22 @@ self.addEventListener('fetch', event => {{
     }}
     const anyTarget = extractAnyVirtualUrl(event.request.url);
     if (anyTarget) {{
-      const sc = checkShortCircuit(anyTarget, event.request.headers.get('origin'));
+      const sc = checkShortCircuit(anyTarget);
       if (sc) {{
         event.respondWith(sc);
         return;
       }}
     }}
     if (event.request.method === 'GET' || event.request.method === 'HEAD') {{
-      const isRawRelayPath = reqUrlObj.pathname === '/tver/runtime/media-relay' && Boolean(anyTarget);
-      const isWrappedRelayPath = !isRawRelayPath && Boolean(anyTarget) && decodeRepeated(reqUrlObj.pathname).includes('/tver/runtime/media-relay');
-      const isMediaRelayTarget = isRawRelayPath || isWrappedRelayPath;
-      const asOut = (r, m) => (isRawRelayPath && m === 'GET' && ![101, 204, 205, 304].includes(r.status))
+      const isAlreadyRelay = reqUrlObj.pathname === '/tver/runtime/media-relay' && Boolean(anyTarget);
+      const asOut = (r, m) => (isAlreadyRelay && m === 'GET' && ![101, 204, 205, 304].includes(r.status))
         ? r
         : new Response((m === 'HEAD' || [101, 204, 205, 304].includes(r.status)) ? null : r.body, {{
             status: r.status,
             statusText: r.statusText,
             headers: r.headers,
           }});
-      if (anyTarget && (isMediaRelayTarget || isDirectMediaTarget(anyTarget)) && event.request.destination !== 'script' && event.request.destination !== 'worker' && event.request.destination !== 'sharedworker' && event.request.destination !== 'style' && !event.request.url.includes('%24module=module') && !event.request.url.includes('$module=module')) {{
+      if (anyTarget && (isAlreadyRelay || isDirectMediaTarget(anyTarget)) && event.request.destination !== 'script' && event.request.destination !== 'worker' && event.request.destination !== 'sharedworker' && event.request.destination !== 'style' && !event.request.url.includes('%24module=module') && !event.request.url.includes('$module=module')) {{
         const forNative = reqUrlObj.searchParams.get('native') === '1' || event.request.destination === 'video' || event.request.destination === 'audio';
         const targetHost = String(anyTarget.hostname || '').toLowerCase().replace(/\\.$/, '');
         const isTverDomain = targetHost === 'tver.jp' || targetHost.endsWith('.tver.jp');
@@ -1183,40 +1149,49 @@ self.addEventListener('fetch', event => {{
               if (hit) return asOut(hit, method);
             }} catch {{}}
           }}
-          if (!isTverDomain && !canCache && !isHostDirectBlocked(targetHost)) {{
+          if (!isTverDomain && !canCache && !blockedDirectHosts.has(targetHost)) {{
             try {{
-              const cdnResp = await fetchDirectWithTimeout(anyTarget.href, {{
+              const cdnResp = await fetchWithFastTimeout(anyTarget.href, {{
                 method,
                 headers: fwdHeaders,
                 mode: 'cors',
                 credentials: 'omit',
-              }}, 2800);
+              }}, 2500);
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get('content-type') || '').toLowerCase();
-                if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
+                if (ct.includes('text/html') || ct.includes('application/xhtml')) {{
+                  blockedDirectHosts.add(targetHost);
+                }} else if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
                   const rawTxt = await cdnResp.text();
-                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, forNative);
-                  return new Response(rewritten, {{
-                    status: 200,
-                    headers: {{
-                      'Content-Type': 'application/vnd.apple.mpegurl',
-                      'Access-Control-Allow-Origin': '*',
-                      'Cross-Origin-Resource-Policy': 'cross-origin',
-                      'Cache-Control': 'no-cache',
-                    }},
+                  if (!rawTxt.trimStart().startsWith('#EXTM3U')) {{
+                    blockedDirectHosts.add(targetHost);
+                  }} else {{
+                    const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, forNative);
+                    return new Response(rewritten, {{
+                      status: 200,
+                      headers: {{
+                        'Content-Type': 'application/vnd.apple.mpegurl',
+                        'Access-Control-Allow-Origin': '*',
+                        'Cross-Origin-Resource-Policy': 'cross-origin',
+                        'Cache-Control': 'no-cache',
+                      }},
+                    }});
+                  }}
+                }} else {{
+                  const hCopy = new Headers(cdnResp.headers);
+                  hCopy.set('Access-Control-Allow-Origin', '*');
+                  hCopy.set('Cross-Origin-Resource-Policy', 'cross-origin');
+                  return new Response(method === 'HEAD' ? null : cdnResp.body, {{
+                    status: cdnResp.status,
+                    statusText: cdnResp.statusText,
+                    headers: hCopy,
                   }});
                 }}
-                const hCopy = new Headers(cdnResp.headers);
-                hCopy.set('Access-Control-Allow-Origin', '*');
-                hCopy.set('Cross-Origin-Resource-Policy', 'cross-origin');
-                return new Response(method === 'HEAD' ? null : cdnResp.body, {{
-                  status: cdnResp.status,
-                  statusText: cdnResp.statusText,
-                  headers: hCopy,
-                }});
+              }} else {{
+                blockedDirectHosts.add(targetHost);
               }}
             }} catch {{
-              markHostDirectBlocked(targetHost);
+              blockedDirectHosts.add(targetHost);
             }}
           }}
           const fetchRelayAsset = async () => {{
@@ -1382,7 +1357,7 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
     async with _RELAY_HTTP_CLIENT_LOCK:
         if _RELAY_HTTP_CLIENT is None or _RELAY_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
-            timeout = httpx.Timeout(connect=4.5, read=22.0, write=10.0, pool=8.0)
+            timeout = httpx.Timeout(connect=6.0, read=22.0, write=10.0, pool=8.0)
             if TVER_UPSTREAM_PROXY:
                 _RELAY_HTTP_CLIENT = httpx.AsyncClient(
                     proxy=TVER_UPSTREAM_PROXY,
@@ -1390,8 +1365,9 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
                     limits=limits,
                     timeout=timeout,
                 )
-            elif not _has_proxy_env():
+            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=1,
                     limits=limits,
                 )
@@ -1417,7 +1393,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
-            timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
+            timeout = httpx.Timeout(connect=8.0, read=45.0, write=10.0, pool=10.0)
             if TVER_UPSTREAM_PROXY:
                 _MEDIA_HTTP_CLIENT = httpx.AsyncClient(
                     proxy=TVER_UPSTREAM_PROXY,
@@ -1425,8 +1401,9 @@ async def _get_media_http_client() -> httpx.AsyncClient:
                     limits=limits,
                     timeout=timeout,
                 )
-            elif not _has_proxy_env():
+            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1500,7 +1477,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
         _PUBLIC_HOST_CACHE[key] = now
         return
-    if not _has_proxy_env():
+    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.run_in_executor(
@@ -1544,6 +1521,7 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
                 or path.startswith("/streaksplayer/")
                 or path.startswith("/player/")
                 or path in (
+                    "/config/streaks_info_v2.json",
                     "/player/streaks_info_v2.json",
                     "/player/tver_thv_config2.json",
                     "/app/config/web.json",
@@ -1724,7 +1702,9 @@ def _rewrite_hls_manifest(
             return raw_ref
         if for_native_player:
             return f"{origin_prefix}/tver/runtime/media-relay?native=1&via=server&k={_encode_media_key(abs_url)}"
-        return f"{origin_prefix}/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
+        if origin_prefix:
+            return f"{origin_prefix}/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
+        return abs_url
 
     text = re.sub(
         r'URI="([^"]+)"',
@@ -1741,20 +1721,26 @@ def _rewrite_hls_manifest(
     return "\n".join(out_lines).encode("utf-8")
 
 
+_EMBEDDED_DOLLAR_RE = re.compile(r"([?&])\$[A-Za-z0-9_]+=[^&#]*")
+
+
 def _strip_dollar_query(raw_url: str) -> str:
-    if "?" not in raw_url:
+    if "$" not in raw_url:
         return raw_url
+    cleaned = _EMBEDDED_DOLLAR_RE.sub(r"\1", raw_url).replace("?&", "?").rstrip("?&")
+    if "?" not in cleaned:
+        return cleaned
     try:
-        p = urlparse(raw_url)
+        p = urlparse(cleaned)
         if not p.query:
-            return raw_url
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
         clean_parts = [
             part for part in p.query.split("&")
             if part and not unquote(part.split("=", 1)[0]).startswith("$")
         ]
         return urlunparse((p.scheme, p.netloc, p.path, p.params, "&".join(clean_parts), ""))
     except Exception:
-        return raw_url
+        return cleaned
 
 
 async def _serve_tver_media_url(
@@ -1984,9 +1970,10 @@ async def _serve_virtual_wasm_js() -> Response:
 _EMPTY_VAST_BYTES = b'<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>'
 _TAG_STUB_BYTES = b"window.dataLayer=window.dataLayer||[];window.googletag=window.googletag||{cmd:[]};"
 _DOUBLESERVE_BYTES = (
-    b'(function(){try{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){'
-    b'var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";'
-    b'(document.body||document.documentElement).appendChild(d);}}catch(_){}})();'
+    b'(()=>{try{var d=document,add=function(){if(!d.getElementById("chee4au4yieYohs9")){'
+    b'var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";'
+    b'(d.body||d.documentElement).appendChild(e);}};add();'
+    b'if(!d.body)d.addEventListener("DOMContentLoaded",add,{once:true});}catch(_){}})();'
 )
 _EMPTY_AFFINITY_BYTES = (
     b'{"api_version":"","code":0,"message":"","type":"hash","result":{"exists":false,"customParams":""}}'
@@ -2025,7 +2012,6 @@ _SHORT_CIRCUIT_HOSTS = frozenset(
         "stats.g.doubleclick.net",
         "js-sec.indexww.com",
         "c.amazon-adsystem.com",
-        "firebaseremoteconfig.googleapis.com",
     }
 )
 
@@ -2035,7 +2021,9 @@ def _check_server_short_circuit(host: str, raw_path: str) -> tuple[int, str, byt
     pl = p.lower()
     if host == "platform-api.tver.jp" and p == "/service/api/v1/callAffinity":
         return (200, "application/json; charset=utf-8", _EMPTY_AFFINITY_BYTES)
-    if host in ("tver.jp", "www.tver.jp", "s.tver.jp") and pl.endswith("/doubleserve.js"):
+    if (host in ("tver.jp", "www.tver.jp") and pl == "/doubleserve.js") or (
+        host == "s.tver.jp" and pl == "/ads/doubleserve.js"
+    ):
         return (200, "application/javascript; charset=utf-8", _DOUBLESERVE_BYTES)
     if (host == "adsvr.tver.jp" and pl.startswith("/ad-server")) or (
         host in ("pubads.g.doubleclick.net", "securepubads.g.doubleclick.net")
@@ -2097,7 +2085,7 @@ async def _prefetch_single_static_asset(asset_url: str) -> bytes:
     if cached and (now - cached[0]) < ttl:
         return cached[4]
     if _PREFETCH_ASSET_SEMAPHORE is None:
-        _PREFETCH_ASSET_SEMAPHORE = asyncio.Semaphore(6)
+        _PREFETCH_ASSET_SEMAPHORE = asyncio.Semaphore(14)
     async with _PREFETCH_ASSET_SEMAPHORE:
         cached = _STATIC_ASSET_CACHE.get(asset_url)
         if cached and (time.time() - cached[0]) < ttl:
@@ -2330,14 +2318,13 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
         "https://statics.tver.jp/app/config/web.json",
         "https://player.tver.jp/player/streaks_info_v2.json",
         "https://player.tver.jp/player/tver_thv_config2.json",
-        "https://tver.jp/streaksplayer/vod/streaksplayer.min.js",
         "https://imasdk.googleapis.com/js/sdkloader/ima3.js",
     ):
         if extra_u not in seen:
             seen.add(extra_u)
             urls.append(extra_u)
     if urls:
-        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:20]), return_exceptions=True)
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:48]), return_exceptions=True)
     dyn_urls: list[str] = []
     for wp_u in webpack_urls:
         wp_cached = _STATIC_ASSET_CACHE.get(wp_u)
@@ -2361,7 +2348,7 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
             except Exception:
                 pass
     if dyn_urls:
-        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:16]), return_exceptions=True)
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:48]), return_exceptions=True)
 
 
 async def _prewarm_tver_target(target_url: str) -> None:
@@ -2524,62 +2511,14 @@ async def tver_sj_direct_fallback(rest: str, request: Request):
         sc = _check_server_short_circuit(host, parsed.path or "")
         if sc is not None:
             sc_status, sc_ct, sc_body = sc
-            req_origin = (request.headers.get("origin") or "").strip()
-            sc_hdrs = (
-                {
-                    "Access-Control-Allow-Origin": req_origin,
-                    "Access-Control-Allow-Credentials": "true",
-                    "Vary": "Origin",
-                }
-                if req_origin and req_origin != "null"
-                else {"Access-Control-Allow-Origin": "*"}
-            )
             return Response(
                 b"" if request.method == "HEAD" else sc_body,
                 status_code=sc_status,
                 media_type=sc_ct,
-                headers=sc_hdrs,
+                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
             )
-        is_cdn_key_or_media = (
-            host not in ("playback.api.streaks.jp", "ssai.api.streaks.jp")
-            and host.endswith(
-                (
-                    ".streaks.jp",
-                    ".boltdns.net",
-                    ".brightcove.com",
-                    ".brightcove.net",
-                    ".cloudfront.net",
-                    ".akamaized.net",
-                    ".akamaihd.net",
-                    ".fastly.net",
-                )
-            )
-            and ("/key" in path or "/license/" in path)
-        )
-        if (
-            host == "image-cdn.tver.jp"
-            or is_cdn_key_or_media
-            or path.endswith(
-                (
-                    ".m3u8",
-                    ".ts",
-                    ".m4s",
-                    ".mp4",
-                    ".m4a",
-                    ".aac",
-                    ".cmfv",
-                    ".cmfa",
-                    ".vtt",
-                    ".webvtt",
-                    ".key",
-                    ".jpg",
-                    ".jpeg",
-                    ".png",
-                    ".webp",
-                    ".gif",
-                    ".svg",
-                )
-            )
+        if host == "image-cdn.tver.jp" or path.endswith(
+            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
         ):
             return await _serve_tver_media_url(virtual_url, request)
     except Exception:
@@ -2650,88 +2589,6 @@ def _is_leaked_proxy_url(ref_val: str) -> bool:
     )
 
 
-_WORKING_STREAKS_PEER: str = ""
-_FAILED_STREAKS_PEERS: dict[str, float] = {}
-_STREAKS_PEER_NEG_TTL = 300.0
-
-
-async def _try_streaks_peer_relay(
-    raw_frame: bytes, request: Request, client: httpx.AsyncClient
-) -> tuple[int, str, list[tuple[str, str]], bytes] | None:
-    """When a non-JP deployment gets 403 P01002 from playback.api.streaks.jp,
-    automatically forward the single relay hop to any active JP peer in the SchoolHub cluster."""
-    global _WORKING_STREAKS_PEER
-    if request.headers.get("x-sh-tver-peer-hop") == "1":
-        return None
-    try:
-        import activity_persistence_proxy as _ap
-
-        self_urls = set(getattr(_ap, "_SELF_URLS", set()) or set())
-        suspended = set(getattr(_ap, "_SUSPENDED_PEERS", set()) or set())
-        known = set(getattr(_ap, "_KNOWN_PEERS", set()) or set())
-    except Exception:
-        return None
-
-    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or "").split(",")[0].strip().lower()
-    now = time.time()
-    candidates: list[str] = []
-    if _WORKING_STREAKS_PEER:
-        candidates.append(_WORKING_STREAKS_PEER)
-    ordered_known = sorted(
-        known,
-        key=lambda u: (0 if (".jp" in u or ".cloud.run" in u) else 1, u),
-    )
-    for p_url in ordered_known:
-        base = (p_url or "").strip().rstrip("/")
-        if not base or base in suspended or base in self_urls or base in candidates:
-            continue
-        p_host = (urlparse(base).netloc or "").lower()
-        if not p_host or (req_host and p_host == req_host):
-            continue
-        fail_ts = _FAILED_STREAKS_PEERS.get(base, 0.0)
-        if fail_ts and (now - fail_ts) < _STREAKS_PEER_NEG_TTL:
-            continue
-        candidates.append(base)
-
-    for peer_base in candidates[:4]:
-        try:
-            peer_resp = await client.post(
-                f"{peer_base}/tver/runtime/http-relay",
-                content=raw_frame,
-                headers={
-                    "Content-Type": "application/octet-stream",
-                    "x-sh-tver-peer-hop": "1",
-                },
-                timeout=3.5,
-            )
-            if peer_resp.status_code == 200 and len(peer_resp.content) >= 4:
-                p_raw = bytes(peer_resp.content)
-                p_mlen = struct.unpack(">I", p_raw[:4])[0]
-                if len(p_raw) >= 4 + p_mlen:
-                    p_meta = json.loads(p_raw[4 : 4 + p_mlen].decode("utf-8"))
-                    p_status = int(p_meta.get("status") or 502)
-                    if p_status < 400:
-                        _WORKING_STREAKS_PEER = peer_base
-                        _FAILED_STREAKS_PEERS.pop(peer_base, None)
-                        p_hdrs = [
-                            (str(h[0]), str(h[1]))
-                            for h in (p_meta.get("headers") or [])
-                            if isinstance(h, (list, tuple)) and len(h) >= 2
-                        ]
-                        return (
-                            p_status,
-                            str(p_meta.get("statusText") or "OK"),
-                            p_hdrs,
-                            p_raw[4 + p_mlen :],
-                        )
-        except Exception:
-            pass
-        if _WORKING_STREAKS_PEER == peer_base:
-            _WORKING_STREAKS_PEER = ""
-        _FAILED_STREAKS_PEERS[peer_base] = time.time()
-    return None
-
-
 @router.post("/tver/runtime/http-relay", include_in_schema=False)
 async def tver_http_relay(request: Request):
     global _CURL_DISABLED_UNTIL
@@ -2779,22 +2636,13 @@ async def tver_http_relay(request: Request):
     sc = _check_server_short_circuit(host, parsed.path or "")
     if sc is not None:
         sc_status, sc_ct, sc_body = sc
-        sc_origin = "https://tver.jp"
-        sc_items = raw_headers if isinstance(raw_headers, list) else (list(raw_headers.items()) if isinstance(raw_headers, dict) else [])
-        for it in sc_items:
-            if isinstance(it, (list, tuple)) and len(it) >= 2 and str(it[0]).strip().lower() == "origin":
-                ov = str(it[1]).strip()
-                if ov and ov != "null":
-                    sc_origin = ov
-                break
         return _pack_relay_response(
             sc_status,
             "OK",
             [
                 ["content-type", sc_ct],
-                ["access-control-allow-origin", sc_origin],
+                ["access-control-allow-origin", "*"],
                 ["access-control-allow-credentials", "true"],
-                ["vary", "Origin"],
             ],
             b"" if method == "HEAD" else sc_body,
         )
@@ -2990,11 +2838,7 @@ async def tver_http_relay(request: Request):
                 ch_plat = '"macOS"'
             else:
                 ch_plat = '"Windows"'
-    if host == "contents-api.tver.jp" or host.endswith((".tver.jp", ".streaks.jp")):
-        if not any(k.lower() == "x-tver-platform-type" for k in header_dict):
-            header_dict["x-tver-platform-type"] = "web"
-        if not any(k.lower() == "x-tver-platform-version" for k in header_dict):
-            header_dict["x-tver-platform-version"] = "5.0.0"
+            header_dict["sec-ch-ua-platform"] = ch_plat
 
     try:
         client = await _get_relay_http_client()
@@ -3044,36 +2888,32 @@ async def tver_http_relay(request: Request):
                 raise httpx_err
 
         if (
-            host.endswith(".api.streaks.jp")
+            host == "playback.api.streaks.jp"
             and status == 403
             and b"P01002" in resp_body
+            and TVER_STREAKS_RELAY_URL
         ):
-            if TVER_STREAKS_RELAY_URL:
-                try:
-                    sep = "&" if "?" in TVER_STREAKS_RELAY_URL else "?"
-                    relay_target = f"{TVER_STREAKS_RELAY_URL}{sep}url={quote(url, safe='')}"
-                    fwd_hdrs = {
-                        k: v
-                        for k, v in header_dict.items()
-                        if k.lower() in ("x-streaks-api-key", "accept", "user-agent", "origin", "referer")
-                    }
-                    r_up = await client.request(
-                        method=method,
-                        url=relay_target,
-                        headers=fwd_hdrs,
-                        content=req_body if req_body else None,
-                    )
-                    if r_up.status_code < 400:
-                        status = int(r_up.status_code)
-                        status_text = str(r_up.reason_phrase or "OK")
-                        resp_body = bytes(r_up.content or b"")
-                        raw_multi = list(r_up.headers.multi_items())
-                except Exception:
-                    pass
-            if status == 403 and b"P01002" in resp_body:
-                peer_hit = await _try_streaks_peer_relay(raw, request, client)
-                if peer_hit is not None:
-                    status, status_text, raw_multi, resp_body = peer_hit
+            try:
+                sep = "&" if "?" in TVER_STREAKS_RELAY_URL else "?"
+                relay_target = f"{TVER_STREAKS_RELAY_URL}{sep}url={quote(url, safe='')}"
+                fwd_hdrs = {
+                    k: v
+                    for k, v in header_dict.items()
+                    if k.lower() in ("x-streaks-api-key", "accept", "user-agent", "origin", "referer")
+                }
+                r_up = await client.request(
+                    method=method,
+                    url=relay_target,
+                    headers=fwd_hdrs,
+                    content=req_body if req_body else None,
+                )
+                if r_up.status_code < 400:
+                    status = int(r_up.status_code)
+                    status_text = str(r_up.reason_phrase or "OK")
+                    resp_body = bytes(r_up.content or b"")
+                    raw_multi = list(r_up.headers.multi_items())
+            except Exception:
+                pass
     except Exception as exc:
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
         return _pack_relay_response(
@@ -3316,6 +3156,8 @@ def _shell_html(initial_target: str) -> str:
 <link rel="preload" href="/tver/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/tver/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
+<link rel="preload" href="/tver/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <script>
 if("serviceWorker"in navigator){{window.__shSwRegP=navigator.serviceWorker.register("/tver/sw.js?v={RUNTIME_REV}",{{scope:"/tver/",updateViaCache:"none",type:"classic"}}).catch(function(){{return null;}});}}
 </script>
@@ -3357,35 +3199,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   const REWRITTEN_CACHE_NAME = "sh-tver-rewritten-{RUNTIME_REV}";
   const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
   const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
-  const DOUBLESERVE_JS = '(function(){{try{{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){{var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement).appendChild(d);}}}}catch(_){{}}}})();';
-  const directBlockedHosts = new Map();
-  function isHostDirectBlocked(host) {{
-    const exp = directBlockedHosts.get(host);
-    if (!exp) return false;
-    if (Date.now() < exp) return true;
-    directBlockedHosts.delete(host);
-    return false;
-  }}
-  function markHostDirectBlocked(host) {{
-    if (host) directBlockedHosts.set(host, Date.now() + 300000);
-  }}
-  async function fetchDirectWithTimeout(urlStr, opts, timeoutMs, extSignal) {{
-    const ac = new AbortController();
-    const onExtAbort = () => ac.abort();
-    if (extSignal) {{
-      if (extSignal.aborted) throw new DOMException("Aborted", "AbortError");
-      extSignal.addEventListener("abort", onExtAbort, {{ once: true }});
-    }}
-    const timer = setTimeout(() => ac.abort(), timeoutMs || 2800);
-    try {{
-      return await fetch(urlStr, Object.assign({{}}, opts, {{ signal: ac.signal }}));
-    }} finally {{
-      clearTimeout(timer);
-      if (extSignal) {{
-        try {{ extSignal.removeEventListener("abort", onExtAbort); }} catch (_) {{}}
-      }}
-    }}
-  }}
   const SESSION_KEY = "schoolhub.tver.target.v1";
   const SW_GUARD = "schoolhub.tver.sw-reload.v1";
   const MAX_RECOVERY = 3;
@@ -3471,7 +3284,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   function cleanTargetUrl(rawUrl) {{
     if (!rawUrl || typeof rawUrl !== "string") return "";
     try {{
-      const u = new URL(rawUrl);
+      const preCleaned = rawUrl.replace(/([?&])\\$[A-Za-z0-9_]+=[^&#]*/g, "$1").replace(/\\?&/g, "?").replace(/[?&]+$/g, "");
+      const u = new URL(preCleaned);
       if (u.protocol !== "http:" && u.protocol !== "https:") return "";
       for (const k of [...u.searchParams.keys()]) {{
         if (k.startsWith("$")) u.searchParams.delete(k);
@@ -3516,16 +3330,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     const p = String(target.pathname || "");
     if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
     if (h.endsWith(".api.streaks.jp")) return false;
-    const isCdnHost = (
-      h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") || h.endsWith(".akamaihd.net") ||
-      h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") || h.endsWith(".brightcove.com") ||
-      h.endsWith(".brightcove.net") || h.endsWith(".streaks.jp") || h.endsWith(".llnwd.net") ||
-      h.endsWith(".edgekey.net") || h.endsWith(".edgesuite.net") || h.endsWith(".cdngc.net") ||
-      h.endsWith(".footprint.net") || h === "localhost" || h === "127.0.0.1"
-    );
-    if (!isCdnHost) return false;
-    if (/\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-    if (/\\/(keys?|aes128|hlscrypt|license)(\\/|$)/i.test(p)) return true;
+    if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
+    if ((
+        h.endsWith(".tver.jp") || h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") ||
+        h.endsWith(".akamaihd.net") || h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") ||
+        h.endsWith(".brightcove.com") || h.endsWith(".brightcove.net") || h.endsWith(".streaks.jp") ||
+        h.endsWith(".uliza.jp") || h.endsWith(".stream.ne.jp") || h.endsWith(".jstream.jp") ||
+        h.endsWith(".llnwd.net") || h.endsWith(".edgekey.net") || h.endsWith(".edgesuite.net") ||
+        h.endsWith(".cdngc.net") || h.endsWith(".footprint.net") || h === "localhost" || h === "127.0.0.1"
+    ) && /\\.(mp4|m4a|m4v)(\\?|$)/i.test(p)) {{
+      return true;
+    }}
     return false;
   }}
 
@@ -3606,9 +3421,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         return true;
       }}
       if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp" || h === "player.tver.jp" || h === "statics.tver.jp") &&
-          p !== "/setting.js" && p !== "/setting.json" && p !== "/doubleserve.js" && p !== "/ads/doubleserve.js" && !p.startsWith("/api/") &&
+          p !== "/setting.js" && p !== "/setting.json" && !p.startsWith("/api/") &&
           (p.startsWith("/_next/static/") || p.startsWith("/streaksplayer/") || p.startsWith("/player/") ||
-           p === "/player/tver_thv_config2.json" ||
+           p === "/config/streaks_info_v2.json" || p === "/player/tver_thv_config2.json" ||
            p === "/app/config/web.json" || p === "/data/string/s.json" ||
            (h === "s.tver.jp" && p.endsWith("/psdkplf.html")) ||
            /\\.(js|css|woff2|woff|ttf|otf|svg|png|jpg|jpeg|webp|ico)$/i.test(p))) {{
@@ -3618,30 +3433,50 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     return false;
   }}
 
-  function checkTransportShortCircuit(urlStr, hdrList) {{
+  const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
+  const blockedDirectHosts = new Set();
+
+  function fetchDirectWithTimeout(url, init, timeoutMs, outerSignal) {{
+    const ac = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {{
+      timedOut = true;
+      ac.abort();
+    }}, timeoutMs);
+    const onOuterAbort = () => ac.abort();
+    if (outerSignal) {{
+      if (outerSignal.aborted) {{
+        clearTimeout(timer);
+        ac.abort();
+      }} else {{
+        outerSignal.addEventListener("abort", onOuterAbort, {{ once: true }});
+      }}
+    }}
+    return fetch(url, Object.assign({{}}, init, {{ signal: ac.signal }})).finally(() => {{
+      clearTimeout(timer);
+      if (outerSignal) outerSignal.removeEventListener("abort", onOuterAbort);
+      if (timedOut) ac._timedOut = true;
+    }});
+  }}
+
+  function checkTransportShortCircuit(urlStr) {{
     try {{
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      let corsOrigin = "https://tver.jp";
-      if (Array.isArray(hdrList)) {{
-        const oe = hdrList.find(([k]) => String(k || "").toLowerCase() === "origin");
-        if (oe && oe[1] && oe[1] !== "null") corsOrigin = String(oe[1]);
-      }}
       if (h === "platform-api.tver.jp" && p === "/service/api/v1/callAffinity") {{
         return {{
           body: new TextEncoder().encode(EMPTY_AFFINITY_JSON).buffer,
           headers: [
             ["content-type", "application/json; charset=utf-8"],
-            ["access-control-allow-origin", corsOrigin],
+            ["access-control-allow-origin", "*"],
             ["access-control-allow-credentials", "true"],
-            ["vary", "Origin"],
           ],
           status: 200,
           statusText: "OK",
         }};
       }}
-      if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp") && p.toLowerCase().endsWith("/doubleserve.js")) {{
+      if (((h === "tver.jp" || h === "www.tver.jp") && p === "/doubleserve.js") || (h === "s.tver.jp" && p === "/ads/doubleserve.js")) {{
         return {{
           body: new TextEncoder().encode(DOUBLESERVE_JS).buffer,
           headers: [
@@ -3660,9 +3495,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
           body: new TextEncoder().encode(EMPTY_VAST_XML).buffer,
           headers: [
             ["content-type", "application/xml; charset=utf-8"],
-            ["access-control-allow-origin", corsOrigin],
+            ["access-control-allow-origin", "*"],
             ["access-control-allow-credentials", "true"],
-            ["vary", "Origin"],
           ],
           status: 200,
           statusText: "OK",
@@ -3814,10 +3648,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       const unwrapped = unwrapMediaTarget(rawUrlStr);
       const urlStr = unwrapped ? unwrapped.href : rawUrlStr;
 
-      const list = normalizeHeadersList(headers);
-      const sc = checkTransportShortCircuit(urlStr, list);
+      const sc = checkTransportShortCircuit(urlStr);
       if (sc) return sc;
 
+      const list = normalizeHeadersList(headers);
       const rangeEntry = list.find(([k]) => k.toLowerCase() === "range");
 
       if ((m === "GET" || m === "HEAD") && unwrapped && (wasMediaRelay || isDirectMediaTarget(unwrapped))) {{
@@ -3827,7 +3661,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const canCache = m === "GET" && !rangeEntry && isCacheableImageTarget(unwrapped);
         const isM3u8Path = /\\.m3u8(\\?|$)/i.test(unwrapped.pathname || "");
         try {{
-          if (!isTverHost && !canCache && !isHostDirectBlocked(uHost)) {{
+          if (!isTverHost && !canCache && !blockedDirectHosts.has(uHost)) {{
             try {{
               const cdnHdrs = {{}};
               if (rangeEntry && rangeEntry[1] && !isM3u8Path) cdnHdrs["Range"] = rangeEntry[1];
@@ -3836,33 +3670,42 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                 headers: cdnHdrs,
                 mode: "cors",
                 credentials: "omit",
-              }}, 2800, signal);
+              }}, 2500, signal);
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
-                if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
+                if (ct.includes("text/html") || ct.includes("application/xhtml")) {{
+                  blockedDirectHosts.add(uHost);
+                }} else if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
                   const rawTxt = await cdnResp.text();
-                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
+                  if (!rawTxt.trimStart().startsWith("#EXTM3U")) {{
+                    blockedDirectHosts.add(uHost);
+                  }} else {{
+                    const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
+                    return {{
+                      body: new TextEncoder().encode(rewritten).buffer,
+                      headers: [
+                        ["content-type", "application/vnd.apple.mpegurl"],
+                        ["access-control-allow-origin", "*"],
+                        ["cross-origin-resource-policy", "cross-origin"],
+                        ["cache-control", "no-cache"],
+                      ],
+                      status: 200,
+                      statusText: "OK",
+                    }};
+                  }}
+                }} else {{
                   return {{
-                    body: new TextEncoder().encode(rewritten).buffer,
-                    headers: [
-                      ["content-type", "application/vnd.apple.mpegurl"],
-                      ["access-control-allow-origin", "*"],
-                      ["cross-origin-resource-policy", "cross-origin"],
-                      ["cache-control", "no-cache"],
-                    ],
-                    status: 200,
-                    statusText: "OK",
+                    body: m === "HEAD" ? new ArrayBuffer(0) : await cdnResp.arrayBuffer(),
+                    headers: [...cdnResp.headers.entries()],
+                    status: cdnResp.status,
+                    statusText: cdnResp.statusText || "OK",
                   }};
                 }}
-                return {{
-                  body: m === "HEAD" ? new ArrayBuffer(0) : await cdnResp.arrayBuffer(),
-                  headers: [...cdnResp.headers.entries()],
-                  status: cdnResp.status,
-                  statusText: cdnResp.statusText || "OK",
-                }};
+              }} else {{
+                blockedDirectHosts.add(uHost);
               }}
             }} catch (_) {{
-              if (!signal?.aborted) markHostDirectBlocked(uHost);
+              if (!signal?.aborted) blockedDirectHosts.add(uHost);
             }}
           }}
           if (canCache && typeof caches !== "undefined") {{
@@ -3909,7 +3752,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const apiHost = (() => {{
           try {{ return new URL(urlStr).hostname.toLowerCase().replace(/\\.$/, ""); }} catch (_) {{ return ""; }}
         }})();
-        if (apiHost && !isHostDirectBlocked(apiHost)) {{
+        if (apiHost && !blockedDirectHosts.has(apiHost)) {{
           try {{
             const isSsai = apiHost === "ssai.api.streaks.jp";
             const corsHeaders = {{}};
@@ -3925,29 +3768,28 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               }}
             }}
             const directBody = (m === "GET" || m === "HEAD") ? undefined : await serializeRequestBody(body);
-            const apiResp = await fetchDirectWithTimeout(
-              urlStr,
-              {{
-                method: m,
-                headers: corsHeaders,
-                body: directBody && directBody.byteLength > 0 ? directBody : undefined,
-                mode: "cors",
-                credentials: "omit",
-                cache: "no-store",
-              }},
-              2800,
-              signal
-            );
-            if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
+            const apiResp = await fetchDirectWithTimeout(urlStr, {{
+              method: m,
+              headers: corsHeaders,
+              body: directBody && directBody.byteLength > 0 ? directBody : undefined,
+              mode: "cors",
+              credentials: "omit",
+              cache: "no-store",
+            }}, 3000, signal);
+            const apiCt = String(apiResp?.headers?.get("content-type") || "").toLowerCase();
+            if (apiCt.includes("text/html") || apiCt.includes("application/xhtml")) {{
+              blockedDirectHosts.add(apiHost);
+            }} else if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
               let outBuf = m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer();
-              if (apiHost === "playback.api.streaks.jp" && m === "GET" && outBuf.byteLength > 0) {{
-                try {{
-                  const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
-                  if (parsedPb && typeof parsedPb === "object" && "ads" in parsedPb) {{
-                    delete parsedPb.ads;
-                    outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
-                  }}
-                }} catch (_) {{}}
+              if (m === "GET" && outBuf.byteLength > 0) {{
+                const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
+                if (!parsedPb || typeof parsedPb !== "object") {{
+                  throw new Error("invalid streaks json");
+                }}
+                if (apiHost === "playback.api.streaks.jp" && "ads" in parsedPb) {{
+                  delete parsedPb.ads;
+                  outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
+                }}
               }}
               return {{
                 body: outBuf,
@@ -3957,7 +3799,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               }};
             }}
           }} catch (_) {{
-            if (!signal?.aborted) markHostDirectBlocked(apiHost);
+            if (!signal?.aborted) blockedDirectHosts.add(apiHost);
           }}
         }}
       }}
@@ -4269,7 +4111,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/tver/sw.js") || String(c.scriptURL || "").includes("tver")));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -4277,53 +4119,57 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
-
-    let settled = false;
-    let pollTimer = 0;
-    let fallbackTimer = 0;
-    let onChange = null;
-
-    await new Promise((resolve) => {{
-      const finish = () => {{
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        clearTimeout(fallbackTimer);
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }};
-
-      onChange = () => {{
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }};
-      navigator.serviceWorker.addEventListener("controllerchange", onChange);
-
-      pollTimer = setInterval(() => {{
-        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }}, 35);
-
-      if (navigator.serviceWorker.ready) {{
-        navigator.serviceWorker.ready.then((r) => {{
-          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
-          if (isOurSw(navigator.serviceWorker.controller)) finish();
-        }}).catch(() => {{}});
-      }}
-
-      fallbackTimer = setTimeout(finish, 1800);
-    }});
-
+    const pendingSw = reg?.installing || reg?.waiting;
+    if (pendingSw) {{
+      await new Promise((resolve) => {{
+        let done = false;
+        const finish = () => {{
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          navigator.serviceWorker.removeEventListener("controllerchange", finish);
+          resolve();
+        }};
+        navigator.serviceWorker.addEventListener("controllerchange", finish);
+        pendingSw.addEventListener("statechange", () => {{
+          if (pendingSw.state === "activated") {{
+            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
+            if (isOurSw(navigator.serviceWorker.controller)) finish();
+          }} else if (pendingSw.state === "redundant") {{
+            finish();
+          }}
+        }});
+        const t = setTimeout(finish, 3500);
+      }});
+    }}
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-    if (navigator.serviceWorker.controller) {{
+    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    let settled = false;
+    let timer = 0;
+    let onChange = null;
+    await new Promise((resolve) => {{
+      onChange = () => {{
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }};
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
+      timer = setTimeout(() => {{
+        if (settled) return;
+        settled = true;
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }}, CONTROL_WAIT);
+    }});
+    if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -4331,7 +4177,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+    throw new Error("TVer Service Worker did not take control");
   }}
 
   async function recover(reason) {{
@@ -4480,16 +4326,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 </html>"""
 
 
+async def prewarm_service_cache() -> None:
+    await _prewarm_tver_target(TVER_HOME)
+
+
 @router.on_event("startup")
 async def _prewarm_tver_on_startup() -> None:
-    async def _delayed() -> None:
-        await asyncio.sleep(0.8)
-        await _prewarm_tver_target(TVER_HOME)
-
-    try:
-        asyncio.get_running_loop().create_task(_delayed())
-    except Exception:
-        pass
+    _schedule_tver_prewarm(TVER_HOME)
 
 
 @router.get("/tver", include_in_schema=False)

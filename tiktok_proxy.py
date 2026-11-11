@@ -115,14 +115,28 @@ KEYWORD_CATEGORY_HINTS: List[Tuple[Tuple[str, ...], str]] = [
 ]
 
 
+_HAS_PROXY_ENV = bool(
+    os.environ.get("HTTPS_PROXY")
+    or os.environ.get("HTTP_PROXY")
+    or os.environ.get("https_proxy")
+    or os.environ.get("http_proxy")
+)
+
+
 def _get_http_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
+        _limits = httpx.Limits(max_keepalive_connections=48, max_connections=96, keepalive_expiry=60.0)
         _HTTP_CLIENT = httpx.AsyncClient(
+            transport=(
+                None
+                if _HAS_PROXY_ENV
+                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=1, limits=_limits)
+            ),
             follow_redirects=True,
             verify=False,
-            timeout=httpx.Timeout(20.0, connect=8.0),
-            limits=httpx.Limits(max_keepalive_connections=48, max_connections=96, keepalive_expiry=60.0),
+            timeout=httpx.Timeout(16.0, connect=5.0),
+            limits=_limits,
             headers={
                 "User-Agent": CHROME_UA,
                 "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -136,9 +150,17 @@ async def _get_curl_session():
     if CurlAsyncSession is None:
         return None
     if _CURL_SESSION is None:
+        curl_opts = None
+        if not _HAS_PROXY_ENV:
+            try:
+                from curl_cffi.const import CurlOpt as _TtCurlOpt
+                curl_opts = {_TtCurlOpt.IPRESOLVE: 1}
+            except Exception:
+                curl_opts = None
         _CURL_SESSION = CurlAsyncSession(
             impersonate="chrome131",
-            timeout=15,
+            timeout=12,
+            curl_options=curl_opts,
             headers={
                 "User-Agent": CHROME_UA,
                 "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -3671,3 +3693,11 @@ async def tiktok_index(request: Request) -> Response:
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        asyncio.create_task(_fetch_explore_category("foryou", count=16))
+        asyncio.create_task(_fetch_tikwm_trending(region="JP", count=8))
+    except Exception:
+        pass

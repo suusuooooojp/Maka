@@ -319,9 +319,21 @@ async def _get_bridge_client() -> httpx.AsyncClient:
 async def _get_avatar_client() -> httpx.AsyncClient:
     global _AVATAR_HTTP_CLIENT
     if _AVATAR_HTTP_CLIENT is None or _AVATAR_HTTP_CLIENT.is_closed:
+        _has_proxy = bool(
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("http_proxy")
+        )
+        _limits = httpx.Limits(max_connections=60, max_keepalive_connections=30)
         _AVATAR_HTTP_CLIENT = httpx.AsyncClient(
+            transport=(
+                None
+                if _has_proxy
+                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
+            ),
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=60, max_keepalive_connections=30),
+            limits=_limits,
             timeout=httpx.Timeout(connect=4.0, read=8.0, write=5.0, pool=5.0),
         )
     return _AVATAR_HTTP_CLIENT
@@ -394,10 +406,13 @@ def _generate_qr_svg(data: str) -> str:
         parts.append("</svg>")
         return "".join(parts)
     except Exception:
-        escaped = urllib.parse.quote(data, safe="")
+        safe_link = data.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
         return (
-            f'<img src="https://api.qrserver.com/v1/create-qr-code/?size=240x240&data={escaped}" '
-            f'width="240" height="240" alt="LINE QR Code" style="border-radius:12px;background:#fff;padding:8px;"/>'
+            '<div style="width:240px;min-height:120px;border-radius:12px;background:#fff;color:#0f172a;'
+            'padding:14px;font-size:12px;word-break:break-all;display:flex;flex-direction:column;gap:8px;justify-content:center;">'
+            '<strong>LINE QR URL:</strong>'
+            f'<code>{safe_link}</code>'
+            '</div>'
         )
 
 

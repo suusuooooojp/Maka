@@ -97,17 +97,31 @@ except Exception:
     pass
 
 
+_HAS_PROXY_ENV = bool(
+    os.environ.get("HTTPS_PROXY")
+    or os.environ.get("HTTP_PROXY")
+    or os.environ.get("https_proxy")
+    or os.environ.get("http_proxy")
+)
+
+
 def _get_http_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
+        _limits = httpx.Limits(
+            max_connections=100,
+            max_keepalive_connections=40,
+            keepalive_expiry=60.0,
+        )
         _HTTP_CLIENT = httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=httpx.Timeout(30.0, connect=10.0),
-            limits=httpx.Limits(
-                max_connections=100,
-                max_keepalive_connections=40,
-                keepalive_expiry=60.0,
+            transport=(
+                None
+                if _HAS_PROXY_ENV
+                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
             ),
+            follow_redirects=True,
+            timeout=httpx.Timeout(25.0, connect=6.0),
+            limits=_limits,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

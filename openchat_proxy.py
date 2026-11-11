@@ -1214,12 +1214,37 @@ def _format_time_hms(raw_time: str = "", ts: float | None = None) -> str:
 
 
 def _save_history():
+    snapshot = list(_MESSAGES[-_MAX_MESSAGES:])
+    payload = json.dumps(snapshot, ensure_ascii=False)
     for fpath in (_PERSISTENT_FILE, _HISTORY_FILE):
         try:
             with open(fpath, "w", encoding="utf-8") as f:
-                json.dump(_MESSAGES[-_MAX_MESSAGES:], f, ensure_ascii=False)
+                f.write(payload)
         except Exception:
             pass
+
+
+_SAVE_HISTORY_PENDING = False
+
+
+def _schedule_save_history():
+    global _SAVE_HISTORY_PENDING
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _save_history()
+        return
+    if _SAVE_HISTORY_PENDING:
+        return
+    _SAVE_HISTORY_PENDING = True
+
+    async def _flush():
+        global _SAVE_HISTORY_PENDING
+        await asyncio.sleep(0.25)
+        _SAVE_HISTORY_PENDING = False
+        await loop.run_in_executor(None, _save_history)
+
+    loop.create_task(_flush())
 
 
 def _merge_messages(new_msgs: list[dict]) -> bool:
@@ -1344,14 +1369,6 @@ def _load_history():
             except Exception:
                 pass
     _check_and_reset_if_1000()
-    try:
-        _sync_postgres_openchat()
-    except Exception:
-        pass
-    try:
-        _pull_from_bitbucket()
-    except Exception:
-        pass
     for m in _MESSAGES:
         if isinstance(m, dict):
             m.pop("trip", None)
@@ -1360,7 +1377,6 @@ def _load_history():
             m["senderId"] = _canonicalize_sid(_format_display_name(m.get("senderId") or "ANON0000"), cid)
             if isinstance(m.get("replyTo"), dict):
                 m["replyTo"] = _clean_reply(m["replyTo"])
-    _save_history()
     _check_and_reset_if_1000()
 
 
@@ -1399,17 +1415,29 @@ async def _broadcast_reset():
         _WS_CLIENTS.discard(ws)
 
 
+_HAS_OC_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy"))
+_PEER_HTTP_CLIENT: httpx.AsyncClient | None = None
+
+
+def _get_peer_http_client() -> httpx.AsyncClient:
+    global _PEER_HTTP_CLIENT
+    if _PEER_HTTP_CLIENT is None or _PEER_HTTP_CLIENT.is_closed:
+        _PEER_HTTP_CLIENT = httpx.AsyncClient(
+            timeout=httpx.Timeout(3.5, connect=2.0),
+            limits=httpx.Limits(max_connections=24, max_keepalive_connections=12, keepalive_expiry=30.0),
+            transport=None if _HAS_OC_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
+        )
+    return _PEER_HTTP_CLIENT
+
+
 async def _forward_message_to_peers(msg: dict, self_url: str):
     """Broadcast an incoming chat message to all cluster peers in parallel."""
+    peers = [p for p in list(_KNOWN_PEERS) if p.rstrip("/") != self_url.rstrip("/")]
+    if not peers:
+        return
     payload = {"message": {**msg, "forwarded": True}, "resetEpoch": _RESET_EPOCH_TS, "cidMap": _CLIENT_TO_IP_ID}
-    async with httpx.AsyncClient(timeout=4.0) as client:
-        tasks = []
-        for peer in list(_KNOWN_PEERS):
-            if peer.rstrip("/") == self_url.rstrip("/"):
-                continue
-            tasks.append(client.post(f"{peer}/openchat/send", json=payload))
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+    client = _get_peer_http_client()
+    await asyncio.gather(*(client.post(f"{peer}/openchat/send", json=payload) for peer in peers), return_exceptions=True)
 
 
 async def _sync_with_all_peers(self_url: str):
@@ -1420,41 +1448,46 @@ async def _sync_with_all_peers(self_url: str):
             _register_peer_url(p)
     except Exception:
         pass
+    peers = [p for p in list(_KNOWN_PEERS) if p.rstrip("/") != self_url.rstrip("/")]
+    if not peers:
+        return
     payload = {"messages": _MESSAGES[-200:], "resetEpoch": _RESET_EPOCH_TS, "cidMap": _CLIENT_TO_IP_ID}
-    async with httpx.AsyncClient(timeout=2.0) as client:
-        for peer in list(_KNOWN_PEERS):
-            if peer.rstrip("/") == self_url.rstrip("/"):
-                continue
-            try:
-                resp = await client.post(f"{peer}/openchat/sync", json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    peer_map = data.get("cidMap")
-                    if isinstance(peer_map, dict):
-                        map_changed = False
-                        for k, v in peer_map.items():
-                            if k and v:
-                                cv = _canonicalize_sid(str(v), str(k))
-                                if _CLIENT_TO_IP_ID.get(str(k)) != cv:
-                                    _CLIENT_TO_IP_ID[str(k)] = cv
-                                    map_changed = True
-                        if map_changed:
-                            _save_cid_map()
-                    peer_ep = float(data.get("resetEpoch") or 0.0)
-                    if peer_ep > _RESET_EPOCH_TS:
-                        if _apply_reset_epoch(peer_ep):
-                            await _broadcast_reset()
-                    incoming = data.get("messages", [])
-                    if incoming:
-                        prev_ep = _RESET_EPOCH_TS
-                        added = _merge_messages(incoming)
-                        if _RESET_EPOCH_TS > prev_ep:
-                            await _broadcast_reset()
-                        elif added and _MESSAGES:
-                            latest = _MESSAGES[-1]
-                            await _broadcast_message(latest)
-            except Exception:
-                pass
+    client = _get_peer_http_client()
+    results = await asyncio.gather(
+        *(client.post(f"{peer}/openchat/sync", json=payload) for peer in peers),
+        return_exceptions=True,
+    )
+    for resp in results:
+        if isinstance(resp, Exception) or getattr(resp, "status_code", 0) != 200:
+            continue
+        try:
+            data = resp.json()
+            peer_map = data.get("cidMap")
+            if isinstance(peer_map, dict):
+                map_changed = False
+                for k, v in peer_map.items():
+                    if k and v:
+                        cv = _canonicalize_sid(str(v), str(k))
+                        if _CLIENT_TO_IP_ID.get(str(k)) != cv:
+                            _CLIENT_TO_IP_ID[str(k)] = cv
+                            map_changed = True
+                if map_changed:
+                    _save_cid_map()
+            peer_ep = float(data.get("resetEpoch") or 0.0)
+            if peer_ep > _RESET_EPOCH_TS:
+                if _apply_reset_epoch(peer_ep):
+                    await _broadcast_reset()
+            incoming = data.get("messages", [])
+            if incoming:
+                prev_ep = _RESET_EPOCH_TS
+                added = _merge_messages(incoming)
+                if _RESET_EPOCH_TS > prev_ep:
+                    await _broadcast_reset()
+                elif added and _MESSAGES:
+                    latest = _MESSAGES[-1]
+                    await _broadcast_message(latest)
+        except Exception:
+            pass
 
 
 _PEER_SYNC_STARTED = False
@@ -1462,20 +1495,20 @@ _PEER_SYNC_STARTED = False
 
 async def _peer_sync_worker():
     global _DIRTY_MESSAGES
-    last_bb_pull = time.time()
+    last_bb_pull = 0.0
     last_pg_sync = 0.0
     last_peer_sync = 0.0
     while True:
-        await asyncio.sleep(4.0)
+        await asyncio.sleep(5.0)
         try:
             now = time.time()
             loop = asyncio.get_running_loop()
-            peer_int = 4.0 if _DIRTY_MESSAGES else 12.0
+            peer_int = 5.0 if _DIRTY_MESSAGES else 18.0
             if now - last_peer_sync >= peer_int:
                 last_peer_sync = now
                 self_url = _get_self_url()
                 await _sync_with_all_peers(self_url)
-            if now - last_pg_sync >= 10.0:
+            if now - last_pg_sync >= 12.0:
                 last_pg_sync = now
                 prev_ep = _RESET_EPOCH_TS
                 await loop.run_in_executor(None, _sync_postgres_openchat)
@@ -2253,18 +2286,6 @@ async def serve_chat_media(media_id: str, request: Request):
     return Response(content=body, status_code=200, media_type=content_type, headers=base_headers)
 
 
-def _slice_messages_for_client(
-    clean_msgs: list[dict],
-    since_ts: float = 0.0,
-    limit: int = 120,
-) -> list[dict]:
-    if since_ts > 0.0:
-        delta = [m for m in clean_msgs if float(m.get("ts") or 0.0) > since_ts]
-        return delta[-max(1, min(limit, _MAX_MESSAGES)) :]
-    cap = max(1, min(limit, _MAX_MESSAGES))
-    return clean_msgs[-cap:]
-
-
 @router.api_route("/openchat/history", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
 async def get_chat_history(request: Request = None):
     _ensure_peer_worker()
@@ -2280,20 +2301,6 @@ async def get_chat_history(request: Request = None):
     cid = request.query_params.get("cid", "") if request else ""
     tok = request.query_params.get("token", "") if request else ""
     trip = request.query_params.get("trip", "") if request else ""
-    since_ts = 0.0
-    limit = 120
-    if request:
-        try:
-            since_ts = float(request.query_params.get("since") or 0.0)
-        except Exception:
-            since_ts = 0.0
-        try:
-            if request.query_params.get("full") == "1":
-                limit = _MAX_MESSAGES
-            elif request.query_params.get("limit"):
-                limit = int(request.query_params.get("limit") or 120)
-        except Exception:
-            limit = 120
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
@@ -2305,7 +2312,17 @@ async def get_chat_history(request: Request = None):
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
-    sliced_msgs = _slice_messages_for_client(clean_msgs, since_ts=since_ts, limit=limit)
+    total_count = len(clean_msgs)
+    since_ts = 0.0
+    if request:
+        try:
+            since_ts = float(request.query_params.get("since") or 0.0)
+        except Exception:
+            since_ts = 0.0
+    if since_ts > 0.0 and since_ts >= _RESET_EPOCH_TS:
+        out_msgs = [m for m in clean_msgs if float(m.get("ts") or 0.0) >= since_ts - 1.5]
+    else:
+        out_msgs = clean_msgs
     resp = JSONResponse(
         {
             "ok": True,
@@ -2317,8 +2334,8 @@ async def get_chat_history(request: Request = None):
             "trip": trip_code,
             "onlineCount": _get_online_count(),
             "resetEpoch": _RESET_EPOCH_TS,
-            "totalCount": len(clean_msgs),
-            "messages": sliced_msgs,
+            "totalCount": total_count,
+            "messages": out_msgs,
             "takenNames": [],
         },
         headers=_CORS_HEADERS,
@@ -2371,9 +2388,6 @@ async def sync_chat_messages(request: Request):
     trip = ""
     raw_name = ""
     sync_svc = ""
-    is_peer_sync = False
-    since_ts = 0.0
-    limit = 120
     data = {}
     try:
         data = await request.json()
@@ -2382,15 +2396,6 @@ async def sync_chat_messages(request: Request):
         trip = _clean_str(data.get("tripKey") or data.get("trip"), 64)
         raw_name = _clean_str(data.get("name"), 40)
         sync_svc = _clean_str(data.get("service"), 32)
-        try:
-            since_ts = float(data.get("since") or 0.0)
-        except Exception:
-            since_ts = 0.0
-        try:
-            if data.get("limit"):
-                limit = int(data.get("limit") or 120)
-        except Exception:
-            limit = 120
         peer_map = data.get("cidMap")
         is_peer_sync = isinstance(peer_map, dict)
         if is_peer_sync:
@@ -2433,26 +2438,26 @@ async def sync_chat_messages(request: Request):
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
-    out_msgs = clean_msgs if is_peer_sync else _slice_messages_for_client(clean_msgs, since_ts=0.0 if was_reset else since_ts, limit=limit)
-    payload_out = {
-        "ok": True,
-        "myId": my_id,
-        "name": (auth_user.get("username") if auth_user else None) or my_id,
-        "loggedIn": bool(auth_user),
-        "username": auth_user.get("username") if auth_user else "",
-        "token": signed_token,
-        "trip": trip_code,
-        "onlineCount": _get_online_count(),
-        "reset": was_reset,
-        "resetEpoch": _RESET_EPOCH_TS,
-        "totalCount": len(clean_msgs),
-        "messages": out_msgs,
-        "takenNames": [],
-    }
-    if is_peer_sync:
-        payload_out["cidMap"] = _CLIENT_TO_IP_ID
-        payload_out["names"] = _NAME_OWNERS
-    resp = JSONResponse(payload_out, headers=_CORS_HEADERS)
+    resp = JSONResponse(
+        {
+            "ok": True,
+            "myId": my_id,
+            "name": (auth_user.get("username") if auth_user else None) or my_id,
+            "loggedIn": bool(auth_user),
+            "username": auth_user.get("username") if auth_user else "",
+            "token": signed_token,
+            "trip": trip_code,
+            "onlineCount": _get_online_count(),
+            "reset": was_reset,
+            "resetEpoch": _RESET_EPOCH_TS,
+            "totalCount": len(clean_msgs),
+            "messages": clean_msgs,
+            "cidMap": _CLIENT_TO_IP_ID,
+            "names": _NAME_OWNERS,
+            "takenNames": [],
+        },
+        headers=_CORS_HEADERS,
+    )
     _add_fixed_id_cookie(resp, my_id, cid=cid, trip=trip)
     return resp
 
@@ -2611,7 +2616,7 @@ async def send_chat_message(request: Request):
     _MESSAGES.append(msg)
     was_reset = _check_and_reset_if_1000()
     if not was_reset:
-        _save_history()
+        _schedule_save_history()
         _DIRTY_MESSAGES = True
         asyncio.create_task(_broadcast_message(msg))
     else:
@@ -2686,13 +2691,11 @@ async def openchat_websocket(websocket: WebSocket):
     ws_signed_tok = _sign_id(ws_ip_id)
     _touch_active_client(ws_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
     asyncio.create_task(_broadcast_online_count())
-    ws_since = 0.0
     try:
-        ws_since = float(websocket.query_params.get("since") or 0.0)
-    except Exception:
-        ws_since = 0.0
-    try:
-        clean_msgs = _get_clean_messages()
+        clean_msgs = [
+            m for m in _MESSAGES
+            if not (m.get("service") == "System" or m.get("senderId") == "SYS" or str(m.get("id", "")).startswith("sys_"))
+        ]
         init_payload = json.dumps(
             {
                 "type": "init",
@@ -2705,7 +2708,7 @@ async def openchat_websocket(websocket: WebSocket):
                 "onlineCount": _get_online_count(),
                 "resetEpoch": _RESET_EPOCH_TS,
                 "totalCount": len(clean_msgs),
-                "messages": _slice_messages_for_client(clean_msgs, since_ts=ws_since, limit=120),
+                "messages": clean_msgs[-_MAX_MESSAGES:],
                 "takenNames": [],
             },
             ensure_ascii=False,
@@ -2731,11 +2734,6 @@ async def openchat_websocket(websocket: WebSocket):
                     sync_trip = _clean_str(data.get("tripKey") or data.get("trip") or ws_trip, 64)
                     sync_name = _clean_str(data.get("name") or ws_name, 40)
                     sync_svc = _clean_str(data.get("service") or ws_svc, 32)
-                    sync_since = 0.0
-                    try:
-                        sync_since = float(data.get("since") or 0.0)
-                    except Exception:
-                        sync_since = 0.0
                     if sync_svc:
                         ws_svc = sync_svc
                     sync_auth = _extract_auth_user(websocket, data=data)
@@ -2752,7 +2750,10 @@ async def openchat_websocket(websocket: WebSocket):
                         if _RESET_EPOCH_TS > prev_ep:
                             await _broadcast_reset()
                             continue
-                    clean_msgs = _get_clean_messages()
+                    clean_msgs = [
+                        m for m in _MESSAGES
+                        if not (m.get("service") == "System" or m.get("senderId") == "SYS" or str(m.get("id", "")).startswith("sys_"))
+                    ]
                     await websocket.send_text(
                         json.dumps(
                             {
@@ -2766,7 +2767,7 @@ async def openchat_websocket(websocket: WebSocket):
                                 "onlineCount": _get_online_count(),
                                 "resetEpoch": _RESET_EPOCH_TS,
                                 "totalCount": len(clean_msgs),
-                                "messages": _slice_messages_for_client(clean_msgs, since_ts=sync_since, limit=120),
+                                "messages": clean_msgs[-_MAX_MESSAGES:],
                                 "takenNames": [],
                             },
                             ensure_ascii=False,
@@ -2865,7 +2866,7 @@ async def openchat_websocket(websocket: WebSocket):
                 _MESSAGES.append(msg)
                 was_reset = _check_and_reset_if_1000()
                 if not was_reset:
-                    _save_history()
+                    _schedule_save_history()
                     _DIRTY_MESSAGES = True
                     await websocket.send_text(
                         json.dumps({"type": "msg_ack", "myId": sender_id, "token": sender_signed_tok, "trip": trip_code, "onlineCount": _get_online_count(), "resetEpoch": _RESET_EPOCH_TS, "totalCount": len(_MESSAGES), "message": msg})
@@ -2908,7 +2909,8 @@ async def openchat_client_script(request: Request = None):
         content=content,
         media_type="application/javascript; charset=utf-8",
         headers={
-            "Cache-Control": "private, max-age=180",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
             "Access-Control-Allow-Origin": "*",
         },
     )
@@ -3182,7 +3184,7 @@ _CLIENT_JS = r"""
     return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
   }
 
-  function getWsUrl(sinceTs) {
+  function getWsUrl() {
     let base = (window.location && window.location.origin && window.location.origin.startsWith('http')) ? window.location.origin : (REAL_ORIGIN || 'https://chatwork.cloud.run');
     const proto = base.startsWith('https') ? 'wss:' : 'ws:';
     let u = '';
@@ -3196,8 +3198,7 @@ _CLIENT_JS = r"""
     const trip = getStoredTripKey();
     const svc = detectService();
     const sid = window.__sh_sid || '';
-    const sinceParam = (sinceTs && Number(sinceTs) > 0) ? '&since=' + encodeURIComponent(String(sinceTs)) : '';
-    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '') + sinceParam;
+    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
   }
 
   function matchServiceFromPath(rawPath, rawHost) {
@@ -5780,7 +5781,6 @@ _CLIENT_JS = r"""
       sessionStorage.setItem('sh_openchat_open', isOpen ? '1' : '0');
     } catch (_) {}
     if (isOpen) {
-      ensureFloatingDomHydrated();
       panel.classList.add('open');
       unreadCount = 0;
       pendingBottomUnread = 0;
@@ -6623,27 +6623,6 @@ _CLIENT_JS = r"""
   const localMessageCache = [];
   const knownMsgMap = new Map();
   const knownHubMsgMap = new Map();
-  let floatingDomHydrated = false;
-
-  function getLatestCachedTs() {
-    let maxTs = 0;
-    for (let i = localMessageCache.length - 1; i >= 0; i--) {
-      const t = Number((localMessageCache[i] && localMessageCache[i].ts) || 0);
-      if (t > maxTs) maxTs = t;
-    }
-    return maxTs;
-  }
-
-  function ensureFloatingDomHydrated() {
-    if (floatingDomHydrated || !chatBody) return;
-    floatingDomHydrated = true;
-    chatBody.innerHTML = '';
-    knownMsgMap.clear();
-    const startIdx = Math.max(0, localMessageCache.length - 150);
-    for (let i = startIdx; i < localMessageCache.length; i++) {
-      insertOrConcatMessage(chatBody, knownMsgMap, localMessageCache[i], false);
-    }
-  }
   let currentResetEpoch = (() => {
     try {
       const v = parseFloat(localStorage.getItem(EPOCH_KEY) || '0');
@@ -7141,19 +7120,17 @@ _CLIENT_JS = r"""
   }
 
   function rerenderAllContainers() {
-    if (chatBody && (isOpen || floatingDomHydrated)) {
+    if (chatBody) {
       chatBody.innerHTML = '';
       knownMsgMap.clear();
-      const startIdx = Math.max(0, localMessageCache.length - 150);
-      for (let i = startIdx; i < localMessageCache.length; i++) {
+      for (let i = 0; i < localMessageCache.length; i++) {
         insertOrConcatMessage(chatBody, knownMsgMap, localMessageCache[i], false);
       }
     }
     if (hubChatBody) {
       hubChatBody.innerHTML = '';
       knownHubMsgMap.clear();
-      const startIdx = Math.max(0, localMessageCache.length - 150);
-      for (let i = startIdx; i < localMessageCache.length; i++) {
+      for (let i = 0; i < localMessageCache.length; i++) {
         insertOrConcatMessage(hubChatBody, knownHubMsgMap, localMessageCache[i], false);
       }
     }
@@ -7242,10 +7219,8 @@ _CLIENT_JS = r"""
       }
     }
 
-    // 1. Append or concatenate in floating chat (lazy when closed)
-    if (chatBody && (isOpen || floatingDomHydrated)) {
-      insertOrConcatMessage(chatBody, knownMsgMap, msg, isOutOfOrder);
-    }
+    // 1. Append or concatenate in floating chat
+    insertOrConcatMessage(chatBody, knownMsgMap, msg, isOutOfOrder);
 
     // 2. Append or concatenate in Hub embedded chat if present
     if (hubChatBody) {
@@ -7270,9 +7245,7 @@ _CLIENT_JS = r"""
       updateScrollPill();
     }
 
-    if (isOpen || hubChatBody) {
-      scrollToBottom(false);
-    }
+    scrollToBottom(false);
   }
 
   // 5. Real-time Communication
@@ -7298,7 +7271,7 @@ _CLIENT_JS = r"""
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
       }
-      const wsUrl = getWsUrl(getLatestCachedTs());
+      const wsUrl = getWsUrl();
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -7308,21 +7281,18 @@ _CLIENT_JS = r"""
           if (ws && ws.readyState === WebSocket.OPEN) {
             try { ws.send(JSON.stringify({ type: 'ping', service: detectService() })); } catch (_) {}
           }
-        }, 20000);
+        }, 15000);
         try {
-          if (isLoggedIn() && localMessageCache.length > 0) {
-            const myTrip = getStoredTripKey();
-            ws.send(JSON.stringify({
-              type: 'sync',
-              since: getLatestCachedTs(),
-              messages: localMessageCache.slice(-40),
-              clientId: currentClientId,
-              token: currentIpToken,
-              authToken: currentAuthToken,
-              tripKey: myTrip,
-              service: detectService()
-            }));
-          }
+          const myTrip = getStoredTripKey();
+          ws.send(JSON.stringify({
+            type: 'sync',
+            messages: isLoggedIn() ? localMessageCache.slice(-80) : [],
+            clientId: currentClientId,
+            token: currentIpToken,
+            authToken: currentAuthToken,
+            tripKey: myTrip,
+            service: detectService()
+          }));
         } catch (_) {}
         flushUnsent();
       };
@@ -7365,7 +7335,7 @@ _CLIENT_JS = r"""
       ws.onclose = () => {
         updateOnlineStatus(false);
         clearInterval(heartbeatTimer);
-        setTimeout(connectWs, 3000);
+        setTimeout(connectWs, 2000);
       };
       ws.onerror = () => {
         updateOnlineStatus(false);
@@ -7373,7 +7343,7 @@ _CLIENT_JS = r"""
       };
     } catch (_) {
       updateOnlineStatus(false);
-      setTimeout(connectWs, 3500);
+      setTimeout(connectWs, 2500);
     }
   }
 
@@ -7410,16 +7380,14 @@ _CLIENT_JS = r"""
     try {
       flushUnsent();
       const myTrip = getStoredTripKey();
-      const sinceTs = getLatestCachedTs();
       const outgoing = isLoggedIn()
         ? localMessageCache.filter(m => {
             if (!m) return false;
             if (m.isLocal || m.service === 'System' || m.senderId === 'SYS' || String(m.id || '').startsWith('sys_') || m.name === 'システム') return false;
             return true;
-          }).slice(-40)
+          }).slice(-100)
         : [];
       const payload = {
-        since: sinceTs,
         messages: outgoing,
         clientId: currentClientId,
         token: currentIpToken,
@@ -7458,12 +7426,14 @@ _CLIENT_JS = r"""
     }
   }
 
+  let lastPolledMsgTs = 0;
   async function pollHistory() {
     try {
       const myTrip = getStoredTripKey();
-      const sinceTs = getLatestCachedTs();
-      const historyPath = sinceTs > 0 ? ('/openchat/history?since=' + encodeURIComponent(String(sinceTs))) : '/openchat/history';
-      const res = await fetch(getApiUrl(historyPath), {
+      const histPath = (initialLoadDone && lastPolledMsgTs > 0)
+        ? ('/openchat/history?since=' + encodeURIComponent(String(Math.floor(lastPolledMsgTs))))
+        : '/openchat/history';
+      const res = await fetch(getApiUrl(histPath), {
         cache: 'no-store',
         headers: {
           'X-OpenChat-Client-Id': currentClientId,
@@ -7484,7 +7454,12 @@ _CLIENT_JS = r"""
         }
         checkAndApplyResetEpoch(data);
         if (data && Array.isArray(data.messages)) {
-          data.messages.forEach(m => appendMessage(m, true, false));
+          data.messages.forEach(m => {
+            if (m && typeof m.ts === 'number' && m.ts > lastPolledMsgTs) {
+              lastPolledMsgTs = m.ts;
+            }
+            appendMessage(m, true, false);
+          });
         }
       }
     } catch (_) {}
@@ -7739,7 +7714,7 @@ _CLIENT_JS = r"""
     });
   }
 
-  // Start initialization (defer background sync/WS on service pages when chat is closed so primary content loads first)
+  // Start initialization (defer background sync/WS on heavy media/game boots when chat is closed)
   loadLocalCache();
 
   const savedOpen = (() => {
@@ -7750,26 +7725,18 @@ _CLIENT_JS = r"""
     }
   })();
 
+  const isHeavyBootPage = /^\/(tver|cloudmoon|youtube|instagram)(\/|$)/i.test(window.location.pathname || '');
   let networkStarted = false;
   function startOpenChatNetwork() {
     if (networkStarted) return;
     networkStarted = true;
-    connectWs();
-    if (isLoggedIn()) {
-      syncWithServer().finally(() => {
-        initialLoadDone = true;
-        ensureInitialNameClaimed();
-        flushUnsent();
-      });
-    } else {
-      setTimeout(() => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) {
-          pollHistory();
-        }
-        initialLoadDone = true;
-      }, 900);
-    }
+    syncWithServer().finally(() => {
+      initialLoadDone = true;
+      ensureInitialNameClaimed();
+      flushUnsent();
+    });
     setTimeout(() => { initialLoadDone = true; flushUnsent(); }, 1500);
+    connectWs();
   }
 
   if (toggleBtn) {
@@ -7779,21 +7746,10 @@ _CLIENT_JS = r"""
   if (savedOpen) {
     startOpenChatNetwork();
     toggleChat(true);
-  } else if (hubChatBody) {
-    startOpenChatNetwork();
+  } else if (isHeavyBootPage) {
+    setTimeout(startOpenChatNetwork, 2800);
   } else {
-    let scheduled = false;
-    const scheduleAfterLoad = () => {
-      if (scheduled) return;
-      scheduled = true;
-      setTimeout(startOpenChatNetwork, 2200);
-    };
-    if (document.readyState === 'complete') {
-      scheduleAfterLoad();
-    } else {
-      window.addEventListener('load', scheduleAfterLoad, { once: true });
-      setTimeout(scheduleAfterLoad, 4000);
-    }
+    startOpenChatNetwork();
   }
 
   setInterval(() => {
@@ -7802,7 +7758,7 @@ _CLIENT_JS = r"""
       pollHistory();
       connectWs();
     }
-  }, 4000);
+  }, 5000);
 
   setInterval(() => {
     if (!networkStarted) return;

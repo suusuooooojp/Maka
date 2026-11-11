@@ -68,30 +68,19 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-def _has_proxy_env() -> bool:
-    return bool(
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("http_proxy")
-        or os.getenv("all_proxy")
-    )
-
-
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not _has_proxy_env():
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 4500)
+            curl.setopt(connect_timeout_ms, 15000)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
@@ -397,6 +386,12 @@ def _patch_controller_sw(source: bytes) -> bytes:
             "_shBodyVal instanceof ArrayBuffer?[_shBodyVal]:void 0",
             1,
         )
+
+    old_cookie_wait = (
+        'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
+        'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
+    )
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
 
     old_timer = (
         'setTimeout(async()=>{for(let e of(console.log("service worker activated, notifying clients to revive"),'
@@ -720,70 +715,66 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     return text.encode("utf-8")
 
 
-@router.get("/youtube/runtime/scramjet.js", include_in_schema=False)
-async def youtube_scramjet_js():
+_PATCHED_RUNTIME_CACHE: dict[str, bytes] = {}
+_PATCHED_RUNTIME_GZIP_CACHE: dict[str, bytes] = {}
+
+
+async def _ensure_patched_runtime(asset_name: str, patch_fn) -> bytes | Response:
+    cached = _PATCHED_RUNTIME_CACHE.get(asset_name)
+    if cached is not None:
+        return cached
     import app as host_app
 
-    resp = await host_app.scramjet_asset("scramjet.js")
+    resp = await host_app.scramjet_asset(asset_name)
     if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
         return resp
-    patched = _patch_scramjet_js(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    patched = patch_fn(bytes(resp.body))
+    _PATCHED_RUNTIME_CACHE[asset_name] = patched
+    _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gzip.compress(patched, compresslevel=5)
+    return patched
+
+
+async def _serve_patched_runtime(request: Request, asset_name: str, patch_fn) -> Response:
+    res = await _ensure_patched_runtime(asset_name, patch_fn)
+    if isinstance(res, Response):
+        return res
+    headers = {"Cache-Control": "public, max-age=31536000, immutable", "Vary": "Accept-Encoding"}
+    ae = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" in ae:
+        gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
+        if gz is None:
+            gz = gzip.compress(res, compresslevel=5)
+            _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
+        headers["Content-Encoding"] = "gzip"
+        return Response(gz, media_type="application/javascript", headers=headers)
+    return Response(res, media_type="application/javascript", headers=headers)
+
+
+@router.get("/youtube/runtime/scramjet.js", include_in_schema=False)
+async def youtube_scramjet_js(request: Request):
+    return await _serve_patched_runtime(request, "scramjet.js", _patch_scramjet_js)
 
 
 @router.get("/youtube/runtime/controller.api.js", include_in_schema=False)
-async def youtube_controller_api():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.api.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_api(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def youtube_controller_api(request: Request):
+    return await _serve_patched_runtime(request, "controller.api.js", _patch_controller_api)
 
 
 @router.get("/youtube/runtime/controller.sw.js", include_in_schema=False)
-async def youtube_controller_sw():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.sw.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_sw(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def youtube_controller_sw(request: Request):
+    return await _serve_patched_runtime(request, "controller.sw.js", _patch_controller_sw)
 
 
 @router.get("/youtube/runtime/controller.inject.js", include_in_schema=False)
-async def youtube_controller_inject():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.inject.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_inject(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def youtube_controller_inject(request: Request):
+    return await _serve_patched_runtime(request, "controller.inject.js", _patch_controller_inject)
 
 
 async def _youtube_sw_override(request: Request) -> Response:
     code = f"""
 importScripts('/youtube/runtime/controller.sw.js?v={RUNTIME_REV}');
 const YT_MEDIA_CACHE = 'sh-yt-media-{RUNTIME_REV}';
+const YT_REWRITTEN_CACHE = 'sh-yt-rewritten-{RUNTIME_REV}';
 const YT_IMAGE_SUFFIXES = [
   'i.ytimg.com','s.ytimg.com','img.youtube.com','ytimg.com',
   'yt3.ggpht.com','yt4.ggpht.com','ggpht.com',
@@ -840,6 +831,7 @@ function extractVirtualStreamId(url) {{
 }}
 function stripScramjetParams(target) {{
   try {{
+    target.pathname = target.pathname.replace(/\\?\\$[^/]*$/, '');
     for (const k of [...target.searchParams.keys()]) {{
       if (k.startsWith('$')) target.searchParams.delete(k);
     }}
@@ -852,7 +844,7 @@ function extractAnyVirtualUrl(url) {{
     if (u.pathname === '/youtube/runtime/image-relay') {{
       const kv = u.searchParams.get('k');
       const uv = kv ? decodeMediaKey(kv) : u.searchParams.get('url');
-      if (uv) return stripScramjetParams(new URL(uv));
+      if (uv) return stripScramjetParams(new URL(uv.replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, '')));
     }}
     const marker = '/youtube/~/sj/';
     const i = u.pathname.indexOf(marker);
@@ -861,7 +853,7 @@ function extractAnyVirtualUrl(url) {{
     const directMatch = rawAfter.match(/(?:^|\\/)(https?(?:%3A|:)(?:%2F|\\/){{2}}.*)$/i);
     if (directMatch && directMatch[1]) {{
       try {{
-        const decoded = decodeRepeated(directMatch[1]);
+        const decoded = decodeRepeated(directMatch[1]).replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, '');
         const target = new URL(decoded);
         if (u.search) {{
           const extra = new URLSearchParams(u.search);
@@ -877,7 +869,7 @@ function extractAnyVirtualUrl(url) {{
     const tail = decodeRepeated(rawAfter);
     const bits = tail.split('/');
     for (let n = Math.min(3, bits.length); n >= 0; n--) {{
-      const candidate = decodeRepeated(bits.slice(n).join('/'));
+      const candidate = decodeRepeated(bits.slice(n).join('/')).replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, '');
       try {{
         const target = stripScramjetParams(new URL(candidate));
         target.hash = '';
@@ -892,10 +884,25 @@ function extractVirtualTarget(url) {{
   if (target && isAllowedImageTarget(target)) return target;
   return null;
 }}
+function isImmutableYtStaticBundle(target) {{
+  if (!target) return false;
+  const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
+  const p = target.pathname || '';
+  if (!/\\.(js|mjs|css)(\\?|$)/i.test(p)) return false;
+  if ((h === 'www.youtube.com' || h === 'm.youtube.com' || h === 'music.youtube.com') && p.startsWith('/s/')) return true;
+  if (h.endsWith('.ytimg.com') && p.startsWith('/yts/')) return true;
+  return false;
+}}
 function checkShortCircuit(target) {{
   if (!target) return null;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
+  if (h === 'fonts.googleapis.com' && (p === '/css' || p === '/css2')) {{
+    return new Response('/* sh-fast-fonts */', {{
+      status: 200,
+      headers: {{'Content-Type': 'text/css; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400'}},
+    }});
+  }}
   if (h.endsWith('.googlevideo.com') || h.endsWith('.c.youtube.com')) {{
     const exp = target.searchParams.get('expire') || '';
     if (p.includes(' ') || exp === '9421968081' || exp === '1685394838') {{
@@ -1036,6 +1043,24 @@ self.addEventListener('fetch', event => {{
       }}
     }}
     if (typeof $scramjetController !== 'undefined' && $scramjetController.shouldRoute(event)) {{
+      if (event.request.method === 'GET' && anyTarget && isImmutableYtStaticBundle(anyTarget) && typeof caches !== 'undefined') {{
+        const cacheKey = event.request.url;
+        event.respondWith((async () => {{
+          try {{
+            const cache = await caches.open(YT_REWRITTEN_CACHE);
+            const hit = await cache.match(cacheKey);
+            if (hit) return hit;
+            const resp = await $scramjetController.route(event);
+            if (resp && resp.status === 200) {{
+              try {{ await cache.put(cacheKey, resp.clone()); }} catch {{}}
+            }}
+            return resp;
+          }} catch {{
+            return $scramjetController.route(event);
+          }}
+        }})());
+        return;
+      }}
       event.respondWith($scramjetController.route(event));
       return;
     }}
@@ -1111,12 +1136,9 @@ _DESKTOP_CHROME_UA = (
 )
 
 
-_CURL_DISABLED_UNTIL: float = 0.0
-
-
 async def _get_curl_session():
     global _CURL_SESSION
-    if StatelessCurlSession is None or time.time() < _CURL_DISABLED_UNTIL:
+    if StatelessCurlSession is None:
         return None
     if _CURL_SESSION is not None:
         return _CURL_SESSION
@@ -1125,7 +1147,7 @@ async def _get_curl_session():
             _CURL_SESSION = StatelessCurlSession(
                 impersonate="chrome131",
                 allow_redirects=False,
-                timeout=10,
+                timeout=25,
                 max_clients=64,
             )
     return _CURL_SESSION
@@ -1140,8 +1162,9 @@ async def _get_media_http_client() -> httpx.AsyncClient:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=60.0)
             timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
-            if not _has_proxy_env():
+            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1160,20 +1183,24 @@ async def _get_media_http_client() -> httpx.AsyncClient:
 
 
 def _strip_dollar_query(raw_url: str) -> str:
-    if "?" not in raw_url:
+    if not raw_url:
         return raw_url
+    cleaned = re.sub(r"([?&])(?:%24|\$)[^&#]*(?:&|$)", r"\1", raw_url)
+    cleaned = re.sub(r"[?&]+(?=#|$)", "", cleaned)
+    if "?" not in cleaned:
+        return cleaned
     try:
         from urllib.parse import unquote
-        p = urlparse(raw_url)
+        p = urlparse(cleaned)
         if not p.query:
-            return raw_url
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
         clean_parts = [
             part for part in p.query.split("&")
             if part and not unquote(part.split("=", 1)[0]).startswith("$")
         ]
         return urlunparse((p.scheme, p.netloc, p.path, p.params, "&".join(clean_parts), ""))
     except Exception:
-        return raw_url
+        return cleaned
 
 
 def _encode_media_key(url: str) -> str:
@@ -1351,7 +1378,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
         _PUBLIC_HOST_CACHE[key] = now
         return
-    if not _has_proxy_env():
+    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.run_in_executor(
@@ -1391,7 +1418,8 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
         ):
             return True
         if host in ("fonts.gstatic.com", "www.gstatic.com", "fonts.googleapis.com") and (
-            path.endswith((".woff2", ".woff", ".ttf", ".svg", ".png", ".css", ".js")) or path.startswith("/s/i/")
+            path.endswith((".woff2", ".woff", ".ttf", ".svg", ".png", ".css", ".js"))
+            or path.startswith(("/s/i/", "/css", "/icon"))
         ):
             return True
     except Exception:
@@ -4041,7 +4069,6 @@ async def youtube_runtime_gv_stream(request: Request):
 
 @router.post("/youtube/runtime/http-relay", include_in_schema=False)
 async def youtube_http_relay(request: Request):
-    global _CURL_DISABLED_UNTIL
     raw = await request.body()
     if len(raw) < 4:
         return Response(b"invalid frame", status_code=400)
@@ -4069,6 +4096,17 @@ async def youtube_http_relay(request: Request):
     url = _strip_dollar_query(url)
     parsed = urlparse(url)
     host = parsed.hostname.lower().rstrip(".")
+    if host == "fonts.googleapis.com" and (parsed.path or "") in ("/css", "/css2"):
+        return _pack_relay_response(
+            200,
+            "OK",
+            [
+                ["content-type", "text/css; charset=utf-8"],
+                ["access-control-allow-origin", "*"],
+                ["cache-control", "public, max-age=86400"],
+            ],
+            b"/* sh-fast-fonts */",
+        )
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
         q_str = parsed.query or ""
         if " " in (parsed.path or "") or "expire=9421968081" in q_str or "expire=1685394838" in q_str:
@@ -4258,26 +4296,20 @@ async def youtube_http_relay(request: Request):
             resp_body = b""
             raw_multi = []
             for _hop in range(5):
-                used_gv_curl = False
                 if session is not None:
-                    try:
-                        up = await session.request(
-                            method=method,
-                            url=cur_gv_url,
-                            headers=gv_headers,
-                            data=req_body if req_body else None,
-                            allow_redirects=False,
-                            timeout=9,
-                        )
-                        status = int(up.status_code)
-                        status_text = str(getattr(up, "reason", "") or "OK")
-                        resp_body = bytes(up.content or b"")
-                        raw_multi = list(up.headers.multi_items())
-                        used_gv_curl = True
-                    except Exception:
-                        _CURL_DISABLED_UNTIL = time.time() + 180.0
-                        session = None
-                if not used_gv_curl:
+                    up = await session.request(
+                        method=method,
+                        url=cur_gv_url,
+                        headers=gv_headers,
+                        data=req_body if req_body else None,
+                        allow_redirects=False,
+                        timeout=25,
+                    )
+                    status = int(up.status_code)
+                    status_text = str(getattr(up, "reason", "") or "OK")
+                    resp_body = bytes(up.content or b"")
+                    raw_multi = list(up.headers.multi_items())
+                else:
                     client = await _get_media_http_client()
                     up = await client.request(
                         method=method,
@@ -4486,7 +4518,7 @@ async def youtube_http_relay(request: Request):
 
     ephemeral_session: StatelessCurlSession | None = None
     try:
-        if StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
+        if StatelessCurlSession is not None:
             if has_sensitive_auth or (is_google_auth_req and is_safari_ua):
                 tls_imp = "chrome131"
                 if is_google_auth_req and is_safari_ua:
@@ -4494,7 +4526,7 @@ async def youtube_http_relay(request: Request):
                 ephemeral_session = StatelessCurlSession(
                     impersonate=tls_imp,
                     allow_redirects=False,
-                    timeout=9,
+                    timeout=25,
                     max_clients=4,
                 )
                 session = ephemeral_session
@@ -4512,7 +4544,7 @@ async def youtube_http_relay(request: Request):
                     headers=header_dict,
                     data=req_body if req_body else None,
                     allow_redirects=False,
-                    timeout=8,
+                    timeout=22,
                 )
                 status = int(upstream.status_code)
                 status_text = str(getattr(upstream, "reason", "") or "OK")
@@ -4536,7 +4568,7 @@ async def youtube_http_relay(request: Request):
                             headers=header_dict,
                             data=req_body if req_body else None,
                             allow_redirects=False,
-                            timeout=8,
+                            timeout=22,
                         )
                         status = int(upstream.status_code)
                         status_text = str(getattr(upstream, "reason", "") or "OK")
@@ -4544,7 +4576,6 @@ async def youtube_http_relay(request: Request):
                         raw_multi = upstream.headers.multi_items()
                 used_curl = True
             except Exception:
-                _CURL_DISABLED_UNTIL = time.time() + 180.0
                 used_curl = False
 
         if not used_curl:
@@ -5096,7 +5127,9 @@ def _shell_html(initial_target: str) -> str:
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preload" href="/youtube/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/youtube/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/youtube/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <script>
 if ("serviceWorker" in navigator) {{
   window.__shSwRegP = navigator.serviceWorker.register("/youtube/sw.js?v={RUNTIME_REV}", {{
@@ -5236,7 +5269,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
 
   function syncOuterHistoryUrl(targetUrl) {{
     try {{
-      const u = new URL(targetUrl);
+      const cleaned = cleanTargetUrl(targetUrl);
+      if (!cleaned) return;
+      const u = new URL(cleaned);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       if (h !== "www.youtube.com" && h !== "youtube.com" && h !== "m.youtube.com") return;
       if (u.searchParams.has("sh_watch")) return;
@@ -5260,7 +5295,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
 
   function remember(url) {{
     if (!url) return;
-    const s = String(url);
+    const s = cleanTargetUrl(String(url)) || String(url);
     lastUrl = s;
     if (isGoogleAuthTarget(s)) return;
     try {{ sessionStorage.setItem(SESSION_KEY, s); }} catch (_) {{}}
@@ -5386,8 +5421,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
   function cleanTargetUrl(rawUrl) {{
     if (!rawUrl || typeof rawUrl !== "string") return "";
     try {{
-      const u = new URL(rawUrl);
+      const stripped = rawUrl.replace(/([?&])(?:%24|\\$)[^&#]*(?:&|$)/gi, "$1").replace(/[?&]+(?=#|$)/g, "");
+      const u = new URL(stripped);
       if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+      u.pathname = u.pathname.replace(/\\?\\$[^/]*$/, "");
       for (const k of [...u.searchParams.keys()]) {{
         if (k.startsWith("$")) u.searchParams.delete(k);
       }}
@@ -5467,7 +5504,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const p = u.pathname || "";
       if ((h === "www.youtube.com" || h === "m.youtube.com" || h === "music.youtube.com") && p.startsWith("/s/")) return true;
       if (h.endsWith(".ytimg.com") && (p.startsWith("/yts/") || /\\.(js|css|woff2|svg|png|jpg|webp)$/i.test(p))) return true;
-      if ((h === "fonts.gstatic.com" || h === "www.gstatic.com" || h === "fonts.googleapis.com") && (p.startsWith("/s/i/") || /\\.(woff2|woff|ttf|svg|png|css|js)$/i.test(p))) return true;
+      if ((h === "fonts.gstatic.com" || h === "www.gstatic.com" || h === "fonts.googleapis.com") && (p.startsWith("/s/i/") || p.startsWith("/css") || p.startsWith("/icon") || /\\.(woff2|woff|ttf|svg|png|css|js)$/i.test(p))) return true;
     }} catch (_) {{}}
     return false;
   }}
@@ -5477,6 +5514,15 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
+      if (h === "fonts.googleapis.com" && (p === "/css" || p === "/css2")) {{
+        const b = new TextEncoder().encode("/* sh-fast-fonts */").buffer;
+        return {{
+          body: b,
+          headers: [["content-type", "text/css; charset=utf-8"], ["access-control-allow-origin", "*"], ["cache-control", "public, max-age=86400"]],
+          status: 200,
+          statusText: "OK",
+        }};
+      }}
       if (h.endsWith(".googlevideo.com") || h.endsWith(".c.youtube.com")) {{
         const exp = u.searchParams.get("expire") || "";
         if (p.includes(" ") || exp === "9421968081" || exp === "1685394838") {{
@@ -5782,16 +5828,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
             }}
             if (clearAuth || setCookieEntries.length > 0) {{
               if (clearAuth) globalThis.__shExplicitClear = true;
-              try {{
-                if (setCookieEntries.length > 0) {{
-                  controller.applyCookieSyncEntries?.(setCookieEntries);
-                }}
-                await controller.persistCookies?.();
-                if (setCookieEntries.length > 0) {{
-                  await controller.propagateCookieSync?.(setCookieEntries, {{}});
-                }}
-              }} finally {{
+              if (setCookieEntries.length > 0) {{
+                controller.applyCookieSyncEntries?.(setCookieEntries);
+              }}
+              Promise.resolve(controller.persistCookies?.()).catch(() => {{}}).finally(() => {{
                 if (clearAuth) globalThis.__shExplicitClear = false;
+              }});
+              if (setCookieEntries.length > 0) {{
+                Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
               }}
             }}
           }} catch (_) {{}}
@@ -6560,7 +6604,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
     }}
   }}
 
-  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/youtube/sw.js") || String(c.scriptURL || "").includes("youtube")));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes("/youtube/sw.js"));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -6568,53 +6612,58 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
-
-    let settled = false;
-    let pollTimer = 0;
-    let fallbackTimer = 0;
-    let onChange = null;
-
-    await new Promise((resolve) => {{
-      const finish = () => {{
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        clearTimeout(fallbackTimer);
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }};
-
-      onChange = () => {{
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }};
-      navigator.serviceWorker.addEventListener("controllerchange", onChange);
-
-      pollTimer = setInterval(() => {{
-        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }}, 35);
-
-      if (navigator.serviceWorker.ready) {{
-        navigator.serviceWorker.ready.then((r) => {{
-          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
-          if (isOurSw(navigator.serviceWorker.controller)) finish();
-        }}).catch(() => {{}});
-      }}
-
-      fallbackTimer = setTimeout(finish, 1800);
-    }});
-
+    const pendingSw = reg?.installing || reg?.waiting;
+    if (pendingSw) {{
+      await new Promise((resolve) => {{
+        let done = false;
+        const finish = () => {{
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          navigator.serviceWorker.removeEventListener("controllerchange", finish);
+          resolve();
+        }};
+        navigator.serviceWorker.addEventListener("controllerchange", finish);
+        pendingSw.addEventListener("statechange", () => {{
+          if (pendingSw.state === "activated") {{
+            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
+            if (isOurSw(navigator.serviceWorker.controller)) finish();
+          }} else if (pendingSw.state === "redundant") {{
+            finish();
+          }}
+        }});
+        const t = setTimeout(finish, 3500);
+      }});
+    }}
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-    if (navigator.serviceWorker.controller) {{
+    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    let settled = false;
+    let timer = 0;
+    let onChange = null;
+    const waitForChange = new Promise(resolve => {{
+      onChange = () => {{
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }};
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
+      timer = setTimeout(() => {{
+        if (settled) return;
+        settled = true;
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }}, CONTROL_WAIT);
+    }});
+    await waitForChange;
+    if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -6623,7 +6672,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+    throw new Error("Service Worker did not take control");
   }}
 
   async function recover(reason) {{
@@ -7001,4 +7050,22 @@ async def youtube_subpath(request: Request, subpath: str):
         upstream_url += "?" + request.url.query
     target = _target_from_input(upstream_url)
     return _build_youtube_shell_response(target)
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        await asyncio.gather(
+            _ensure_patched_runtime("scramjet.js", _patch_scramjet_js),
+            _ensure_patched_runtime("controller.api.js", _patch_controller_api),
+            _ensure_patched_runtime("controller.sw.js", _patch_controller_sw),
+            _ensure_patched_runtime("controller.inject.js", _patch_controller_inject),
+            _get_curl_session(),
+            _get_media_http_client(),
+            return_exceptions=True,
+        )
+        asyncio.create_task(_get_anon_visitor_cookie_header())
+        asyncio.create_task(_get_home_rich_items())
+    except Exception:
+        pass
+
 

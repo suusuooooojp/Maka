@@ -50,7 +50,7 @@ def _scrub_curl_cookies(curl) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
@@ -107,7 +107,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-10-29-wasm-uaf-fix-v62"
+FLORR_SW_REVISION = "2026-11-12-wasm-uaf-fix-v63"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -575,17 +575,28 @@ async def _get_local_wisp_http_proxy(wisp_url: str) -> str:
 
 router = APIRouter()
 
-HTTP_CLIENT = httpx.AsyncClient(
-    follow_redirects=False,
-    verify=True,
-    timeout=httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0),
-    limits=httpx.Limits(
-        max_connections=40,
-        max_keepalive_connections=15,
-        keepalive_expiry=20.0,
-    ),
-    headers={"Accept-Encoding": "identity"},
+_florr_limits = httpx.Limits(
+    max_connections=40,
+    max_keepalive_connections=15,
+    keepalive_expiry=20.0,
 )
+_florr_timeout = httpx.Timeout(connect=6.0, read=60.0, write=30.0, pool=10.0)
+if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
+    HTTP_CLIENT = httpx.AsyncClient(
+        transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_florr_limits),
+        follow_redirects=False,
+        verify=True,
+        timeout=_florr_timeout,
+        headers={"Accept-Encoding": "identity"},
+    )
+else:
+    HTTP_CLIENT = httpx.AsyncClient(
+        follow_redirects=False,
+        verify=True,
+        timeout=_florr_timeout,
+        limits=_florr_limits,
+        headers={"Accept-Encoding": "identity"},
+    )
 
 
 def _log(message: str) -> None:
@@ -905,6 +916,11 @@ def patch_controller_sw(source: bytes) -> bytes:
             "_shBodyVal instanceof ArrayBuffer?[_shBodyVal]:void 0",
             1,
         )
+    old_cookie_wait = (
+        'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
+        'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
+    )
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
     old_timer = (
         'setTimeout(async()=>{for(let e of(console.log("service worker activated, notifying clients to revive"),'
         "await clients.matchAll()))e.postMessage({$controller$swrevive:{}})},100)"

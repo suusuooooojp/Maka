@@ -39,8 +39,6 @@ print(
     flush=True,
 )
 
-import gzip
-
 _HAS_PROXY_ENV = bool(
     os.getenv("HTTPS_PROXY")
     or os.getenv("HTTP_PROXY")
@@ -60,6 +58,7 @@ CORE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_CORE_LIMITS,
@@ -80,6 +79,7 @@ ASSET_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_ASSET_LIMITS,
@@ -105,12 +105,12 @@ YOUTUBE_IMAGE_HOSTS = {
 }
 
 _YT_IMG_LIMITS = httpx.Limits(
-    max_connections=24, max_keepalive_connections=12, keepalive_expiry=30.0
+    max_connections=120, max_keepalive_connections=48, keepalive_expiry=60.0
 )
 YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
     follow_redirects=True,
     verify=True,
-    timeout=Timeout(connect=10.0, read=30.0, write=20.0, pool=8.0),
+    timeout=Timeout(connect=5.0, read=12.0, write=10.0, pool=6.0),
     limits=_YT_IMG_LIMITS,
     headers={
         "User-Agent": (
@@ -127,12 +127,17 @@ YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
-            retries=2,
+            retries=1,
             limits=_YT_IMG_LIMITS,
         )
     ),
 )
+_YT_IMAGE_CACHE: dict[str, tuple[float, int, bytes, dict[str, str]]] = {}
+_YT_IMAGE_CACHE_TTL = 1800.0
+_YT_IMAGE_CACHE_MAX_ITEMS = 400
+_YT_IMAGE_CACHE_MAX_BYTES = 262144
 
 
 SCRAMJET_VERSION = "2.0.67-alpha.2"
@@ -288,6 +293,18 @@ async def youtube_image_relay(request: Request):
   except ValueError as exc:
     return Response(str(exc), status_code=403)
 
+  has_range = bool(request.headers.get("range"))
+  now_ts = asyncio.get_running_loop().time()
+  if not has_range and request.method in ("GET", "HEAD"):
+    cached_thumb = _YT_IMAGE_CACHE.get(current)
+    if cached_thumb and (now_ts - cached_thumb[0]) < _YT_IMAGE_CACHE_TTL:
+      _, c_status, c_data, c_hdrs = cached_thumb
+      return Response(
+          content=b"" if request.method == "HEAD" else c_data,
+          status_code=c_status,
+          headers=c_hdrs,
+      )
+
   headers = {
       "Referer": "https://www.youtube.com/",
       "User-Agent": request.headers.get("user-agent") or "Mozilla/5.0",
@@ -297,19 +314,20 @@ async def youtube_image_relay(request: Request):
       ),
       "Accept-Encoding": "identity",
   }
-  if request.headers.get("range"):
+  if has_range:
     headers["Range"] = request.headers["range"]
 
   upstream = None
   data = b""
+  fetch_url = current
   try:
     for _ in range(4):
-      await _allowed_youtube_image_url(current)
+      await _allowed_youtube_image_url(fetch_url)
       upstream = await YOUTUBE_IMAGE_CLIENT.request(
-          request.method, current, headers=headers, follow_redirects=False
+          request.method, fetch_url, headers=headers, follow_redirects=False
       )
       if 300 <= upstream.status_code < 400 and upstream.headers.get("location"):
-        current = urllib.parse.urljoin(current, upstream.headers["location"])
+        fetch_url = urllib.parse.urljoin(fetch_url, upstream.headers["location"])
         continue
       if request.method != "HEAD":
         data = await upstream.aread()
@@ -349,6 +367,15 @@ async def youtube_image_relay(request: Request):
   if upstream.headers.get("content-range"):
     out_headers["Content-Range"] = upstream.headers["content-range"]
   out_headers = {k: v for k, v in out_headers.items() if v}
+  if (
+      not has_range
+      and request.method == "GET"
+      and upstream.status_code == 200
+      and 0 < len(data) <= _YT_IMAGE_CACHE_MAX_BYTES
+  ):
+    if len(_YT_IMAGE_CACHE) >= _YT_IMAGE_CACHE_MAX_ITEMS:
+      _YT_IMAGE_CACHE.pop(next(iter(_YT_IMAGE_CACHE)), None)
+    _YT_IMAGE_CACHE[current] = (now_ts, 200, data, dict(out_headers))
   return Response(
       content=data, status_code=upstream.status_code, headers=out_headers
   )
@@ -1590,6 +1617,7 @@ async def google_favicon_ico(request: Request):
     )
 
 
+import gzip as _gzip
 import json as _json
 import time as _time
 from html import escape as _html_escape
@@ -1611,6 +1639,7 @@ _DEFAULT_ADMIN_CONFIG = {
     "dialogButtonText": "確認",
     "dialogMode": "always",
     "updatedAt": 0,
+    "unpausedTverFixV1": True,
 }
 
 _ADMIN_CONFIG: dict = dict(_DEFAULT_ADMIN_CONFIG)
@@ -1634,6 +1663,18 @@ def _load_admin_config() -> dict:
         merged.update(best)
         if not isinstance(merged.get("pausedServices"), list):
             merged["pausedServices"] = []
+        if not best.get("unpausedTverFixV1"):
+            merged["pausedServices"] = [
+                s for s in merged["pausedServices"]
+                if str(s).strip().lower() not in ("tver", "/tver", "/tver/")
+            ]
+            merged["unpausedTverFixV1"] = True
+            for p in _ADMIN_CONFIG_PATHS:
+                try:
+                    with open(p, "w", encoding="utf-8") as f:
+                        _json.dump(merged, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
         _ADMIN_CONFIG = merged
     return _ADMIN_CONFIG
 
@@ -1656,6 +1697,7 @@ def _save_admin_config(cfg: dict) -> dict:
     merged["dialogButtonText"] = str(merged.get("dialogButtonText") or "確認").strip()[:40]
     mode = str(merged.get("dialogMode") or "always").strip().lower()
     merged["dialogMode"] = mode if mode in ("always", "once", "lock") else "always"
+    merged["unpausedTverFixV1"] = True
     merged["updatedAt"] = int(_time.time() * 1000)
     _ADMIN_CONFIG = merged
     for p in _ADMIN_CONFIG_PATHS:
@@ -1713,7 +1755,12 @@ async def api_admin_config(request: Request):
 def _match_paused_service(req_path: str) -> tuple[bool, str]:
     if not req_path or req_path == "/":
         return False, ""
-    if req_path.startswith(("/api/", "/openchat", "/activity", "/design-system", "/favicon.ico", "/wisp", "/~/sj/")):
+    if (
+        req_path.startswith(("/api/", "/openchat", "/activity", "/design-system", "/favicon.ico", "/wisp", "/~/sj/", "/scramjet/"))
+        or "/~/sj/" in req_path
+        or "/runtime/" in req_path
+        or req_path.endswith(("/sw.js", "/health"))
+    ):
         return False, ""
     cfg = _ADMIN_CONFIG
     pause_all = bool(cfg.get("pauseAll"))
@@ -1876,31 +1923,94 @@ def _render_paused_service_html(service_name: str, cfg: dict, req_url: str, is_a
 </html>"""
 
 
-_FAST_BYPASS_PREFIXES = (
-    "/scramjet/",
-    "/activity/",
-    "/openchat/",
-    "/_diag/",
-    "/youtube-image-relay",
-    "/youtube/image-relay",
-    "/youtube/runtime/",
-    "/instagram/runtime/",
-    "/tver/runtime/",
-    "/x/runtime/",
-    "/florr/runtime/",
-    "/tiktok/api/",
-    "/wakame/api/",
-    "/wakame/stream/",
-    "/utopia/bare/",
-    "/utopia/uv/",
-    "/kazwire/uv/",
-    "/kazwire/baremux/",
-    "/kazwire/epoxy/",
-    "/cloudmoon/webrtc",
-    "/design-system/",
-    "/healthz",
-    "/probe",
+_COMPRESSIBLE_CT_PREFIXES = (
+    "text/",
+    "application/javascript",
+    "application/x-javascript",
+    "application/json",
+    "application/manifest+json",
+    "application/wasm",
+    "application/xml",
+    "image/svg+xml",
 )
+_STATIC_GZIP_CACHE: dict[tuple[str, int], bytes] = {}
+
+
+async def _maybe_gzip_buffered_response(request: Request, response: Response, req_path: str) -> Response:
+    if request.method == "HEAD" or response.status_code in (204, 304):
+        return response
+    if "content-encoding" in response.headers:
+        return response
+    ae = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" not in ae:
+        return response
+    ct = (response.headers.get("content-type") or "").lower()
+    if ct.startswith(("video/", "audio/", "text/event-stream", "image/jpeg", "image/png", "image/webp", "image/gif", "font/woff2")):
+        return response
+    is_relay = req_path.endswith("/runtime/http-relay")
+    if is_relay:
+        up_ct = (response.headers.get("x-upstream-content-type") or "").lower()
+        if up_ct.startswith(("video/", "audio/", "image/jpeg", "image/png", "image/webp", "image/gif", "font/woff2")):
+            return response
+    elif not ct.startswith(_COMPRESSIBLE_CT_PREFIXES):
+        return response
+
+    body = getattr(response, "body", None)
+    if not isinstance(body, (bytes, bytearray)):
+        try:
+            cl = int(response.headers.get("content-length") or "-1")
+        except ValueError:
+            cl = -1
+        if cl < 860 or cl > 8 * 1024 * 1024 or not hasattr(response, "body_iterator"):
+            return response
+        chunks = []
+        async for chunk in response.body_iterator:
+            if chunk:
+                chunks.append(chunk if isinstance(chunk, (bytes, bytearray)) else chunk.encode("utf-8"))
+        body = b"".join(chunks)
+
+    if len(body) < 860:
+        if getattr(response, "body", None) is None:
+            rebuilt = Response(content=body, status_code=response.status_code, headers=dict(response.headers), media_type=response.media_type)
+            if hasattr(response, "raw_headers"):
+                for rk, rv in response.raw_headers:
+                    if rk.lower() == b"set-cookie":
+                        rebuilt.raw_headers.append((rk, rv))
+            return rebuilt
+        return response
+
+    is_immutable = "immutable" in (response.headers.get("cache-control") or "").lower()
+    cache_key = (req_path, len(body))
+    if is_immutable and cache_key in _STATIC_GZIP_CACHE:
+        gz_body = _STATIC_GZIP_CACHE[cache_key]
+    else:
+        gz_body = _gzip.compress(bytes(body), compresslevel=5)
+        if len(gz_body) >= len(body):
+            rebuilt = Response(content=bytes(body), status_code=response.status_code, headers=dict(response.headers), media_type=response.media_type)
+            if hasattr(response, "raw_headers"):
+                for rk, rv in response.raw_headers:
+                    if rk.lower() == b"set-cookie":
+                        rebuilt.raw_headers.append((rk, rv))
+            return rebuilt
+        if is_immutable and len(gz_body) <= 2 * 1024 * 1024 and len(_STATIC_GZIP_CACHE) < 128:
+            _STATIC_GZIP_CACHE[cache_key] = gz_body
+    new_headers = dict(response.headers)
+    new_headers["content-encoding"] = "gzip"
+    new_headers["content-length"] = str(len(gz_body))
+    existing_vary = new_headers.get("vary", "")
+    if "accept-encoding" not in existing_vary.lower():
+        new_headers["vary"] = f"{existing_vary}, Accept-Encoding" if existing_vary else "Accept-Encoding"
+    out = Response(
+        content=gz_body,
+        status_code=response.status_code,
+        headers=new_headers,
+        media_type=response.media_type,
+    )
+    if hasattr(response, "raw_headers"):
+        for rk, rv in response.raw_headers:
+            if rk.lower() == b"set-cookie":
+                out.raw_headers.append((rk, rv))
+    return out
 
 
 @app.middleware("http")
@@ -1919,16 +2029,10 @@ async def openchat_global_middleware(request: Request, call_next):
                 "Access-Control-Allow-Origin": "*",
             },
         )
-    if (
-        req_path.startswith(_FAST_BYPASS_PREFIXES)
-        or "/~/sj/" in req_path
-        or "/runtime/" in req_path
-        or "/openchat/" in req_path
-    ):
-        return await call_next(request)
-
     is_admin_req = _is_suusuo_request(request)
-    if request.method == "GET" and not (request.query_params.get("admin_bypass") == "1" and is_admin_req):
+    has_bypass_cookie = is_admin_req and request.cookies.get("sh_admin_bypass") == "1"
+    set_bypass_cookie = is_admin_req and request.query_params.get("admin_bypass") == "1"
+    if request.method == "GET" and not (set_bypass_cookie or has_bypass_cookie):
         accept_hdr = (request.headers.get("accept") or "").lower()
         sec_dest = (request.headers.get("sec-fetch-dest") or "").lower()
         if "text/html" in accept_hdr or sec_dest in ("document", "iframe"):
@@ -1942,16 +2046,22 @@ async def openchat_global_middleware(request: Request, call_next):
                 )
 
     response = await call_next(request)
+    if set_bypass_cookie:
+        response.set_cookie("sh_admin_bypass", "1", max_age=43200, path="/", httponly=True, samesite="lax")
+
     if (
         req_path in ("/", "", "/minecraft", "/minecraft/", "/eagler", "/eagler/", "/openchat", "/openchat/", "/taiko", "/taiko/")
-        or req_path.startswith(("/src/views/", "/taiko/src/views/"))
+        or req_path.startswith(("/src/views/", "/taiko/src/views/", "/api/", "/scramjet/", "/design-system/"))
         or "/~/sj/" in req_path
+        or "/runtime/" in req_path
     ):
-        return response
+        return await _maybe_gzip_buffered_response(request, response, req_path)
+
     ct = response.headers.get("content-type", "").lower()
     if (
         response.status_code == 200
         and "text/html" in ct
+        and "content-encoding" not in response.headers
         and request.method in ("GET", "POST")
     ):
         body = getattr(response, "body", None)
@@ -2002,32 +2112,55 @@ async def openchat_global_middleware(request: Request, call_next):
             if b"/openchat/chat.js" not in body and not req_path.startswith("/run-site"):
                 inject_parts.append(b'<script src="/openchat/chat.js" defer></script>')
 
+            new_body = body
             if inject_parts:
                 script_tag = b"".join(inject_parts)
-                if b"</body>" in body:
-                    new_body = body.replace(b"</body>", script_tag + b"</body>", 1)
-                elif b"</html>" in body:
-                    new_body = body.replace(b"</html>", script_tag + b"</html>", 1)
+                if b"</body>" in new_body:
+                    new_body = new_body.replace(b"</body>", script_tag + b"</body>", 1)
+                elif b"</html>" in new_body:
+                    new_body = new_body.replace(b"</html>", script_tag + b"</html>", 1)
                 else:
-                    new_body = body + script_tag
-                new_headers = dict(response.headers)
-                new_headers["content-length"] = str(len(new_body))
-                return Response(
-                    content=new_body,
-                    status_code=response.status_code,
-                    headers=new_headers,
-                    media_type="text/html",
-                )
-            else:
-                new_headers = dict(response.headers)
-                new_headers["content-length"] = str(len(body))
-                return Response(
-                    content=body,
-                    status_code=response.status_code,
-                    headers=new_headers,
-                    media_type="text/html",
-                )
-    return response
+                    new_body = new_body + script_tag
+            new_headers = dict(response.headers)
+            new_headers["content-length"] = str(len(new_body))
+            html_resp = Response(
+                content=new_body,
+                status_code=response.status_code,
+                headers=new_headers,
+                media_type="text/html",
+            )
+            if hasattr(response, "raw_headers"):
+                for rk, rv in response.raw_headers:
+                    if rk.lower() == b"set-cookie":
+                        html_resp.raw_headers.append((rk, rv))
+            return await _maybe_gzip_buffered_response(request, html_resp, req_path)
+    return await _maybe_gzip_buffered_response(request, response, req_path)
+
+
+async def _background_prewarm_runtime_assets() -> None:
+    try:
+        await asyncio.gather(
+            *(scramjet_asset(name) for name in ("scramjet.js", "scramjet.wasm", "scramjet-utils.js", "controller.api.js", "controller.inject.js", "controller.sw.js")),
+            scramjet_transport_asset("libcurl", "index.mjs"),
+            scramjet_transport_asset("epoxy", "index.mjs"),
+            return_exceptions=True,
+        )
+        warm_tasks = []
+        for mod_name in ("instagram_proxy", "youtube_scramjet_proxy", "x_proxy", "tver_proxy", "kazwire_proxy", "wakame_plus", "twitch_proxy", "tiktok_proxy"):
+            mod = sys.modules.get(mod_name)
+            fn = getattr(mod, "prewarm_service_cache", None) if mod else None
+            if callable(fn):
+                warm_tasks.append(fn())
+        if warm_tasks:
+            await asyncio.gather(*warm_tasks, return_exceptions=True)
+    except Exception as exc:
+        print(f"[SchoolHub] background prewarm warning: {exc}", flush=True)
+
+
+@app.on_event("startup")
+async def _schoolhub_startup_prewarm() -> None:
+    asyncio.create_task(_background_prewarm_runtime_assets())
+
 
 @app.middleware("http")
 async def security_shield_middleware(request: Request, call_next):
@@ -2035,175 +2168,6 @@ async def security_shield_middleware(request: Request, call_next):
     if shield_resp is not None:
         return shield_resp
     return await call_next(request)
-
-
-_GZIP_SKIP_PATH_FRAGMENTS = (
-    "/activity/stream",
-    "/media-relay",
-    "/image-relay",
-    "/youtube-image-relay",
-    "/gv-stream",
-    "/runtime/stream/",
-    "/wakame/stream/",
-    "/tiktok/api/stream",
-    "/tiktok/api/image",
-    "/openchat/media/",
-)
-_GZIP_COMPRESSIBLE_TYPES = (
-    "text/",
-    "application/javascript",
-    "application/x-javascript",
-    "application/json",
-    "application/manifest+json",
-    "application/xml",
-    "application/xhtml+xml",
-    "application/wasm",
-    "application/vnd.apple.mpegurl",
-    "image/svg+xml",
-)
-
-
-class _SmartGZipMiddleware:
-    """Pure-ASGI single-chunk GZip compressor that shrinks HTML, JS, JSON, WASM,
-    and framed /runtime/http-relay payloads 4x-6x without buffering streams."""
-
-    def __init__(self, app_inner, minimum_size: int = 512, compresslevel: int = 5):
-        self.app = app_inner
-        self.minimum_size = minimum_size
-        self.compresslevel = compresslevel
-
-    async def __call__(self, scope, receive, send):
-        if scope["type"] != "http" or scope.get("method") == "HEAD":
-            await self.app(scope, receive, send)
-            return
-
-        path = scope.get("path") or ""
-        if any(frag in path for frag in _GZIP_SKIP_PATH_FRAGMENTS):
-            await self.app(scope, receive, send)
-            return
-
-        accept_gzip = False
-        for k, v in scope.get("headers") or ():
-            if k == b"accept-encoding" and b"gzip" in v.lower():
-                accept_gzip = True
-                break
-        if not accept_gzip:
-            await self.app(scope, receive, send)
-            return
-
-        is_http_relay = path.endswith("/runtime/http-relay")
-        start_msg = None
-        passthrough = False
-
-        async def _send_wrapper(message):
-            nonlocal start_msg, passthrough
-            mtype = message["type"]
-            if mtype == "http.response.start":
-                raw_hdrs = message.get("headers") or []
-                has_ce = False
-                has_cr = False
-                ct_val = ""
-                for hk, hv in raw_hdrs:
-                    hkl = hk.lower()
-                    if hkl == b"content-encoding":
-                        has_ce = True
-                        break
-                    if hkl == b"content-range":
-                        has_cr = True
-                        break
-                    if hkl == b"content-type":
-                        ct_val = hv.decode("latin1", "ignore").lower()
-                compressible = (not has_ce and not has_cr) and (
-                    is_http_relay
-                    or any(ct_val.startswith(p) for p in _GZIP_COMPRESSIBLE_TYPES)
-                )
-                if not compressible:
-                    passthrough = True
-                    await send(message)
-                else:
-                    start_msg = message
-                return
-
-            if mtype == "http.response.body":
-                if passthrough or start_msg is None:
-                    await send(message)
-                    return
-                body = message.get("body", b"")
-                more_body = message.get("more_body", False)
-                if more_body or len(body) < self.minimum_size or len(body) > 18 * 1024 * 1024:
-                    passthrough = True
-                    await send(start_msg)
-                    start_msg = None
-                    await send(message)
-                    return
-                # Skip double-compressing binary relay payloads that are mostly pre-compressed media
-                if is_http_relay and len(body) > 4096:
-                    # Quick entropy/type check on the JSON metadata header inside the relay frame
-                    try:
-                        mlen = struct.unpack(">I", body[:4])[0]
-                        if 2 < mlen < 8192 and len(body) > 4 + mlen:
-                            meta_slice = body[4 : 4 + min(mlen, 2048)].lower()
-                            if (
-                                b'"image/' in meta_slice
-                                and b"svg" not in meta_slice
-                            ) or b'"video/' in meta_slice or b'"audio/' in meta_slice:
-                                passthrough = True
-                                await send(start_msg)
-                                start_msg = None
-                                await send(message)
-                                return
-                    except Exception:
-                        pass
-                gz_body = gzip.compress(body, compresslevel=self.compresslevel)
-                if len(gz_body) >= len(body):
-                    await send(start_msg)
-                    start_msg = None
-                    await send(message)
-                    return
-                out_hdrs = []
-                vary_idx = -1
-                for hk, hv in start_msg.get("headers") or []:
-                    hkl = hk.lower()
-                    if hkl == b"content-length":
-                        continue
-                    if hkl == b"vary":
-                        vary_idx = len(out_hdrs)
-                    out_hdrs.append((hk, hv))
-                out_hdrs.append((b"content-encoding", b"gzip"))
-                out_hdrs.append((b"content-length", str(len(gz_body)).encode("ascii")))
-                if vary_idx >= 0:
-                    old_v = out_hdrs[vary_idx][1]
-                    if b"accept-encoding" not in old_v.lower():
-                        out_hdrs[vary_idx] = (b"vary", old_v + b", Accept-Encoding")
-                else:
-                    out_hdrs.append((b"vary", b"Accept-Encoding"))
-                start_msg = dict(start_msg, headers=out_hdrs)
-                await send(start_msg)
-                start_msg = None
-                await send({"type": "http.response.body", "body": gz_body, "more_body": False})
-                return
-
-            await send(message)
-
-        await self.app(scope, receive, _send_wrapper)
-
-
-app.add_middleware(_SmartGZipMiddleware, minimum_size=512, compresslevel=5)
-
-
-@app.on_event("startup")
-async def _prewarm_scramjet_assets_on_startup():
-    async def _warm_all():
-        try:
-            await asyncio.gather(
-                *(scramjet_asset(name) for name in ASSET_URLS),
-                return_exceptions=True,
-            )
-        except Exception:
-            pass
-
-    asyncio.create_task(_warm_all())
-
 
 @app.head("/")
 async def head_root():

@@ -12,6 +12,7 @@ import asyncio
 import mimetypes
 import os
 import re
+import time
 import urllib.parse
 from typing import Dict, Optional, Tuple
 
@@ -22,8 +23,10 @@ from fastapi.routing import APIRoute
 
 try:
     from curl_cffi.requests import AsyncSession as CurlAsyncSession
+    from curl_cffi.const import CurlOpt as _KazCurlOpt
 except Exception:
     CurlAsyncSession = None
+    _KazCurlOpt = None
 
 for _env_key in ("NO_PROXY", "no_proxy", "GLOBAL_AGENT_NO_PROXY"):
     _val = os.environ.get(_env_key, "")
@@ -69,9 +72,16 @@ mimetypes.add_type("application/json", ".json")
 
 router = APIRouter()
 
+_HAS_PROXY_ENV = bool(
+    os.environ.get("HTTPS_PROXY")
+    or os.environ.get("HTTP_PROXY")
+    or os.environ.get("https_proxy")
+    or os.environ.get("http_proxy")
+)
 _CURL_SESSION: Optional[CurlAsyncSession] = None
 _HTTPX_CLIENT: Optional[httpx.AsyncClient] = None
 _ASSET_CACHE: Dict[str, Tuple[bytes, str, int]] = {}
+_HTML_PAGE_CACHE: Dict[str, Tuple[float, int, str]] = {}
 _INFLIGHT: Dict[str, asyncio.Future] = {}
 
 
@@ -80,11 +90,13 @@ def _get_curl_session() -> Optional[CurlAsyncSession]:
     if CurlAsyncSession is None:
         return None
     if _CURL_SESSION is None:
+        curl_opts = {_KazCurlOpt.IPRESOLVE: 1} if (_KazCurlOpt is not None and not _HAS_PROXY_ENV) else None
         _CURL_SESSION = CurlAsyncSession(
             impersonate="chrome",
             verify=False,
-            timeout=30.0,
+            timeout=12.0,
             allow_redirects=True,
+            curl_options=curl_opts,
         )
     return _CURL_SESSION
 
@@ -92,11 +104,17 @@ def _get_curl_session() -> Optional[CurlAsyncSession]:
 def _get_httpx_client() -> httpx.AsyncClient:
     global _HTTPX_CLIENT
     if _HTTPX_CLIENT is None or _HTTPX_CLIENT.is_closed:
+        _limits = httpx.Limits(max_connections=100, max_keepalive_connections=35, keepalive_expiry=30.0)
         _HTTPX_CLIENT = httpx.AsyncClient(
+            transport=(
+                None
+                if _HAS_PROXY_ENV
+                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=1, limits=_limits)
+            ),
             follow_redirects=True,
             verify=False,
-            timeout=httpx.Timeout(35.0, connect=10.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=35, keepalive_expiry=30.0),
+            timeout=httpx.Timeout(20.0, connect=6.0),
+            limits=_limits,
             headers={"User-Agent": DEFAULT_UA, "Accept-Encoding": "identity"},
         )
     return _HTTPX_CLIENT
@@ -275,9 +293,15 @@ _KAZWIRE_CLIENT_SHIM = """<style id="sh-kazwire-mobile-fix">
 
 
 def _rewrite_kazwire_html(html: str) -> str:
-    # Strip third-party ads/analytics scripts that slow down load or fail in sandbox
+    # Strip third-party ads/analytics scripts and render-blocking external font stylesheets
     html = re.sub(
         r'<script[^>]+src=["\']https?://(?:pagead2\.googlesyndication\.com|www\.googletagmanager\.com)[^"\']*["\'][^>]*>\s*</script>',
+        "",
+        html,
+        flags=re.IGNORECASE,
+    )
+    html = re.sub(
+        r'<link[^>]+href=["\']https?://fonts\.(?:googleapis|gstatic)\.com[^"\']*["\'][^>]*>',
         "",
         html,
         flags=re.IGNORECASE,
@@ -850,12 +874,25 @@ async def _serve_kazwire_page_or_asset(request: Request, rel_path: str) -> Respo
     upstream_path = f"/{clean}" if clean else "/"
     q = f"?{request.url.query}" if request.url.query else ""
     target_url = f"{UPSTREAM_MAIN}{upstream_path}{q}"
+    cache_eligible = request.method in ("GET", "HEAD") and not q
+    if cache_eligible:
+        cached_html = _HTML_PAGE_CACHE.get(target_url)
+        if cached_html and (time.monotonic() - cached_html[0]) < 180.0:
+            return HTMLResponse(
+                content="" if request.method == "HEAD" else cached_html[2],
+                status_code=cached_html[1],
+                headers=_cors_headers({"Cache-Control": "no-store"}),
+            )
     try:
         status, content, hdrs = await _upstream_get(target_url)
         ct = (hdrs.get("content-type") or "text/html").split(";")[0].strip().lower()
         if "text/html" in ct:
             html_text = content.decode("utf-8", errors="replace")
             rewritten = _rewrite_kazwire_html(html_text)
+            if cache_eligible and status == 200 and len(rewritten) <= 524288:
+                if len(_HTML_PAGE_CACHE) >= 32:
+                    _HTML_PAGE_CACHE.pop(next(iter(_HTML_PAGE_CACHE)), None)
+                _HTML_PAGE_CACHE[target_url] = (time.monotonic(), status, rewritten)
             return HTMLResponse(
                 content="" if request.method == "HEAD" else rewritten,
                 status_code=status,
@@ -868,11 +905,30 @@ async def _serve_kazwire_page_or_asset(request: Request, rel_path: str) -> Respo
             headers=_cors_headers({"Cache-Control": "no-store"}),
         )
     except Exception as exc:
+        if cache_eligible and target_url in _HTML_PAGE_CACHE:
+            _, st, rw = _HTML_PAGE_CACHE[target_url]
+            return HTMLResponse(
+                content="" if request.method == "HEAD" else rw,
+                status_code=st,
+                headers=_cors_headers({"Cache-Control": "no-store"}),
+            )
         return HTMLResponse(
             content=f"<!doctype html><html><body>Kazwire upstream error: {exc}</body></html>",
             status_code=502,
             headers=_cors_headers(),
         )
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        target_url = f"{UPSTREAM_MAIN}/"
+        status, content, hdrs = await _upstream_get(target_url)
+        ct = (hdrs.get("content-type") or "text/html").split(";")[0].strip().lower()
+        if status == 200 and "text/html" in ct:
+            rewritten = _rewrite_kazwire_html(content.decode("utf-8", errors="replace"))
+            _HTML_PAGE_CACHE[target_url] = (time.monotonic(), status, rewritten)
+    except Exception:
+        pass
 
 
 @router.api_route("/kazwire/api/comments", methods=["GET", "POST", "OPTIONS"], include_in_schema=False)

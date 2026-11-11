@@ -226,10 +226,22 @@ def _get_http_client() -> httpx.Client:
     global _HTTP_CLIENT
     with _HTTP_LOCK:
         if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
+            _has_proxy = bool(
+                os.environ.get("HTTPS_PROXY")
+                or os.environ.get("HTTP_PROXY")
+                or os.environ.get("https_proxy")
+                or os.environ.get("http_proxy")
+            )
+            _limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
             _HTTP_CLIENT = httpx.Client(
+                transport=(
+                    None
+                    if _has_proxy
+                    else httpx.HTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
+                ),
                 timeout=4.0,
                 follow_redirects=True,
-                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+                limits=_limits,
             )
         return _HTTP_CLIENT
 

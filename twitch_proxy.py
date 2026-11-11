@@ -19,7 +19,7 @@ SERVICE_PATH = "/twitch"
 import os
 
 router = APIRouter()
-_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY"))
+_HAS_PROXY_ENV = bool(os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy"))
 _TWITCH_LIMITS = httpx.Limits(max_connections=100, max_keepalive_connections=30, keepalive_expiry=30.0)
 client = httpx.AsyncClient(
     follow_redirects=True,
@@ -31,6 +31,7 @@ client = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=False,
             retries=2,
             limits=_TWITCH_LIMITS,
@@ -584,6 +585,30 @@ async def _stream_response(resp, status_code, headers):
             await resp.aclose()
     return StreamingResponse(iterator(), status_code=status_code, headers=headers, media_type=None)
 
+import time as _twitch_time
+
+_TWITCH_GUEST_HTML_CACHE: dict[str, tuple[float, str, str]] = {}
+_TWITCH_STATIC_TEXT_CACHE: dict[tuple[str, str], tuple[float, str, str]] = {}
+_TWITCH_GUEST_HTML_TTL = 60.0
+_TWITCH_STATIC_TTL = 1800.0
+
+
+def _rewrite_twitch_html(raw_html: str, origin: str, request=None) -> str:
+    text = re.sub(r'\s+integrity="[^"]+"', '', raw_html)
+    text = re.sub(r"\s+integrity='[^']+'", '', text)
+    text = re.sub(r'<meta\s+http-equiv=["\']Content-Security-Policy[^>]*>', '', text, flags=re.I)
+    if request is not None:
+        text = rewrite_text_content_twitch(text, request)
+    else:
+        text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.twitch\.tv', (origin + r'/proxy_subdomain/twitch/\1'), text)
+        text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.ttvnw\.net', (origin + r'/proxy_subdomain/ttvnw/\1'), text)
+        text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.jtvnw\.net', (origin + r'/proxy_subdomain/jtvnw/\1'), text)
+        text = re.sub(r'https?:\/\/?\\?/?([a-zA-Z0-9\-\.]+)\.twitchcdn\.net', (origin + r'/proxy_subdomain/twitchcdn/\1'), text)
+    text = text.replace("https://player.twitch.tv", origin + "/twitch")
+    tag = "<script>" + NETWORK_HIJACK_SCRIPT_TWITCH + "</script>\n<script src=\"/openchat/chat.js\" defer></script>"
+    return text.replace("</head>", tag + "</head>", 1) if "</head>" in text else tag + text
+
+
 async def process_response(resp, request, service, proxy_headers):
     content_type = resp.headers.get("content-type", "").lower()
     path = request.url.path.lower()
@@ -614,18 +639,29 @@ async def process_response(resp, request, service, proxy_headers):
             text = resp.text
         finally:
             await resp.aclose()
+        origin = _get_public_origin(request)
         if is_html:
-            text = re.sub(r'\s+integrity="[^"]+"', '', text)
-            text = re.sub(r"\s+integrity='[^']+'", '', text)
-            text = re.sub(r'<meta\s+http-equiv=["\']Content-Security-Policy[^>]*>', '', text, flags=re.I)
-            text = rewrite_text_content_twitch(text, request)
-            text = text.replace("https://player.twitch.tv", _get_public_origin(request) + "/twitch")
-            tag = "<script>" + NETWORK_HIJACK_SCRIPT_TWITCH + "</script>\n<script src=\"/openchat/chat.js\" defer></script>"
-            text = text.replace("</head>", tag + "</head>", 1) if "</head>" in text else tag + text
+            text = _rewrite_twitch_html(text, origin, request)
         elif is_css:
             text = rewrite_text_content_twitch(text, request)
+            if resp.status_code == 200 and len(text) <= 524288:
+                if len(_TWITCH_STATIC_TEXT_CACHE) >= 120:
+                    _TWITCH_STATIC_TEXT_CACHE.pop(next(iter(_TWITCH_STATIC_TEXT_CACHE)), None)
+                _TWITCH_STATIC_TEXT_CACHE[(origin, str(request.url.path))] = (
+                    _twitch_time.monotonic(),
+                    text,
+                    resp.headers.get("content-type", "text/css; charset=utf-8"),
+                )
         else:
             text = WORKER_SAFE_HIJACK_TWITCH + "\n" + text
+            if resp.status_code == 200 and len(text) <= 1572864:
+                if len(_TWITCH_STATIC_TEXT_CACHE) >= 120:
+                    _TWITCH_STATIC_TEXT_CACHE.pop(next(iter(_TWITCH_STATIC_TEXT_CACHE)), None)
+                _TWITCH_STATIC_TEXT_CACHE[(origin, str(request.url.path))] = (
+                    _twitch_time.monotonic(),
+                    text,
+                    resp.headers.get("content-type", "application/javascript; charset=utf-8"),
+                )
         proxy_headers["cache-control"] = "no-store" if is_html else proxy_headers.get("cache-control", "public, max-age=3600")
         return Response(content=text, status_code=resp.status_code, headers=proxy_headers)
 
@@ -683,30 +719,86 @@ async def proxy_jtvnw_subdomain(request: Request, subdomain: str, path: str):
 @router.api_route("/proxy_subdomain/twitchcdn/{subdomain}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy_twitchcdn_subdomain(request: Request, subdomain: str, path: str):
     if request.method == "OPTIONS": return Response(status_code=200, headers=clean_headers({}, request, "twitch.tv"))
+    if request.method == "GET" and not request.url.query:
+        origin = _get_public_origin(request)
+        cached = _TWITCH_STATIC_TEXT_CACHE.get((origin, str(request.url.path)))
+        if cached and (_twitch_time.monotonic() - cached[0]) < _TWITCH_STATIC_TTL:
+            hdrs = clean_headers({"content-type": cached[2], "cache-control": "public, max-age=3600"}, request, "twitch.tv")
+            return Response(content=cached[1], status_code=200, headers=hdrs)
     target_url = f"https://{subdomain}.twitchcdn.net/{path}"
     resp = await fetch_from_target(request, request.method, target_url, f"{subdomain}.twitchcdn.net", "twitch.tv")
     if not resp: return Response(content="Twitch upstream unavailable", status_code=502, headers=clean_headers({}, request, "twitch.tv"))
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
     return await process_response(resp, request, "twitch", proxy_headers)
 
+
+async def _serve_cached_guest_twitch_home(request: Request):
+    is_guest_get = (
+        request.method == "GET"
+        and not request.url.query
+        and "auth-token" not in request.cookies
+    )
+    origin = _get_public_origin(request)
+    if is_guest_get:
+        cached = _TWITCH_GUEST_HTML_CACHE.get(origin)
+        if cached and (_twitch_time.monotonic() - cached[0]) < _TWITCH_GUEST_HTML_TTL:
+            hdrs = clean_headers({"content-type": cached[2], "cache-control": "no-store"}, request, "twitch.tv")
+            return Response(content=cached[1], status_code=200, headers=hdrs)
+        raw_entry = _TWITCH_GUEST_HTML_CACHE.get("__raw__")
+        if raw_entry and (_twitch_time.monotonic() - raw_entry[0]) < _TWITCH_GUEST_HTML_TTL:
+            rewritten = _rewrite_twitch_html(raw_entry[1], origin, request)
+            _TWITCH_GUEST_HTML_CACHE[origin] = (raw_entry[0], rewritten, raw_entry[2])
+            hdrs = clean_headers({"content-type": raw_entry[2], "cache-control": "no-store"}, request, "twitch.tv")
+            return Response(content=rewritten, status_code=200, headers=hdrs)
+
+    resp = await fetch_from_target(request, request.method, "https://www.twitch.tv/", "www.twitch.tv", "twitch.tv")
+    if not resp:
+        return Response(content="Twitch upstream unavailable", status_code=502)
+    proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
+    result = await process_response(resp, request, "twitch", proxy_headers)
+    if is_guest_get and result.status_code == 200 and isinstance(result.body, (bytes, bytearray)):
+        try:
+            html_str = bytes(result.body).decode("utf-8", errors="replace")
+            _TWITCH_GUEST_HTML_CACHE[origin] = (
+                _twitch_time.monotonic(),
+                html_str,
+                result.headers.get("content-type", "text/html; charset=utf-8"),
+            )
+        except Exception:
+            pass
+    return result
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        resp = await client.get(
+            "https://www.twitch.tv/",
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept-Language": "ja-JP,ja;q=0.9,en-US;q=0.8",
+                "Accept-Encoding": "identity",
+            },
+        )
+        if resp.status_code == 200 and "text/html" in resp.headers.get("content-type", "").lower():
+            _TWITCH_GUEST_HTML_CACHE["__raw__"] = (
+                _twitch_time.monotonic(),
+                resp.text,
+                resp.headers.get("content-type", "text/html; charset=utf-8"),
+            )
+    except Exception:
+        pass
+
+
 # --- 4. Twitch メインルート ---
 @router.api_route("/twitch", methods=["GET", "HEAD", "POST", "OPTIONS"])
 async def proxy_twitch_home(request: Request):
     if request.method == "OPTIONS":
         return Response(status_code=204)
-    resp = await fetch_from_target(request, request.method, "https://www.twitch.tv/", "www.twitch.tv", "twitch.tv")
-    if not resp:
-        return Response(content="Twitch upstream unavailable", status_code=502)
-    proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
-    return await process_response(resp, request, "twitch", proxy_headers)
+    return await _serve_cached_guest_twitch_home(request)
 
 @router.api_route("/twitch/home/", methods=["GET"])
 async def proxy_twitch_home_entry(request: Request):
-    resp = await fetch_from_target(request, request.method, "https://www.twitch.tv/", "www.twitch.tv", "twitch.tv")
-    if not resp:
-        return Response(content="Twitch upstream unavailable", status_code=502)
-    proxy_headers = clean_headers(resp.headers, request, "twitch.tv")
-    return await process_response(resp, request, "twitch", proxy_headers)
+    return await _serve_cached_guest_twitch_home(request)
 
 
 @router.api_route("/twitch/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
@@ -716,9 +808,8 @@ async def proxy_twitch_main(request: Request, path: str):
     # /twitch/home は Twitch のホーム入口として扱う
     # それ以外のパス（チャンネル名など）は従来動作を維持する
     if path.rstrip("/") == "home":
-        target_url = "https://www.twitch.tv/"
-    else:
-        target_url = f"https://www.twitch.tv/{path}"
+        return await _serve_cached_guest_twitch_home(request)
+    target_url = f"https://www.twitch.tv/{path}"
     resp = await fetch_from_target(request, request.method, target_url, "www.twitch.tv", "twitch.tv")
     if not resp: return Response(content="Twitch upstream unavailable", status_code=502)
     proxy_headers = clean_headers(resp.headers, request, "twitch.tv")

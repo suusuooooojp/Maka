@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import ipaddress
 import json
 import os
@@ -39,30 +40,19 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-def _has_proxy_env() -> bool:
-    return bool(
-        os.getenv("HTTPS_PROXY")
-        or os.getenv("HTTP_PROXY")
-        or os.getenv("ALL_PROXY")
-        or os.getenv("https_proxy")
-        or os.getenv("http_proxy")
-        or os.getenv("all_proxy")
-    )
-
-
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not _has_proxy_env():
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 4500)
+            curl.setopt(connect_timeout_ms, 15000)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
@@ -347,6 +337,12 @@ def _patch_controller_sw(source: bytes) -> bytes:
             "_shBodyVal instanceof ArrayBuffer?[_shBodyVal]:void 0",
             1,
         )
+
+    old_cookie_wait = (
+        'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
+        'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
+    )
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
 
     old_timer = (
         'setTimeout(async()=>{for(let e of(console.log("service worker activated, notifying clients to revive"),'
@@ -699,70 +695,66 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     return text.encode("utf-8")
 
 
-@router.get("/x/runtime/scramjet.js", include_in_schema=False)
-async def x_scramjet_js():
+_PATCHED_RUNTIME_CACHE: dict[str, bytes] = {}
+_PATCHED_RUNTIME_GZIP_CACHE: dict[str, bytes] = {}
+
+
+async def _ensure_patched_runtime(asset_name: str, patch_fn) -> bytes | Response:
+    cached = _PATCHED_RUNTIME_CACHE.get(asset_name)
+    if cached is not None:
+        return cached
     import app as host_app
 
-    resp = await host_app.scramjet_asset("scramjet.js")
+    resp = await host_app.scramjet_asset(asset_name)
     if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
         return resp
-    patched = _patch_scramjet_js(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+    patched = patch_fn(bytes(resp.body))
+    _PATCHED_RUNTIME_CACHE[asset_name] = patched
+    _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gzip.compress(patched, compresslevel=5)
+    return patched
+
+
+async def _serve_patched_runtime(request: Request, asset_name: str, patch_fn) -> Response:
+    res = await _ensure_patched_runtime(asset_name, patch_fn)
+    if isinstance(res, Response):
+        return res
+    headers = {"Cache-Control": "public, max-age=31536000, immutable", "Vary": "Accept-Encoding"}
+    ae = (request.headers.get("accept-encoding") or "").lower()
+    if "gzip" in ae:
+        gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
+        if gz is None:
+            gz = gzip.compress(res, compresslevel=5)
+            _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
+        headers["Content-Encoding"] = "gzip"
+        return Response(gz, media_type="application/javascript", headers=headers)
+    return Response(res, media_type="application/javascript", headers=headers)
+
+
+@router.get("/x/runtime/scramjet.js", include_in_schema=False)
+async def x_scramjet_js(request: Request):
+    return await _serve_patched_runtime(request, "scramjet.js", _patch_scramjet_js)
 
 
 @router.get("/x/runtime/controller.api.js", include_in_schema=False)
-async def x_controller_api():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.api.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_api(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def x_controller_api(request: Request):
+    return await _serve_patched_runtime(request, "controller.api.js", _patch_controller_api)
 
 
 @router.get("/x/runtime/controller.sw.js", include_in_schema=False)
-async def x_controller_sw():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.sw.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_sw(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def x_controller_sw(request: Request):
+    return await _serve_patched_runtime(request, "controller.sw.js", _patch_controller_sw)
 
 
 @router.get("/x/runtime/controller.inject.js", include_in_schema=False)
-async def x_controller_inject():
-    import app as host_app
-
-    resp = await host_app.scramjet_asset("controller.inject.js")
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
-        return resp
-    patched = _patch_controller_inject(bytes(resp.body))
-    return Response(
-        patched,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
-    )
+async def x_controller_inject(request: Request):
+    return await _serve_patched_runtime(request, "controller.inject.js", _patch_controller_inject)
 
 
 async def _x_sw_override(request: Request) -> Response:
     code = f"""
 importScripts('/x/runtime/controller.sw.js?v={RUNTIME_REV}');
 const X_MEDIA_CACHE = 'sh-x-media-{RUNTIME_REV}';
+const X_REWRITTEN_CACHE = 'sh-x-rewritten-{RUNTIME_REV}';
 const X_IMAGE_HOSTS = ['pbs.twimg.com','ton.twimg.com','abs.twimg.com','abs-0.twimg.com','video.twimg.com','twimg.com','pscp.tv'];
 function encodeMediaKey(urlStr) {{
   try {{
@@ -790,6 +782,15 @@ function isDirectMediaTarget(target) {{
   const p = String(target.pathname || '');
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   return true;
+}}
+function isImmutableXStaticBundle(target) {{
+  if (!target) return false;
+  const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
+  const p = String(target.pathname || '');
+  if ((h === 'abs.twimg.com' || h === 'abs-0.twimg.com' || h === 'ton.twimg.com') && /\\.(js|mjs|css)(\\?|$)/i.test(p)) {{
+    return true;
+  }}
+  return false;
 }}
 function isCacheableImageHost(host) {{
   const h = String(host || '').toLowerCase().replace(/\\.$/, '');
@@ -825,6 +826,7 @@ function decodeRepeated(value) {{
 }}
 function stripScramjetParams(target) {{
   try {{
+    target.pathname = target.pathname.replace(/\\?\\$[^/]*$/, '');
     for (const k of [...target.searchParams.keys()]) {{
       if (k.startsWith('$')) target.searchParams.delete(k);
     }}
@@ -837,7 +839,7 @@ function extractAnyVirtualUrl(url) {{
     if (u.pathname === '/x/runtime/media-relay') {{
       const kv = u.searchParams.get('k');
       const uv = kv ? decodeMediaKey(kv) : u.searchParams.get('url');
-      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(uv)));
+      if (uv) return stripScramjetParams(normalizeMediaTarget(new URL(uv.replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, ''))));
     }}
     const marker = '/x/~/sj/';
     const i = u.pathname.indexOf(marker);
@@ -846,7 +848,7 @@ function extractAnyVirtualUrl(url) {{
     const directMatch = rawAfter.match(/(?:^|\\/)(https?(?:%3A|:)(?:%2F|\\/){{2}}.*)$/i);
     if (directMatch && directMatch[1]) {{
       try {{
-        const decoded = decodeRepeated(directMatch[1]);
+        const decoded = decodeRepeated(directMatch[1]).replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, '');
         const target = normalizeMediaTarget(new URL(decoded));
         if (u.search) {{
           const extra = new URLSearchParams(u.search);
@@ -862,7 +864,7 @@ function extractAnyVirtualUrl(url) {{
     const tail = decodeRepeated(rawAfter);
     const bits = tail.split('/');
     for (let n = Math.min(3, bits.length); n >= 0; n--) {{
-      const candidate = decodeRepeated(bits.slice(n).join('/'));
+      const candidate = decodeRepeated(bits.slice(n).join('/')).replace(/([?&])\\$[^&#]*(?:&|$)/g, '$1').replace(/[?&]$/, '');
       try {{
         const target = stripScramjetParams(normalizeMediaTarget(new URL(candidate)));
         target.hash = '';
@@ -1031,6 +1033,24 @@ self.addEventListener('fetch', event => {{
       }}
     }}
     if (typeof $scramjetController !== 'undefined' && $scramjetController.shouldRoute(event)) {{
+      if (event.request.method === 'GET' && anyTarget && isImmutableXStaticBundle(anyTarget) && typeof caches !== 'undefined') {{
+        const cacheKey = event.request.url;
+        event.respondWith((async () => {{
+          try {{
+            const cache = await caches.open(X_REWRITTEN_CACHE);
+            const hit = await cache.match(cacheKey);
+            if (hit) return hit;
+            const resp = await $scramjetController.route(event);
+            if (resp && resp.status === 200) {{
+              try {{ await cache.put(cacheKey, resp.clone()); }} catch {{}}
+            }}
+            return resp;
+          }} catch {{
+            return $scramjetController.route(event);
+          }}
+        }})());
+        return;
+      }}
       event.respondWith($scramjetController.route(event));
       return;
     }}
@@ -1116,12 +1136,9 @@ _DESKTOP_CHROME_UA = (
 )
 
 
-_CURL_DISABLED_UNTIL: float = 0.0
-
-
 async def _get_curl_session():
     global _CURL_SESSION
-    if StatelessCurlSession is None or time.time() < _CURL_DISABLED_UNTIL:
+    if StatelessCurlSession is None:
         return None
     if _CURL_SESSION is not None:
         return _CURL_SESSION
@@ -1131,7 +1148,7 @@ async def _get_curl_session():
                 impersonate="chrome131",
                 default_headers=False,
                 allow_redirects=False,
-                timeout=10,
+                timeout=25,
                 max_clients=64,
             )
     return _CURL_SESSION
@@ -1145,9 +1162,10 @@ async def _get_media_http_client() -> httpx.AsyncClient:
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
-            timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
-            if not _has_proxy_env():
+            timeout = httpx.Timeout(connect=7.0, read=45.0, write=10.0, pool=10.0)
+            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1215,7 +1233,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
         _PUBLIC_HOST_CACHE[key] = now
         return
-    if not _has_proxy_env():
+    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.run_in_executor(
@@ -1332,19 +1350,23 @@ def _rewrite_hls_manifest(
 
 
 def _strip_dollar_query(raw_url: str) -> str:
-    if "?" not in raw_url:
+    if not raw_url:
         return raw_url
+    cleaned = re.sub(r"([?&])(?:%24|\$)[^&#]*(?:&|$)", r"\1", raw_url)
+    cleaned = re.sub(r"[?&]+(?=#|$)", "", cleaned)
+    if "?" not in cleaned:
+        return cleaned
     try:
-        p = urlparse(raw_url)
+        p = urlparse(cleaned)
         if not p.query:
-            return raw_url
+            return urlunparse((p.scheme, p.netloc, p.path, p.params, "", ""))
         clean_parts = [
             part for part in p.query.split("&")
             if part and not unquote(part.split("=", 1)[0]).startswith("$")
         ]
         return urlunparse((p.scheme, p.netloc, p.path, p.params, "&".join(clean_parts), ""))
     except Exception:
-        return raw_url
+        return cleaned
 
 
 async def _serve_x_media_url(
@@ -1811,7 +1833,6 @@ async def _fetch_logged_out_home_urt(cursor: str | None = None) -> dict:
 
 @router.post("/x/runtime/http-relay", include_in_schema=False)
 async def x_http_relay(request: Request):
-    global _CURL_DISABLED_UNTIL
     raw = await request.body()
     if len(raw) < 4:
         return Response(b"invalid frame", status_code=400)
@@ -2148,13 +2169,13 @@ async def x_http_relay(request: Request):
 
     ephemeral_session: StatelessCurlSession | None = None
     try:
-        if StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
+        if StatelessCurlSession is not None:
             if has_sensitive_auth:
                 ephemeral_session = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=9,
+                    timeout=25,
                     max_clients=4,
                 )
                 active_session = ephemeral_session
@@ -2172,7 +2193,7 @@ async def x_http_relay(request: Request):
                     headers=header_dict,
                     data=req_body if req_body else None,
                     allow_redirects=False,
-                    timeout=8,
+                    timeout=22,
                 )
                 status = int(upstream.status_code)
                 status_text = str(getattr(upstream, "reason", "") or "OK")
@@ -2180,7 +2201,6 @@ async def x_http_relay(request: Request):
                 raw_multi = upstream.headers.multi_items()
                 used_curl = True
             except Exception:
-                _CURL_DISABLED_UNTIL = time.time() + 180.0
                 used_curl = False
 
         if not used_curl:
@@ -2452,11 +2472,8 @@ def _shell_html(initial_target: str) -> str:
 <meta name="theme-color" content="#000000">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="preload" href="/x/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
-<link rel="preload" href="/x/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
-<link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
 <link rel="stylesheet" href="/design-system/m3.css">
-<script src="/design-system/m3.js" defer></script>
+<script src="/design-system/m3.js"></script>
 <style>
 :root{{--bg:var(--md-sys-color-surface,#000000);--text:var(--md-sys-color-on-surface,#e7e9ea);--muted:var(--md-sys-color-on-surface-variant,#71767b)}}
 *{{box-sizing:border-box}}
@@ -2627,8 +2644,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   function cleanTargetUrl(rawUrl) {{
     if (!rawUrl || typeof rawUrl !== "string") return "";
     try {{
-      const u = new URL(rawUrl);
+      const stripped = rawUrl.replace(/([?&])(?:%24|\\$)[^&#]*(?:&|$)/gi, "$1").replace(/[?&]+(?=#|$)/g, "");
+      const u = new URL(stripped);
       if (u.protocol !== "http:" && u.protocol !== "https:") return "";
+      u.pathname = u.pathname.replace(/\\?\\$[^/]*$/, "");
       for (const k of [...u.searchParams.keys()]) {{
         if (k.startsWith("$")) u.searchParams.delete(k);
       }}
@@ -2976,8 +2995,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             }}
             if (setCookieEntries.length > 0) {{
               controller.applyCookieSyncEntries?.(setCookieEntries);
-              await controller.persistCookies?.();
-              await controller.propagateCookieSync?.(setCookieEntries, {{}});
+              Promise.resolve(controller.persistCookies?.()).catch(() => {{}});
+              Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
             }}
           }} catch (_) {{}}
         }}
@@ -3342,7 +3361,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && (String(c.scriptURL || "").includes("/x/sw.js") || String(c.scriptURL || "").includes("x_proxy") || String(c.scriptURL || "").includes("/x/")));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -3350,53 +3369,57 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       return;
     }}
     try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.waiting?.postMessage("claim"); }} catch (_) {{}}
-    try {{ reg?.installing?.postMessage("claim"); }} catch (_) {{}}
-
-    let settled = false;
-    let pollTimer = 0;
-    let fallbackTimer = 0;
-    let onChange = null;
-
-    await new Promise((resolve) => {{
-      const finish = () => {{
-        if (settled) return;
-        settled = true;
-        clearInterval(pollTimer);
-        clearTimeout(fallbackTimer);
-        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
-        resolve();
-      }};
-
-      onChange = () => {{
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }};
-      navigator.serviceWorker.addEventListener("controllerchange", onChange);
-
-      pollTimer = setInterval(() => {{
-        try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
-        if (isOurSw(navigator.serviceWorker.controller)) finish();
-      }}, 35);
-
-      if (navigator.serviceWorker.ready) {{
-        navigator.serviceWorker.ready.then((r) => {{
-          try {{ r?.active?.postMessage("claim"); }} catch (_) {{}}
-          if (isOurSw(navigator.serviceWorker.controller)) finish();
-        }}).catch(() => {{}});
-      }}
-
-      fallbackTimer = setTimeout(finish, 1800);
-    }});
-
+    const pendingSw = reg?.installing || reg?.waiting;
+    if (pendingSw) {{
+      await new Promise((resolve) => {{
+        let done = false;
+        const finish = () => {{
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          navigator.serviceWorker.removeEventListener("controllerchange", finish);
+          resolve();
+        }};
+        navigator.serviceWorker.addEventListener("controllerchange", finish);
+        pendingSw.addEventListener("statechange", () => {{
+          if (pendingSw.state === "activated") {{
+            try {{ pendingSw.postMessage("claim"); }} catch (_) {{}}
+            if (isOurSw(navigator.serviceWorker.controller)) finish();
+          }} else if (pendingSw.state === "redundant") {{
+            finish();
+          }}
+        }});
+        const t = setTimeout(finish, 3500);
+      }});
+    }}
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-    if (navigator.serviceWorker.controller) {{
+    try {{ reg?.active?.postMessage("claim"); }} catch (_) {{}}
+    let settled = false;
+    let timer = 0;
+    let onChange = null;
+    await new Promise((resolve) => {{
+      onChange = () => {{
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }};
+      navigator.serviceWorker.addEventListener("controllerchange", onChange);
+      timer = setTimeout(() => {{
+        if (settled) return;
+        settled = true;
+        navigator.serviceWorker.removeEventListener("controllerchange", onChange);
+        resolve();
+      }}, CONTROL_WAIT);
+    }});
+    if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
       return;
     }}
-
     let reloaded = false;
     try {{ reloaded = sessionStorage.getItem(SW_GUARD) === "1"; }} catch (_) {{}}
     if (!reloaded) {{
@@ -3404,7 +3427,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       location.reload();
       throw new Error("Service Worker control reload scheduled");
     }}
-    try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
+    throw new Error("X Service Worker did not take control");
   }}
 
   async function recover(reason) {{
@@ -3591,3 +3614,21 @@ async def x_health():
         "service_worker": "/x/sw.js",
         "virtual_prefix": "/x/~/sj/",
     }
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        await asyncio.gather(
+            _ensure_patched_runtime("scramjet.js", _patch_scramjet_js),
+            _ensure_patched_runtime("controller.api.js", _patch_controller_api),
+            _ensure_patched_runtime("controller.sw.js", _patch_controller_sw),
+            _ensure_patched_runtime("controller.inject.js", _patch_controller_inject),
+            _serve_virtual_wasm_js(),
+            _get_curl_session(),
+            _get_media_http_client(),
+            return_exceptions=True,
+        )
+        asyncio.create_task(_fetch_logged_out_home_urt())
+    except Exception:
+        pass
+

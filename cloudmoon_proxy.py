@@ -55,7 +55,7 @@ def _get_http_client() -> httpx.AsyncClient:
     global _HTTP_CLIENT
     if _HTTP_CLIENT is None or _HTTP_CLIENT.is_closed:
         _HTTP_CLIENT = httpx.AsyncClient(
-            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(verify=False, retries=2),
+            transport=None if _HAS_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=2),
             follow_redirects=True,
             verify=False,
             timeout=httpx.Timeout(15.0, connect=6.0),
