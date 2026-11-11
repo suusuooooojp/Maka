@@ -38,6 +38,9 @@ _IGNORE_PREFIXES = (
     "/x/runtime/http-relay",
     "/instagram/runtime/media-relay",
     "/instagram/runtime/http-relay",
+    "/tver/runtime/media-relay",
+    "/tver/runtime/http-relay",
+    "/tver/runtime/",
     "/tiktok/api/stream",
     "/tiktok/api/image",
     "/cloudmoon/webrtc",
@@ -174,6 +177,14 @@ if _schoolhub_app is not None:
                 request.scope["path"] = f"/activity/{suffix}"
                 path = request.scope["path"]
 
+        if (
+            "/~/sj/" in path
+            or "/runtime/" in path
+            or path.startswith(("/activity/", "/openchat/", "/scramjet/", "/_diag/", "/healthz", "/probe"))
+            or "/openchat/" in path
+        ):
+            return await call_next(request)
+
         proto = "https"
         origin_url = ""
         try:
@@ -183,9 +194,6 @@ if _schoolhub_app is not None:
                 _activity_persistence.register_public_origin(origin_url)
         except Exception:
             pass
-
-        if path.startswith("/activity/") or path.startswith("/openchat/") or "/openchat/" in path:
-            return await call_next(request)
 
         service_name, is_entry_path, canon_path = _detect_service(path)
         cookie_sid = (request.cookies.get("sh_sid") or "").strip()[:100]

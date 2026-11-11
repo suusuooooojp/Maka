@@ -1790,10 +1790,12 @@ _SNAPSHOT_CACHE: dict | None = None
 _SNAPSHOT_CACHE_TS: float = 0.0
 _SNAPSHOT_CACHE_VERSION: int = -1
 _SNAPSHOT_CACHE_TTL: float = 1.5
+_STATS_AGG_CACHE: tuple[float, dict, list] | None = None
+_STATS_AGG_TTL: float = 5.0
 
 
 def build_snapshot_payload(force: bool = False) -> dict:
-    global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_TS, _SNAPSHOT_CACHE_VERSION
+    global _SNAPSHOT_CACHE, _SNAPSHOT_CACHE_TS, _SNAPSHOT_CACHE_VERSION, _STATS_AGG_CACHE
     now = _now()
     if (
         not force
@@ -1828,10 +1830,23 @@ def build_snapshot_payload(force: bool = False) -> dict:
             }
             for s in _SESSIONS.values()
         ]
-        stats_data = _aggregate_stats(list(_EVENTS))
-        access_events = [e for e in _EVENTS if _is_access(e)]
-        recent = access_events[-30:] if access_events else _EVENTS[-30:]
-        events = [_json_event(event) for event in recent]
+        if (
+            not force
+            and _STATS_AGG_CACHE is not None
+            and (now - _STATS_AGG_CACHE[0]) < _STATS_AGG_TTL
+        ):
+            stats_data = dict(_STATS_AGG_CACHE[1])
+            events = _STATS_AGG_CACHE[2]
+            live_ccu = len(sessions)
+            if live_ccu > int(stats_data.get("current_ccu") or 0):
+                stats_data["current_ccu"] = live_ccu
+        else:
+            stats_data = _aggregate_stats(list(_EVENTS))
+            access_events = [e for e in _EVENTS if _is_access(e)]
+            recent = access_events[-30:] if access_events else _EVENTS[-30:]
+            events = [_json_event(event) for event in recent]
+            _STATS_AGG_CACHE = (now, stats_data, events)
+
         payload = {
             "ok": True,
             "ttl": HEARTBEAT_TTL,

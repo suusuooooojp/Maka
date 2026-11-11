@@ -68,19 +68,30 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
+def _has_proxy_env() -> bool:
+    return bool(
+        os.getenv("HTTPS_PROXY")
+        or os.getenv("HTTP_PROXY")
+        or os.getenv("ALL_PROXY")
+        or os.getenv("https_proxy")
+        or os.getenv("http_proxy")
+        or os.getenv("all_proxy")
+    )
+
+
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+        if not _has_proxy_env():
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 15000)
+            curl.setopt(connect_timeout_ms, 4500)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
@@ -1100,9 +1111,12 @@ _DESKTOP_CHROME_UA = (
 )
 
 
+_CURL_DISABLED_UNTIL: float = 0.0
+
+
 async def _get_curl_session():
     global _CURL_SESSION
-    if StatelessCurlSession is None:
+    if StatelessCurlSession is None or time.time() < _CURL_DISABLED_UNTIL:
         return None
     if _CURL_SESSION is not None:
         return _CURL_SESSION
@@ -1111,7 +1125,7 @@ async def _get_curl_session():
             _CURL_SESSION = StatelessCurlSession(
                 impersonate="chrome131",
                 allow_redirects=False,
-                timeout=25,
+                timeout=10,
                 max_clients=64,
             )
     return _CURL_SESSION
@@ -1126,7 +1140,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=300, max_keepalive_connections=150, keepalive_expiry=60.0)
             timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
-            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+            if not _has_proxy_env():
                 transport = httpx.AsyncHTTPTransport(
                     retries=2,
                     limits=limits,
@@ -1337,7 +1351,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
         _PUBLIC_HOST_CACHE[key] = now
         return
-    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+    if not _has_proxy_env():
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.run_in_executor(
@@ -4027,6 +4041,7 @@ async def youtube_runtime_gv_stream(request: Request):
 
 @router.post("/youtube/runtime/http-relay", include_in_schema=False)
 async def youtube_http_relay(request: Request):
+    global _CURL_DISABLED_UNTIL
     raw = await request.body()
     if len(raw) < 4:
         return Response(b"invalid frame", status_code=400)
@@ -4243,20 +4258,26 @@ async def youtube_http_relay(request: Request):
             resp_body = b""
             raw_multi = []
             for _hop in range(5):
+                used_gv_curl = False
                 if session is not None:
-                    up = await session.request(
-                        method=method,
-                        url=cur_gv_url,
-                        headers=gv_headers,
-                        data=req_body if req_body else None,
-                        allow_redirects=False,
-                        timeout=25,
-                    )
-                    status = int(up.status_code)
-                    status_text = str(getattr(up, "reason", "") or "OK")
-                    resp_body = bytes(up.content or b"")
-                    raw_multi = list(up.headers.multi_items())
-                else:
+                    try:
+                        up = await session.request(
+                            method=method,
+                            url=cur_gv_url,
+                            headers=gv_headers,
+                            data=req_body if req_body else None,
+                            allow_redirects=False,
+                            timeout=9,
+                        )
+                        status = int(up.status_code)
+                        status_text = str(getattr(up, "reason", "") or "OK")
+                        resp_body = bytes(up.content or b"")
+                        raw_multi = list(up.headers.multi_items())
+                        used_gv_curl = True
+                    except Exception:
+                        _CURL_DISABLED_UNTIL = time.time() + 180.0
+                        session = None
+                if not used_gv_curl:
                     client = await _get_media_http_client()
                     up = await client.request(
                         method=method,
@@ -4465,7 +4486,7 @@ async def youtube_http_relay(request: Request):
 
     ephemeral_session: StatelessCurlSession | None = None
     try:
-        if StatelessCurlSession is not None:
+        if StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
             if has_sensitive_auth or (is_google_auth_req and is_safari_ua):
                 tls_imp = "chrome131"
                 if is_google_auth_req and is_safari_ua:
@@ -4473,7 +4494,7 @@ async def youtube_http_relay(request: Request):
                 ephemeral_session = StatelessCurlSession(
                     impersonate=tls_imp,
                     allow_redirects=False,
-                    timeout=25,
+                    timeout=9,
                     max_clients=4,
                 )
                 session = ephemeral_session
@@ -4491,7 +4512,7 @@ async def youtube_http_relay(request: Request):
                     headers=header_dict,
                     data=req_body if req_body else None,
                     allow_redirects=False,
-                    timeout=22,
+                    timeout=8,
                 )
                 status = int(upstream.status_code)
                 status_text = str(getattr(upstream, "reason", "") or "OK")
@@ -4515,7 +4536,7 @@ async def youtube_http_relay(request: Request):
                             headers=header_dict,
                             data=req_body if req_body else None,
                             allow_redirects=False,
-                            timeout=22,
+                            timeout=8,
                         )
                         status = int(upstream.status_code)
                         status_text = str(getattr(upstream, "reason", "") or "OK")
@@ -4523,6 +4544,7 @@ async def youtube_http_relay(request: Request):
                         raw_multi = upstream.headers.multi_items()
                 used_curl = True
             except Exception:
+                _CURL_DISABLED_UNTIL = time.time() + 180.0
                 used_curl = False
 
         if not used_curl:
@@ -5074,9 +5096,7 @@ def _shell_html(initial_target: str) -> str:
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preload" href="/youtube/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/youtube/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
-<link rel="preload" href="/youtube/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
-<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <script>
 if ("serviceWorker" in navigator) {{
   window.__shSwRegP = navigator.serviceWorker.register("/youtube/sw.js?v={RUNTIME_REV}", {{

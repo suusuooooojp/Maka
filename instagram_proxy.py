@@ -39,7 +39,10 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
-_DNS_RESOLVE_MAP: dict[str, bytes] = {}
+_HAS_PROXY_ENV = any(
+    os.getenv(k)
+    for k in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+)
 
 
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
@@ -48,13 +51,10 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+        if not _HAS_PROXY_ENV:
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
-            resolve_opt = getattr(CurlOpt, "RESOLVE", None)
-            if resolve_opt is not None and _DNS_RESOLVE_MAP:
-                curl.setopt(resolve_opt, list(_DNS_RESOLVE_MAP.values()))
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
             curl.setopt(connect_timeout_ms, 3500)
@@ -125,7 +125,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-ig-v21"
+RUNTIME_REV = "20261113-ig-v22"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -800,6 +800,7 @@ async def _ig_sw_override(request: Request) -> Response:
     code = f"""
 importScripts('/instagram/runtime/controller.sw.js?v={RUNTIME_REV}');
 const IG_MEDIA_CACHE = 'sh-ig-media-{RUNTIME_REV}';
+const IG_REWRITTEN_CACHE = 'sh-ig-rewritten-{RUNTIME_REV}';
 const IG_MEDIA_SUFFIXES = ['cdninstagram.com', 'fbcdn.net'];
 function encodeMediaKey(urlStr) {{
   try {{
@@ -828,6 +829,11 @@ function isDirectMediaTarget(target) {{
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   if (p.startsWith('/rsrc.php/') && !/\\.(webp|png|jpg|jpeg|gif|avif|ico|svg|mp4|m4v|m4s|m3u8|woff2|woff|ttf)(\\?|$)/i.test(p)) return false;
   return true;
+}}
+function isImmutableRsrcBundle(target) {{
+  if (!target || !isDirectMediaHost(target.hostname)) return false;
+  const p = String(target.pathname || '');
+  return p.startsWith('/rsrc.php/') && /\\.(js|mjs|css)(\\?|$)/i.test(p);
 }}
 function isCacheableImageTarget(target) {{
   if (!target || !isDirectMediaHost(target.hostname)) return false;
@@ -913,10 +919,10 @@ function checkShortCircuit(target) {{
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
   if (
-    h === 'graph.instagram.com' && p.includes('logging_client_events') ||
+    (h === 'graph.instagram.com' && p.includes('logging_client_events')) ||
     p.startsWith('/ajax/bz') ||
     p.startsWith('/ajax/qm') ||
-    (h === 'www.facebook.com' && p.startsWith('/ig_xsite_user_info'))
+    (h === 'www.facebook.com' && (p.startsWith('/ig_xsite_user_info') || p.startsWith('/ig_xsite_user_obid')))
   ) {{
     return new Response('{{}}', {{
       status: 200,
@@ -1059,6 +1065,23 @@ self.addEventListener('fetch', event => {{
       }}
     }}
     if (typeof $scramjetController !== 'undefined' && $scramjetController.shouldRoute(event)) {{
+      if (event.request.method === 'GET' && anyTarget && isImmutableRsrcBundle(anyTarget) && typeof caches !== 'undefined') {{
+        const cacheKey = event.request.url;
+        event.respondWith((async () => {{
+          let rwCache = null;
+          try {{
+            rwCache = await caches.open(IG_REWRITTEN_CACHE);
+            const hit = await rwCache.match(cacheKey);
+            if (hit) return hit;
+          }} catch {{}}
+          const resp = await $scramjetController.route(event);
+          if (rwCache && resp && resp.status === 200) {{
+            try {{ rwCache.put(cacheKey, resp.clone()).catch(() => {{}}); }} catch {{}}
+          }}
+          return resp;
+        }})());
+        return;
+      }}
       event.respondWith($scramjetController.route(event));
       return;
     }}
@@ -1185,18 +1208,54 @@ class _NullHttpxCookies(httpx.Cookies):
         pass
 
 
+_RELAY_HTTP_CLIENT: httpx.AsyncClient | None = None
+_RELAY_HTTP_CLIENT_LOCK = asyncio.Lock()
+
+
+async def _get_relay_http_client() -> httpx.AsyncClient:
+    """Fast non-redirecting cookieless client for Instagram HTML, API, and rsrc.php static bundles."""
+    global _RELAY_HTTP_CLIENT
+    if _RELAY_HTTP_CLIENT is not None and not _RELAY_HTTP_CLIENT.is_closed:
+        return _RELAY_HTTP_CLIENT
+    async with _RELAY_HTTP_CLIENT_LOCK:
+        if _RELAY_HTTP_CLIENT is None or _RELAY_HTTP_CLIENT.is_closed:
+            limits = httpx.Limits(max_connections=200, max_keepalive_connections=100, keepalive_expiry=45.0)
+            timeout = httpx.Timeout(connect=4.0, read=20.0, write=12.0, pool=8.0)
+            if not _HAS_PROXY_ENV:
+                transport = httpx.AsyncHTTPTransport(
+                    retries=1,
+                    limits=limits,
+                )
+                client = httpx.AsyncClient(
+                    transport=transport,
+                    cookies=_NullHttpxCookies(),
+                    follow_redirects=False,
+                    timeout=timeout,
+                )
+            else:
+                client = httpx.AsyncClient(
+                    cookies=_NullHttpxCookies(),
+                    follow_redirects=False,
+                    limits=limits,
+                    timeout=timeout,
+                )
+            client._cookies = _NullHttpxCookies()
+            _RELAY_HTTP_CLIENT = client
+    return _RELAY_HTTP_CLIENT
+
+
 async def _get_media_http_client() -> httpx.AsyncClient:
-    """Shared cookieless persistent IPv4 client for Instagram HTML, API, images, and Reel videos."""
+    """Shared cookieless persistent IPv4 client for Instagram images and Reel videos."""
     global _MEDIA_HTTP_CLIENT
     if _MEDIA_HTTP_CLIENT is not None and not _MEDIA_HTTP_CLIENT.is_closed:
         return _MEDIA_HTTP_CLIENT
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
-            timeout = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0)
-            if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+            timeout = httpx.Timeout(connect=5.0, read=40.0, write=15.0, pool=10.0)
+            if not _HAS_PROXY_ENV:
                 transport = httpx.AsyncHTTPTransport(
-                    retries=2,
+                    retries=1,
                     limits=limits,
                 )
                 client = httpx.AsyncClient(
@@ -1218,6 +1277,23 @@ async def _get_media_http_client() -> httpx.AsyncClient:
 
 
 _PUBLIC_HOST_CACHE: dict[tuple[str, int], float] = {}
+_TRUSTED_PUBLIC_SUFFIXES = (
+    "instagram.com",
+    "cdninstagram.com",
+    "fbcdn.net",
+    "facebook.com",
+    "facebook.net",
+    "fbsbx.com",
+    "meta.com",
+    "meta.ai",
+    "threads.net",
+    "google.com",
+    "gstatic.com",
+    "googleapis.com",
+    "googleusercontent.com",
+    "apple.com",
+    "cdn-apple.com",
+)
 
 
 async def _ensure_public_host(hostname: str, port: int) -> None:
@@ -1249,37 +1325,14 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     cached = _PUBLIC_HOST_CACHE.get(key)
     if cached and (now - cached) < 300.0:
         return
-    _trusted_suffixes = (
-        "instagram.com",
-        "cdninstagram.com",
-        "fbcdn.net",
-        "facebook.com",
-        "facebook.net",
-        "fbsbx.com",
-        "meta.com",
-        "meta.ai",
-        "threads.net",
-        "google.com",
-        "gstatic.com",
-        "googleapis.com",
-        "googleusercontent.com",
-        "apple.com",
-        "cdn-apple.com",
-    )
-    is_trusted = any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes)
-    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+    if any(host == sfx or host.endswith("." + sfx) for sfx in _TRUSTED_PUBLIC_SUFFIXES):
+        _PUBLIC_HOST_CACHE[key] = now
+        return
+    if not _HAS_PROXY_ENV:
         loop = asyncio.get_running_loop()
-        infos = []
-        try:
-            infos = await loop.run_in_executor(
-                None, lambda: socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
-            )
-        except Exception:
-            if not is_trusted:
-                infos = await loop.run_in_executor(
-                    None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-                )
-        ipv4_addrs: list[str] = []
+        infos = await loop.run_in_executor(
+            None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+        )
         for _, _, _, _, sockaddr in infos:
             ip_text = sockaddr[0]
             try:
@@ -1292,15 +1345,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
                 or ip.is_link_local
                 or ip.is_multicast
             ):
-                if not is_trusted:
-                    raise PermissionError(f"non-public address {ip_text}")
-                continue
-            if isinstance(ip, ipaddress.IPv4Address) and ip_text not in ipv4_addrs:
-                ipv4_addrs.append(ip_text)
-        if ipv4_addrs:
-            if len(_DNS_RESOLVE_MAP) > 256:
-                _DNS_RESOLVE_MAP.clear()
-            _DNS_RESOLVE_MAP[f"{host}:{port}"] = f"{host}:{port}:{','.join(ipv4_addrs[:6])}".encode("ascii")
+                raise PermissionError(f"non-public address {ip_text}")
     _PUBLIC_HOST_CACHE[key] = now
 
 
@@ -1748,6 +1793,10 @@ def _inline_ig_data_scripts(html_bytes: bytes) -> bytes:
 
 
 _CURL_DISABLED_UNTIL: float = 0.0
+_IG_PREFETCH_SEMAPHORE = asyncio.Semaphore(8)
+_IG_STATIC_URL_RE = re.compile(
+    rb'https:(?:\\/|/){2}static\.cdninstagram\.com(?:\\/|/)rsrc\.php(?:\\/|/)[^"\'\s<>\\]+\.(?:js|css)(?:\?[^"\'\s<>\\]*)?'
+)
 
 
 async def _ig_raw_single_request(
@@ -1807,7 +1856,7 @@ async def _ig_raw_single_request(
                 except Exception:
                     pass
 
-    client = await _get_media_http_client()
+    client = await _get_relay_http_client()
     upstream = await client.request(
         method=method,
         url=url,
@@ -1821,6 +1870,73 @@ async def _ig_raw_single_request(
     resp_body = bytes(upstream.content or b"")
     raw_multi = list(upstream.headers.multi_items())
     return status, status_text, resp_body, raw_multi
+
+
+async def _prefetch_single_ig_asset(asset_url: str) -> None:
+    now = time.time()
+    cached = _STATIC_ASSET_CACHE.get(asset_url)
+    if cached and (now - cached[0]) < _STATIC_ASSET_TTL:
+        return
+    async with _IG_PREFETCH_SEMAPHORE:
+        cached = _STATIC_ASSET_CACHE.get(asset_url)
+        if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+            return
+        try:
+            client = await _get_relay_http_client()
+            resp = await client.get(
+                asset_url,
+                headers={
+                    "User-Agent": _DESKTOP_CHROME_UA,
+                    "Accept": "*/*",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Origin": "https://www.instagram.com",
+                    "Referer": "https://www.instagram.com/",
+                },
+            )
+            if resp.status_code == 200 and 0 < len(resp.content) <= _STATIC_ASSET_MAX_BYTES:
+                out_headers: list[list[str]] = []
+                for k, v in resp.headers.multi_items():
+                    kl = k.lower()
+                    if kl in _RELAY_STRIP_RESP_HEADERS or kl == "set-cookie" or kl.startswith(":"):
+                        continue
+                    out_headers.append([k, v])
+                out_headers.append(["access-control-allow-origin", "*"])
+                out_headers.append(["cross-origin-resource-policy", "cross-origin"])
+                if len(_STATIC_ASSET_CACHE) >= _STATIC_ASSET_MAX_ITEMS:
+                    oldest_key = next(iter(_STATIC_ASSET_CACHE))
+                    _STATIC_ASSET_CACHE.pop(oldest_key, None)
+                _STATIC_ASSET_CACHE[asset_url] = (
+                    time.time(),
+                    200,
+                    "OK",
+                    out_headers,
+                    bytes(resp.content),
+                )
+        except Exception:
+            pass
+
+
+async def _prefetch_ig_static_from_html(html_bytes: bytes) -> None:
+    if not html_bytes:
+        return
+    try:
+        urls: list[str] = []
+        seen: set[str] = set()
+        for m in _IG_STATIC_URL_RE.finditer(html_bytes):
+            raw = m.group(0).replace(b"\\/", b"/").replace(b"&amp;", b"&")
+            try:
+                u = raw.decode("ascii")
+            except Exception:
+                continue
+            if u not in seen:
+                seen.add(u)
+                urls.append(u)
+                if len(urls) >= 28:
+                    break
+        if urls:
+            await asyncio.gather(*(_prefetch_single_ig_asset(u) for u in urls), return_exceptions=True)
+    except Exception:
+        pass
 
 
 async def _ig_upstream_request(
@@ -2466,7 +2582,7 @@ async def ig_http_relay(request: Request):
     if (
         (host == "graph.instagram.com" and "logging_client_events" in req_path)
         or req_path.startswith(("/ajax/bz", "/ajax/qm"))
-        or (host == "www.facebook.com" and req_path.startswith("/ig_xsite_user_info"))
+        or (host == "www.facebook.com" and req_path.startswith(("/ig_xsite_user_info", "/ig_xsite_user_obid")))
     ):
         return _pack_relay_response(
             200,
@@ -2712,7 +2828,7 @@ async def ig_http_relay(request: Request):
             url=url,
             headers=header_dict,
             body=req_body if req_body else None,
-            timeout=15.0,
+            timeout=16.0,
             prefer_httpx=not is_credential_login,
             fresh_curl=is_credential_login,
             impersonate_profile=impersonate_profile,
@@ -2808,6 +2924,8 @@ async def ig_http_relay(request: Request):
         out_headers.append(["access-control-expose-headers", "*"])
 
     if is_html and status == 200 and resp_body:
+        if host in ("www.instagram.com", "instagram.com"):
+            asyncio.create_task(_prefetch_ig_static_from_html(resp_body))
         if b"modulepreload" in resp_body:
             resp_body = re.sub(
                 rb'<link\b[^>]*\brel=["\']?modulepreload["\']?[^>]*>',
@@ -3155,9 +3273,7 @@ def _shell_html(initial_target: str) -> str:
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="preload" href="/instagram/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/instagram/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
-<link rel="preload" href="/instagram/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
-<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin="anonymous">
 <script>
 if ("serviceWorker" in navigator) {{
   window.__shSwRegP = navigator.serviceWorker.register(
@@ -3208,7 +3324,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   const SW_GUARD = "schoolhub.instagram.sw-reload.v1";
   const MAX_RECOVERY = 3;
   const CONTROL_WAIT = 12000;
-  const HEALTH_DELAY = 10000;
+  const HEALTH_DELAY = 20000;
   const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
   let controller = null;
@@ -3224,6 +3340,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
   let ready = false;
   let navigationToken = 0;
   let lastUrl = INITIAL;
+  let lastRelayActivityAt = Date.now();
+  let activeRelayInflight = 0;
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
@@ -3456,7 +3574,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         (h === "graph.instagram.com" && p.includes("logging_client_events")) ||
         p.startsWith("/ajax/bz") ||
         p.startsWith("/ajax/qm") ||
-        (h === "www.facebook.com" && p.startsWith("/ig_xsite_user_info"))
+        (h === "www.facebook.com" && (p.startsWith("/ig_xsite_user_info") || p.startsWith("/ig_xsite_user_obid")))
       ) {{
         const b = new TextEncoder().encode("{{}}").buffer;
         return {{
@@ -3537,6 +3655,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
     constructor() {{
       this.wispClient = null;
       this.wispPromise = null;
+      this.staticInflight = new Map();
     }}
     async init() {{
       return;
@@ -3575,6 +3694,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const sc = checkTransportShortCircuit(urlStr);
       if (sc) return sc;
 
+      lastRelayActivityAt = Date.now();
       const list = normalizeHeadersList(headers, urlStr);
       const rangeEntry = list.find(([k]) => k.toLowerCase() === "range");
 
@@ -3596,9 +3716,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
                 }};
               }}
               const r = await fetch(relayUrl, {{ method: "GET", credentials: "omit", signal }});
+              lastRelayActivityAt = Date.now();
               if (r && r.status < 400) {{
                 if (r.status === 200) {{
-                  try {{ await cache.put(relayUrl, r.clone()); }} catch (_) {{}}
+                  try {{ cache.put(relayUrl, r.clone()).catch(() => {{}}); }} catch (_) {{}}
                 }}
                 return {{
                   body: await r.arrayBuffer(),
@@ -3612,6 +3733,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
           const fwdHeaders = {{}};
           if (rangeEntry && rangeEntry[1]) fwdHeaders["Range"] = rangeEntry[1];
           const r = await fetch(relayUrl, {{ method: m, headers: fwdHeaders, credentials: "omit", signal }});
+          lastRelayActivityAt = Date.now();
           if (r && r.status < 400) {{
             return {{
               body: m === "HEAD" ? new ArrayBuffer(0) : await r.arrayBuffer(),
@@ -3639,29 +3761,34 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
         }} catch (_) {{}}
       }}
 
-      try {{
-        const bodyBytes = await serializeRequestBody(body);
-        const metaBytes = new TextEncoder().encode(JSON.stringify({{
-          url: urlStr,
-          method: m,
-          headers: list,
-        }}));
-        const frameBuf = new Uint8Array(4 + metaBytes.byteLength + bodyBytes.byteLength);
-        new DataView(frameBuf.buffer).setUint32(0, metaBytes.byteLength, false);
-        frameBuf.set(metaBytes, 4);
-        frameBuf.set(bodyBytes, 4 + metaBytes.byteLength);
+      if (canClientCache && !rangeEntry && this.staticInflight.has(urlStr)) {{
+        try {{
+          const shared = await this.staticInflight.get(urlStr);
+          return {{
+            body: shared.body.slice(0),
+            headers: shared.headers,
+            status: shared.status,
+            statusText: shared.statusText,
+          }};
+        }} catch (_) {{}}
+      }}
 
-        let resp = await fetch(RELAY_ENDPOINT, {{
-          method: "POST",
-          credentials: "omit",
-          cache: "no-store",
-          headers: {{ "content-type": "application/octet-stream" }},
-          body: frameBuf,
-          signal,
-        }});
-        if (!resp.ok) {{
-          await new Promise((r) => setTimeout(r, 350));
-          resp = await fetch(RELAY_ENDPOINT, {{
+      const doRelayFetch = async () => {{
+        activeRelayInflight += 1;
+        lastRelayActivityAt = Date.now();
+        try {{
+          const bodyBytes = await serializeRequestBody(body);
+          const metaBytes = new TextEncoder().encode(JSON.stringify({{
+            url: urlStr,
+            method: m,
+            headers: list,
+          }}));
+          const frameBuf = new Uint8Array(4 + metaBytes.byteLength + bodyBytes.byteLength);
+          new DataView(frameBuf.buffer).setUint32(0, metaBytes.byteLength, false);
+          frameBuf.set(metaBytes, 4);
+          frameBuf.set(bodyBytes, 4 + metaBytes.byteLength);
+
+          let resp = await fetch(RELAY_ENDPOINT, {{
             method: "POST",
             credentials: "omit",
             cache: "no-store",
@@ -3669,84 +3796,119 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
             body: frameBuf,
             signal,
           }});
-        }}
-        if (!resp.ok) throw new Error("HTTP relay status " + resp.status);
-        const rawBuf = await resp.arrayBuffer();
-        if (rawBuf.byteLength < 4) throw new Error("HTTP relay short buffer");
-        const metaLen = new DataView(rawBuf).getUint32(0, false);
-        if (rawBuf.byteLength < 4 + metaLen) throw new Error("HTTP relay truncated meta");
-        const metaJson = new TextDecoder().decode(new Uint8Array(rawBuf, 4, metaLen));
-        const meta = JSON.parse(metaJson);
-        const payloadBytes = new Uint8Array(rawBuf, 4 + metaLen);
-        const statusNum = Number(meta.status || 200);
-        if (statusNum === 502 && payloadBytes.byteLength < 512) {{
-          const errPreview = new TextDecoder().decode(payloadBytes);
-          if (errPreview.startsWith("upstream error:")) {{
-            throw new Error(errPreview);
+          if (!resp.ok) {{
+            await new Promise((r) => setTimeout(r, 350));
+            resp = await fetch(RELAY_ENDPOINT, {{
+              method: "POST",
+              credentials: "omit",
+              cache: "no-store",
+              headers: {{ "content-type": "application/octet-stream" }},
+              body: frameBuf,
+              signal,
+            }});
           }}
-        }}
-        const respBody = (m === "HEAD" || meta.status === 204 || meta.status === 304)
-          ? new ArrayBuffer(0)
-          : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
-        const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
-        let explicitClearAuth = false;
-        const setCookieEntries = [];
-        for (const [k, v] of respHeaders) {{
-          if (!k) continue;
-          const kl = k.toLowerCase();
-          if (kl === "x-sh-clear-auth" && String(v).trim() === "1") {{
-            explicitClearAuth = true;
-          }} else if (kl === "set-cookie" && v) {{
-            const scStr = String(v);
-            if (/^sessionid=(?:""|deleted|;|$)/i.test(scStr.trim()) || (/^sessionid=/i.test(scStr.trim()) && /max-age=0|1970/i.test(scStr))) {{
+          if (!resp.ok) throw new Error("HTTP relay status " + resp.status);
+          const rawBuf = await resp.arrayBuffer();
+          lastRelayActivityAt = Date.now();
+          if (rawBuf.byteLength < 4) throw new Error("HTTP relay short buffer");
+          const metaLen = new DataView(rawBuf).getUint32(0, false);
+          if (rawBuf.byteLength < 4 + metaLen) throw new Error("HTTP relay truncated meta");
+          const metaJson = new TextDecoder().decode(new Uint8Array(rawBuf, 4, metaLen));
+          const meta = JSON.parse(metaJson);
+          const payloadBytes = new Uint8Array(rawBuf, 4 + metaLen);
+          const statusNum = Number(meta.status || 200);
+          if (statusNum === 502 && payloadBytes.byteLength < 512) {{
+            const errPreview = new TextDecoder().decode(payloadBytes);
+            if (errPreview.startsWith("upstream error:")) {{
+              throw new Error(errPreview);
+            }}
+          }}
+          const respBody = (m === "HEAD" || meta.status === 204 || meta.status === 304)
+            ? new ArrayBuffer(0)
+            : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
+          const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
+          let explicitClearAuth = false;
+          const setCookieEntries = [];
+          for (const [k, v] of respHeaders) {{
+            if (!k) continue;
+            const kl = k.toLowerCase();
+            if (kl === "x-sh-clear-auth" && String(v).trim() === "1") {{
               explicitClearAuth = true;
-            }}
-            setCookieEntries.push({{ url: urlStr, cookie: scStr }});
-          }}
-        }}
-        if (explicitClearAuth) {{
-          globalThis.__shExplicitClear = true;
-          try {{
-            sessionStorage.removeItem(SESSION_KEY);
-            localStorage.removeItem(SESSION_KEY);
-            sessionStorage.removeItem("__sh_cookie_vault_instagram");
-            localStorage.removeItem("__sh_cookie_vault_instagram");
-            if (controller?.cookieJar?.load) controller.cookieJar.load("[]");
-          }} catch (_) {{}}
-          setTimeout(() => {{ globalThis.__shExplicitClear = false; }}, 4000);
-        }}
-        if (setCookieEntries.length > 0 && controller?.cookieJar) {{
-          try {{
-            controller.applyCookieSyncEntries(setCookieEntries);
-            await controller.persistCookies();
-            await controller.propagateCookieSync(setCookieEntries, {{}});
-          }} catch (_) {{}}
-        }} else if (explicitClearAuth && controller?.persistCookies) {{
-          try {{ await controller.persistCookies(); }} catch (_) {{}}
-        }}
-        if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
-          try {{
-            const hObj = new Headers();
-            for (const [k, v] of respHeaders) {{
-              if (k && k.toLowerCase() !== "set-cookie") {{
-                try {{ hObj.append(k, v); }} catch (_) {{}}
+            }} else if (kl === "set-cookie" && v) {{
+              const scStr = String(v);
+              if (/^sessionid=(?:""|deleted|;|$)/i.test(scStr.trim()) || (/^sessionid=/i.test(scStr.trim()) && /max-age=0|1970/i.test(scStr))) {{
+                explicitClearAuth = true;
               }}
+              setCookieEntries.push({{ url: urlStr, cookie: scStr }});
             }}
-            const cache = await caches.open(STATIC_CACHE_NAME);
-            await cache.put(urlStr, new Response(respBody.slice(0), {{ status: 200, headers: hObj }}));
-          }} catch (_) {{}}
+          }}
+          if (explicitClearAuth) {{
+            globalThis.__shExplicitClear = true;
+            try {{
+              sessionStorage.removeItem(SESSION_KEY);
+              localStorage.removeItem(SESSION_KEY);
+              sessionStorage.removeItem("__sh_cookie_vault_instagram");
+              localStorage.removeItem("__sh_cookie_vault_instagram");
+              if (controller?.cookieJar?.load) controller.cookieJar.load("[]");
+            }} catch (_) {{}}
+            setTimeout(() => {{ globalThis.__shExplicitClear = false; }}, 4000);
+          }}
+          if (setCookieEntries.length > 0 && controller?.cookieJar) {{
+            try {{
+              controller.applyCookieSyncEntries(setCookieEntries);
+              Promise.resolve(controller.persistCookies?.()).catch(() => {{}});
+              Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
+            }} catch (_) {{}}
+          }} else if (explicitClearAuth && controller?.persistCookies) {{
+            try {{ Promise.resolve(controller.persistCookies()).catch(() => {{}}); }} catch (_) {{}}
+          }}
+          if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
+            const cachedCopy = respBody.slice(0);
+            (async () => {{
+              try {{
+                const hObj = new Headers();
+                for (const [k, v] of respHeaders) {{
+                  if (k && k.toLowerCase() !== "set-cookie") {{
+                    try {{ hObj.append(k, v); }} catch (_) {{}}
+                  }}
+                }}
+                const cache = await caches.open(STATIC_CACHE_NAME);
+                await cache.put(urlStr, new Response(cachedCopy, {{ status: 200, headers: hObj }}));
+              }} catch (_) {{}}
+            }})();
+          }}
+          return {{
+            body: respBody,
+            headers: respHeaders,
+            status: statusNum,
+            statusText: String(meta.statusText || "OK"),
+          }};
+        }} catch (relayError) {{
+          console.warn("[SchoolHub Instagram] relay fallback to wisp for", urlStr, relayError);
+          const wisp = await this.ensureWispClient();
+          return await wisp.request(remote, method, body, list, signal);
+        }} finally {{
+          activeRelayInflight = Math.max(0, activeRelayInflight - 1);
+          lastRelayActivityAt = Date.now();
         }}
-        return {{
-          body: respBody,
-          headers: respHeaders,
-          status: statusNum,
-          statusText: String(meta.statusText || "OK"),
-        }};
-      }} catch (relayError) {{
-        console.warn("[SchoolHub Instagram] relay fallback to wisp for", urlStr, relayError);
-        const wisp = await this.ensureWispClient();
-        return await wisp.request(remote, method, body, list, signal);
+      }};
+
+      if (canClientCache && !rangeEntry) {{
+        const p = doRelayFetch();
+        this.staticInflight.set(urlStr, p);
+        try {{
+          const out = await p;
+          return {{
+            body: out.body.slice(0),
+            headers: out.headers,
+            status: out.status,
+            statusText: out.statusText,
+          }};
+        }} finally {{
+          this.staticInflight.delete(urlStr);
+        }}
       }}
+      return await doRelayFetch();
     }}
     connect(url, protocols, requestHeaders, onopen, onmessage, onclose, onerror) {{
       this.ensureWispClient()
@@ -3940,24 +4102,28 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const href = String(win?.location?.href || "");
       const doc = frameEl.contentDocument;
       if (!doc || href === "about:blank") {{
-        return {{ healthy: false, loading: false, errorPage: false }};
+        const activelyFetching = activeRelayInflight > 0 || (Date.now() - lastRelayActivityAt) < 5000;
+        return {{ healthy: false, loading: activelyFetching, errorPage: false }};
       }}
       const body = doc.body;
       const title = String(doc.title || "").trim();
       const text = String(body?.innerText || "").replace(/\\s+/g, " ").trim();
       if (
         text.startsWith("upstream error:") ||
+        text.startsWith("relay gateway error") ||
         text.startsWith("Internal Service Worker Error") ||
         text.startsWith("Service Worker route required")
       ) {{
         return {{ healthy: false, loading: false, errorPage: true }};
       }}
       const hasIgRoot = Boolean(
-        doc.querySelector("main, input[name='email'], input[name='username'], video, img[src*='media-relay'], a[href*='/accounts/login']")
+        doc.querySelector("main, nav, article, form, input[name='email'], input[name='username'], input[name='password'], video, img[src*='media-relay'], a[href*='/accounts/login'], [role='main'], [role='dialog']")
       );
+      const hasSsrMount = Boolean(doc.getElementById("splash-screen") || doc.querySelector("[id^='mount_']"));
       const isProxied = href.includes(PREFIX);
-      const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive");
-      const healthy = Boolean(isProxied && (hasIgRoot || text.length > 24 || title.length > 1));
+      const activelyFetching = activeRelayInflight > 0 || (Date.now() - lastRelayActivityAt) < 6000;
+      const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive" || activelyFetching);
+      const healthy = Boolean(isProxied && (hasIgRoot || hasSsrMount || text.length > 20 || (title.length > 1 && !activelyFetching)));
       return {{ healthy, loading, errorPage: false }};
     }} catch (_) {{
       return {{ healthy: false, loading: false, errorPage: false }};
@@ -4153,7 +4319,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color
       const token = navigationToken;
       const snap = currentDocumentHealthy();
       if (snap.healthy) showHealthy();
-      else armHealthCheck(token, 10000);
+      else armHealthCheck(token, HEALTH_DELAY);
     }});
     frameEl.addEventListener("error", () => {{ recover("iframe-error"); }});
     startFrameMonitor();
@@ -4329,4 +4495,33 @@ async def ig_deeplink(subpath: str, request: Request):
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+async def _ig_startup_prewarm_worker() -> None:
+    await asyncio.sleep(0.5)
+    try:
+        client = await _get_relay_http_client()
+        resp = await client.get(
+            "https://www.instagram.com/",
+            headers={
+                "User-Agent": _DESKTOP_CHROME_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+            },
+        )
+        if resp.status_code == 200 and resp.content:
+            await _prefetch_ig_static_from_html(bytes(resp.content))
+    except Exception:
+        pass
+
+
+@router.on_event("startup")
+async def _ig_prewarm_on_startup() -> None:
+    asyncio.create_task(_ig_startup_prewarm_worker())
+
 

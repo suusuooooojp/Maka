@@ -2253,6 +2253,18 @@ async def serve_chat_media(media_id: str, request: Request):
     return Response(content=body, status_code=200, media_type=content_type, headers=base_headers)
 
 
+def _slice_messages_for_client(
+    clean_msgs: list[dict],
+    since_ts: float = 0.0,
+    limit: int = 120,
+) -> list[dict]:
+    if since_ts > 0.0:
+        delta = [m for m in clean_msgs if float(m.get("ts") or 0.0) > since_ts]
+        return delta[-max(1, min(limit, _MAX_MESSAGES)) :]
+    cap = max(1, min(limit, _MAX_MESSAGES))
+    return clean_msgs[-cap:]
+
+
 @router.api_route("/openchat/history", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
 async def get_chat_history(request: Request = None):
     _ensure_peer_worker()
@@ -2268,6 +2280,20 @@ async def get_chat_history(request: Request = None):
     cid = request.query_params.get("cid", "") if request else ""
     tok = request.query_params.get("token", "") if request else ""
     trip = request.query_params.get("trip", "") if request else ""
+    since_ts = 0.0
+    limit = 120
+    if request:
+        try:
+            since_ts = float(request.query_params.get("since") or 0.0)
+        except Exception:
+            since_ts = 0.0
+        try:
+            if request.query_params.get("full") == "1":
+                limit = _MAX_MESSAGES
+            elif request.query_params.get("limit"):
+                limit = int(request.query_params.get("limit") or 120)
+        except Exception:
+            limit = 120
     if not trip and request:
         trip = _extract_cookie_val(request, "sh_openchat_trip") or (request.headers.get("x-openchat-trip-key") or "")
     trip = trip.strip().lstrip("#").lstrip("◆").strip()
@@ -2279,6 +2305,7 @@ async def get_chat_history(request: Request = None):
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
+    sliced_msgs = _slice_messages_for_client(clean_msgs, since_ts=since_ts, limit=limit)
     resp = JSONResponse(
         {
             "ok": True,
@@ -2291,7 +2318,7 @@ async def get_chat_history(request: Request = None):
             "onlineCount": _get_online_count(),
             "resetEpoch": _RESET_EPOCH_TS,
             "totalCount": len(clean_msgs),
-            "messages": clean_msgs,
+            "messages": sliced_msgs,
             "takenNames": [],
         },
         headers=_CORS_HEADERS,
@@ -2344,6 +2371,9 @@ async def sync_chat_messages(request: Request):
     trip = ""
     raw_name = ""
     sync_svc = ""
+    is_peer_sync = False
+    since_ts = 0.0
+    limit = 120
     data = {}
     try:
         data = await request.json()
@@ -2352,6 +2382,15 @@ async def sync_chat_messages(request: Request):
         trip = _clean_str(data.get("tripKey") or data.get("trip"), 64)
         raw_name = _clean_str(data.get("name"), 40)
         sync_svc = _clean_str(data.get("service"), 32)
+        try:
+            since_ts = float(data.get("since") or 0.0)
+        except Exception:
+            since_ts = 0.0
+        try:
+            if data.get("limit"):
+                limit = int(data.get("limit") or 120)
+        except Exception:
+            limit = 120
         peer_map = data.get("cidMap")
         is_peer_sync = isinstance(peer_map, dict)
         if is_peer_sync:
@@ -2394,26 +2433,26 @@ async def sync_chat_messages(request: Request):
     trip_code = _calculate_tripcode(trip) if trip else ""
     signed_token = _sign_id(my_id)
     clean_msgs = _get_clean_messages()
-    resp = JSONResponse(
-        {
-            "ok": True,
-            "myId": my_id,
-            "name": (auth_user.get("username") if auth_user else None) or my_id,
-            "loggedIn": bool(auth_user),
-            "username": auth_user.get("username") if auth_user else "",
-            "token": signed_token,
-            "trip": trip_code,
-            "onlineCount": _get_online_count(),
-            "reset": was_reset,
-            "resetEpoch": _RESET_EPOCH_TS,
-            "totalCount": len(clean_msgs),
-            "messages": clean_msgs,
-            "cidMap": _CLIENT_TO_IP_ID,
-            "names": _NAME_OWNERS,
-            "takenNames": [],
-        },
-        headers=_CORS_HEADERS,
-    )
+    out_msgs = clean_msgs if is_peer_sync else _slice_messages_for_client(clean_msgs, since_ts=0.0 if was_reset else since_ts, limit=limit)
+    payload_out = {
+        "ok": True,
+        "myId": my_id,
+        "name": (auth_user.get("username") if auth_user else None) or my_id,
+        "loggedIn": bool(auth_user),
+        "username": auth_user.get("username") if auth_user else "",
+        "token": signed_token,
+        "trip": trip_code,
+        "onlineCount": _get_online_count(),
+        "reset": was_reset,
+        "resetEpoch": _RESET_EPOCH_TS,
+        "totalCount": len(clean_msgs),
+        "messages": out_msgs,
+        "takenNames": [],
+    }
+    if is_peer_sync:
+        payload_out["cidMap"] = _CLIENT_TO_IP_ID
+        payload_out["names"] = _NAME_OWNERS
+    resp = JSONResponse(payload_out, headers=_CORS_HEADERS)
     _add_fixed_id_cookie(resp, my_id, cid=cid, trip=trip)
     return resp
 
@@ -2647,11 +2686,13 @@ async def openchat_websocket(websocket: WebSocket):
     ws_signed_tok = _sign_id(ws_ip_id)
     _touch_active_client(ws_cid, ws_ip_id, service=ws_svc, scope_or_req=websocket, source="openchat")
     asyncio.create_task(_broadcast_online_count())
+    ws_since = 0.0
     try:
-        clean_msgs = [
-            m for m in _MESSAGES
-            if not (m.get("service") == "System" or m.get("senderId") == "SYS" or str(m.get("id", "")).startswith("sys_"))
-        ]
+        ws_since = float(websocket.query_params.get("since") or 0.0)
+    except Exception:
+        ws_since = 0.0
+    try:
+        clean_msgs = _get_clean_messages()
         init_payload = json.dumps(
             {
                 "type": "init",
@@ -2664,7 +2705,7 @@ async def openchat_websocket(websocket: WebSocket):
                 "onlineCount": _get_online_count(),
                 "resetEpoch": _RESET_EPOCH_TS,
                 "totalCount": len(clean_msgs),
-                "messages": clean_msgs[-_MAX_MESSAGES:],
+                "messages": _slice_messages_for_client(clean_msgs, since_ts=ws_since, limit=120),
                 "takenNames": [],
             },
             ensure_ascii=False,
@@ -2690,6 +2731,11 @@ async def openchat_websocket(websocket: WebSocket):
                     sync_trip = _clean_str(data.get("tripKey") or data.get("trip") or ws_trip, 64)
                     sync_name = _clean_str(data.get("name") or ws_name, 40)
                     sync_svc = _clean_str(data.get("service") or ws_svc, 32)
+                    sync_since = 0.0
+                    try:
+                        sync_since = float(data.get("since") or 0.0)
+                    except Exception:
+                        sync_since = 0.0
                     if sync_svc:
                         ws_svc = sync_svc
                     sync_auth = _extract_auth_user(websocket, data=data)
@@ -2706,10 +2752,7 @@ async def openchat_websocket(websocket: WebSocket):
                         if _RESET_EPOCH_TS > prev_ep:
                             await _broadcast_reset()
                             continue
-                    clean_msgs = [
-                        m for m in _MESSAGES
-                        if not (m.get("service") == "System" or m.get("senderId") == "SYS" or str(m.get("id", "")).startswith("sys_"))
-                    ]
+                    clean_msgs = _get_clean_messages()
                     await websocket.send_text(
                         json.dumps(
                             {
@@ -2723,7 +2766,7 @@ async def openchat_websocket(websocket: WebSocket):
                                 "onlineCount": _get_online_count(),
                                 "resetEpoch": _RESET_EPOCH_TS,
                                 "totalCount": len(clean_msgs),
-                                "messages": clean_msgs[-_MAX_MESSAGES:],
+                                "messages": _slice_messages_for_client(clean_msgs, since_ts=sync_since, limit=120),
                                 "takenNames": [],
                             },
                             ensure_ascii=False,
@@ -2865,8 +2908,7 @@ async def openchat_client_script(request: Request = None):
         content=content,
         media_type="application/javascript; charset=utf-8",
         headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
+            "Cache-Control": "private, max-age=180",
             "Access-Control-Allow-Origin": "*",
         },
     )
@@ -3140,7 +3182,7 @@ _CLIENT_JS = r"""
     return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
   }
 
-  function getWsUrl() {
+  function getWsUrl(sinceTs) {
     let base = (window.location && window.location.origin && window.location.origin.startsWith('http')) ? window.location.origin : (REAL_ORIGIN || 'https://chatwork.cloud.run');
     const proto = base.startsWith('https') ? 'wss:' : 'ws:';
     let u = '';
@@ -3154,7 +3196,8 @@ _CLIENT_JS = r"""
     const trip = getStoredTripKey();
     const svc = detectService();
     const sid = window.__sh_sid || '';
-    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '');
+    const sinceParam = (sinceTs && Number(sinceTs) > 0) ? '&since=' + encodeURIComponent(String(sinceTs)) : '';
+    return u + delim + 'cid=' + encodeURIComponent(currentClientId) + (currentIpToken ? '&token=' + encodeURIComponent(currentIpToken) : '') + (trip ? '&trip=' + encodeURIComponent(trip) : '') + (svc ? '&svc=' + encodeURIComponent(svc) : '') + (sid ? '&sid=' + encodeURIComponent(sid) : '') + sinceParam;
   }
 
   function matchServiceFromPath(rawPath, rawHost) {
@@ -5737,6 +5780,7 @@ _CLIENT_JS = r"""
       sessionStorage.setItem('sh_openchat_open', isOpen ? '1' : '0');
     } catch (_) {}
     if (isOpen) {
+      ensureFloatingDomHydrated();
       panel.classList.add('open');
       unreadCount = 0;
       pendingBottomUnread = 0;
@@ -6579,6 +6623,27 @@ _CLIENT_JS = r"""
   const localMessageCache = [];
   const knownMsgMap = new Map();
   const knownHubMsgMap = new Map();
+  let floatingDomHydrated = false;
+
+  function getLatestCachedTs() {
+    let maxTs = 0;
+    for (let i = localMessageCache.length - 1; i >= 0; i--) {
+      const t = Number((localMessageCache[i] && localMessageCache[i].ts) || 0);
+      if (t > maxTs) maxTs = t;
+    }
+    return maxTs;
+  }
+
+  function ensureFloatingDomHydrated() {
+    if (floatingDomHydrated || !chatBody) return;
+    floatingDomHydrated = true;
+    chatBody.innerHTML = '';
+    knownMsgMap.clear();
+    const startIdx = Math.max(0, localMessageCache.length - 150);
+    for (let i = startIdx; i < localMessageCache.length; i++) {
+      insertOrConcatMessage(chatBody, knownMsgMap, localMessageCache[i], false);
+    }
+  }
   let currentResetEpoch = (() => {
     try {
       const v = parseFloat(localStorage.getItem(EPOCH_KEY) || '0');
@@ -7076,17 +7141,19 @@ _CLIENT_JS = r"""
   }
 
   function rerenderAllContainers() {
-    if (chatBody) {
+    if (chatBody && (isOpen || floatingDomHydrated)) {
       chatBody.innerHTML = '';
       knownMsgMap.clear();
-      for (let i = 0; i < localMessageCache.length; i++) {
+      const startIdx = Math.max(0, localMessageCache.length - 150);
+      for (let i = startIdx; i < localMessageCache.length; i++) {
         insertOrConcatMessage(chatBody, knownMsgMap, localMessageCache[i], false);
       }
     }
     if (hubChatBody) {
       hubChatBody.innerHTML = '';
       knownHubMsgMap.clear();
-      for (let i = 0; i < localMessageCache.length; i++) {
+      const startIdx = Math.max(0, localMessageCache.length - 150);
+      for (let i = startIdx; i < localMessageCache.length; i++) {
         insertOrConcatMessage(hubChatBody, knownHubMsgMap, localMessageCache[i], false);
       }
     }
@@ -7175,8 +7242,10 @@ _CLIENT_JS = r"""
       }
     }
 
-    // 1. Append or concatenate in floating chat
-    insertOrConcatMessage(chatBody, knownMsgMap, msg, isOutOfOrder);
+    // 1. Append or concatenate in floating chat (lazy when closed)
+    if (chatBody && (isOpen || floatingDomHydrated)) {
+      insertOrConcatMessage(chatBody, knownMsgMap, msg, isOutOfOrder);
+    }
 
     // 2. Append or concatenate in Hub embedded chat if present
     if (hubChatBody) {
@@ -7201,7 +7270,9 @@ _CLIENT_JS = r"""
       updateScrollPill();
     }
 
-    scrollToBottom(false);
+    if (isOpen || hubChatBody) {
+      scrollToBottom(false);
+    }
   }
 
   // 5. Real-time Communication
@@ -7227,7 +7298,7 @@ _CLIENT_JS = r"""
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return;
       }
-      const wsUrl = getWsUrl();
+      const wsUrl = getWsUrl(getLatestCachedTs());
       ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -7237,18 +7308,21 @@ _CLIENT_JS = r"""
           if (ws && ws.readyState === WebSocket.OPEN) {
             try { ws.send(JSON.stringify({ type: 'ping', service: detectService() })); } catch (_) {}
           }
-        }, 15000);
+        }, 20000);
         try {
-          const myTrip = getStoredTripKey();
-          ws.send(JSON.stringify({
-            type: 'sync',
-            messages: isLoggedIn() ? localMessageCache.slice(-80) : [],
-            clientId: currentClientId,
-            token: currentIpToken,
-            authToken: currentAuthToken,
-            tripKey: myTrip,
-            service: detectService()
-          }));
+          if (isLoggedIn() && localMessageCache.length > 0) {
+            const myTrip = getStoredTripKey();
+            ws.send(JSON.stringify({
+              type: 'sync',
+              since: getLatestCachedTs(),
+              messages: localMessageCache.slice(-40),
+              clientId: currentClientId,
+              token: currentIpToken,
+              authToken: currentAuthToken,
+              tripKey: myTrip,
+              service: detectService()
+            }));
+          }
         } catch (_) {}
         flushUnsent();
       };
@@ -7291,7 +7365,7 @@ _CLIENT_JS = r"""
       ws.onclose = () => {
         updateOnlineStatus(false);
         clearInterval(heartbeatTimer);
-        setTimeout(connectWs, 2000);
+        setTimeout(connectWs, 3000);
       };
       ws.onerror = () => {
         updateOnlineStatus(false);
@@ -7299,7 +7373,7 @@ _CLIENT_JS = r"""
       };
     } catch (_) {
       updateOnlineStatus(false);
-      setTimeout(connectWs, 2500);
+      setTimeout(connectWs, 3500);
     }
   }
 
@@ -7336,14 +7410,16 @@ _CLIENT_JS = r"""
     try {
       flushUnsent();
       const myTrip = getStoredTripKey();
+      const sinceTs = getLatestCachedTs();
       const outgoing = isLoggedIn()
         ? localMessageCache.filter(m => {
             if (!m) return false;
             if (m.isLocal || m.service === 'System' || m.senderId === 'SYS' || String(m.id || '').startsWith('sys_') || m.name === 'システム') return false;
             return true;
-          }).slice(-100)
+          }).slice(-40)
         : [];
       const payload = {
+        since: sinceTs,
         messages: outgoing,
         clientId: currentClientId,
         token: currentIpToken,
@@ -7385,7 +7461,9 @@ _CLIENT_JS = r"""
   async function pollHistory() {
     try {
       const myTrip = getStoredTripKey();
-      const res = await fetch(getApiUrl('/openchat/history'), {
+      const sinceTs = getLatestCachedTs();
+      const historyPath = sinceTs > 0 ? ('/openchat/history?since=' + encodeURIComponent(String(sinceTs))) : '/openchat/history';
+      const res = await fetch(getApiUrl(historyPath), {
         cache: 'no-store',
         headers: {
           'X-OpenChat-Client-Id': currentClientId,
@@ -7661,7 +7739,7 @@ _CLIENT_JS = r"""
     });
   }
 
-  // Start initialization (defer background sync/WS on heavy media/game boots when chat is closed)
+  // Start initialization (defer background sync/WS on service pages when chat is closed so primary content loads first)
   loadLocalCache();
 
   const savedOpen = (() => {
@@ -7672,18 +7750,26 @@ _CLIENT_JS = r"""
     }
   })();
 
-  const isHeavyBootPage = /^\/(tver|cloudmoon|youtube|instagram)(\/|$)/i.test(window.location.pathname || '');
   let networkStarted = false;
   function startOpenChatNetwork() {
     if (networkStarted) return;
     networkStarted = true;
-    syncWithServer().finally(() => {
-      initialLoadDone = true;
-      ensureInitialNameClaimed();
-      flushUnsent();
-    });
-    setTimeout(() => { initialLoadDone = true; flushUnsent(); }, 1500);
     connectWs();
+    if (isLoggedIn()) {
+      syncWithServer().finally(() => {
+        initialLoadDone = true;
+        ensureInitialNameClaimed();
+        flushUnsent();
+      });
+    } else {
+      setTimeout(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+          pollHistory();
+        }
+        initialLoadDone = true;
+      }, 900);
+    }
+    setTimeout(() => { initialLoadDone = true; flushUnsent(); }, 1500);
   }
 
   if (toggleBtn) {
@@ -7693,10 +7779,21 @@ _CLIENT_JS = r"""
   if (savedOpen) {
     startOpenChatNetwork();
     toggleChat(true);
-  } else if (isHeavyBootPage) {
-    setTimeout(startOpenChatNetwork, 2800);
-  } else {
+  } else if (hubChatBody) {
     startOpenChatNetwork();
+  } else {
+    let scheduled = false;
+    const scheduleAfterLoad = () => {
+      if (scheduled) return;
+      scheduled = true;
+      setTimeout(startOpenChatNetwork, 2200);
+    };
+    if (document.readyState === 'complete') {
+      scheduleAfterLoad();
+    } else {
+      window.addEventListener('load', scheduleAfterLoad, { once: true });
+      setTimeout(scheduleAfterLoad, 4000);
+    }
   }
 
   setInterval(() => {
@@ -7705,14 +7802,14 @@ _CLIENT_JS = r"""
       pollHistory();
       connectWs();
     }
-  }, 2500);
+  }, 4000);
 
   setInterval(() => {
     if (!networkStarted) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
       pollHistory();
     }
-  }, 6000);
+  }, 25000);
 
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {

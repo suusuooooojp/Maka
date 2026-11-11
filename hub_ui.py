@@ -27,7 +27,7 @@ def render_home(proxies, request=None):
     initial_snapshot_json = "null"
     if build_snapshot_payload is not None:
         try:
-            initial_snapshot = build_snapshot_payload(force=bool(req_origin))
+            initial_snapshot = build_snapshot_payload(force=False)
             initial_snapshot_json = json.dumps(initial_snapshot, ensure_ascii=False).replace("</", "<\\/")
         except Exception:
             initial_snapshot = None

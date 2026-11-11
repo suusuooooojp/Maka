@@ -45,13 +45,24 @@ except Exception:  # pragma: no cover
     CurlAsyncSession = None
 
 
+def _has_proxy_env() -> bool:
+    return bool(
+        os.getenv("HTTPS_PROXY")
+        or os.getenv("HTTP_PROXY")
+        or os.getenv("ALL_PROXY")
+        or os.getenv("https_proxy")
+        or os.getenv("http_proxy")
+        or os.getenv("all_proxy")
+    )
+
+
 def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     if curl is None or CurlOpt is None:
         return
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or TVER_UPSTREAM_PROXY):
+        if not (_has_proxy_env() or TVER_UPSTREAM_PROXY):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
@@ -118,7 +129,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261111-tver14"
+RUNTIME_REV = "20261113-tver15"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -664,6 +675,20 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _uad=navigator.userAgentData,_brands=_uad.brands||[];'
         'try{Object.defineProperty(_np,"userAgentData",{get:()=>({brands:_brands,mobile:false,platform:_tvChPlat,getHighEntropyValues:async()=>({brands:_brands,mobile:false,platform:_tvChPlat,platformVersion:"15.0.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"131.0.0.0"}),toJSON:()=>({brands:_brands,mobile:false,platform:_tvChPlat})}),enumerable:true,configurable:true})}catch(_){}'
         '}}}'
+        'if(typeof document!=="undefined"){'
+        'const _oGei=typeof Document!=="undefined"&&Document.prototype?Document.prototype.getElementById:null;'
+        'const _ensureTvAd=()=>{try{const existing=_oGei?_oGei.call(document,"chee4au4yieYohs9"):null;if(!existing){const d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement)?.appendChild(d);}}catch(_){}};'
+        '_ensureTvAd();'
+        'document.addEventListener("DOMContentLoaded",_ensureTvAd,{once:true});'
+        'document.addEventListener("readystatechange",_ensureTvAd);'
+        'if(_oGei&&typeof Document!=="undefined"&&Document.prototype){try{Document.prototype.getElementById=function(id){if(id==="chee4au4yieYohs9")_ensureTvAd();return _oGei.call(this,id);};}catch(_){}}'
+        'if(typeof Node!=="undefined"&&Node.prototype){'
+        'const _isDs=(n)=>{try{if(!n||n.nodeType!==1||String(n.tagName||"").toUpperCase()!=="SCRIPT")return false;const s=String(n.getAttribute?.("src")||n.src||"");return /doubleserve\\.js/i.test(s);}catch(_){return false;}};'
+        'const _shimDs=(n)=>{try{_ensureTvAd();n.removeAttribute("src");setTimeout(()=>{try{_ensureTvAd();n.dispatchEvent(new Event("load"));}catch(_){}},0);}catch(_){}};'
+        'const _oAp=Node.prototype.appendChild,_oIb=Node.prototype.insertBefore;'
+        'if(_oAp){Node.prototype.appendChild=function(c){if(_isDs(c)){_shimDs(c);}return _oAp.call(this,c);};}'
+        'if(_oIb){Node.prototype.insertBefore=function(c,r){if(_isDs(c)){_shimDs(c);}return _oIb.call(this,c,r);};}'
+        '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
         'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)&&!/Chrome\\\\//i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
@@ -748,6 +773,27 @@ const TVER_MEDIA_CACHE = 'sh-tver-media-{RUNTIME_REV}';
 const TVER_REWRITTEN_CACHE = 'sh-tver-rewritten-{RUNTIME_REV}';
 const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
 const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
+const DOUBLESERVE_JS = '(function(){{try{{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){{var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement).appendChild(d);}}}}catch(_){{}}}})();';
+const directBlockedHosts = new Map();
+function isHostDirectBlocked(host) {{
+  const exp = directBlockedHosts.get(host);
+  if (!exp) return false;
+  if (Date.now() < exp) return true;
+  directBlockedHosts.delete(host);
+  return false;
+}}
+function markHostDirectBlocked(host) {{
+  if (host) directBlockedHosts.set(host, Date.now() + 300000);
+}}
+async function fetchDirectWithTimeout(urlStr, opts, timeoutMs) {{
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs || 2800);
+  try {{
+    return await fetch(urlStr, Object.assign({{}}, opts, {{ signal: ac.signal }}));
+  }} finally {{
+    clearTimeout(timer);
+  }}
+}}
 const MAX_CONCURRENT_IMAGE_FETCHES = 4;
 let _activeImageFetches = 0;
 const _imageFetchWaiters = [];
@@ -796,7 +842,7 @@ function isStreamCdnTarget(target) {{
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = String(target.pathname || '');
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
-  if (h === 'playback.api.streaks.jp' || h === 'ssai.api.streaks.jp') return false;
+  if (h.endsWith('.api.streaks.jp')) return false;
   const isCdnHost = (
     h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') || h.endsWith('.akamaihd.net') ||
     h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') || h.endsWith('.brightcove.com') ||
@@ -806,7 +852,7 @@ function isStreamCdnTarget(target) {{
   );
   if (!isCdnHost) return false;
   if (/\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-  if (/\\/(keys?|license)\\//i.test(p)) return true;
+  if (/\\/(keys?|aes128|hlscrypt|license)(\\/|$)/i.test(p)) return true;
   return false;
 }}
 function isDirectMediaTarget(target) {{
@@ -946,8 +992,8 @@ function checkShortCircuit(target, reqOrigin) {{
       }},
     }});
   }}
-  if (((h === 'tver.jp' || h === 'www.tver.jp') && p === '/doubleserve.js') || (h === 's.tver.jp' && p === '/ads/doubleserve.js')) {{
-    return new Response('var e=document.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(document.body||document.documentElement).appendChild(e);', {{
+  if ((h === 'tver.jp' || h === 'www.tver.jp' || h === 's.tver.jp') && p.toLowerCase().endsWith('/doubleserve.js')) {{
+    return new Response(DOUBLESERVE_JS, {{
       status: 200,
       headers: {{
         'Content-Type': 'application/javascript; charset=utf-8',
@@ -1137,6 +1183,42 @@ self.addEventListener('fetch', event => {{
               if (hit) return asOut(hit, method);
             }} catch {{}}
           }}
+          if (!isTverDomain && !canCache && !isHostDirectBlocked(targetHost)) {{
+            try {{
+              const cdnResp = await fetchDirectWithTimeout(anyTarget.href, {{
+                method,
+                headers: fwdHeaders,
+                mode: 'cors',
+                credentials: 'omit',
+              }}, 2800);
+              if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
+                const ct = String(cdnResp.headers.get('content-type') || '').toLowerCase();
+                if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
+                  const rawTxt = await cdnResp.text();
+                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, forNative);
+                  return new Response(rewritten, {{
+                    status: 200,
+                    headers: {{
+                      'Content-Type': 'application/vnd.apple.mpegurl',
+                      'Access-Control-Allow-Origin': '*',
+                      'Cross-Origin-Resource-Policy': 'cross-origin',
+                      'Cache-Control': 'no-cache',
+                    }},
+                  }});
+                }}
+                const hCopy = new Headers(cdnResp.headers);
+                hCopy.set('Access-Control-Allow-Origin', '*');
+                hCopy.set('Cross-Origin-Resource-Policy', 'cross-origin');
+                return new Response(method === 'HEAD' ? null : cdnResp.body, {{
+                  status: cdnResp.status,
+                  statusText: cdnResp.statusText,
+                  headers: hCopy,
+                }});
+              }}
+            }} catch {{
+              markHostDirectBlocked(targetHost);
+            }}
+          }}
           const fetchRelayAsset = async () => {{
             try {{
               const resp = await fetch(relay.href, {{
@@ -1300,7 +1382,7 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
     async with _RELAY_HTTP_CLIENT_LOCK:
         if _RELAY_HTTP_CLIENT is None or _RELAY_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=160, max_keepalive_connections=80)
-            timeout = httpx.Timeout(connect=6.0, read=22.0, write=10.0, pool=8.0)
+            timeout = httpx.Timeout(connect=4.5, read=22.0, write=10.0, pool=8.0)
             if TVER_UPSTREAM_PROXY:
                 _RELAY_HTTP_CLIENT = httpx.AsyncClient(
                     proxy=TVER_UPSTREAM_PROXY,
@@ -1308,7 +1390,7 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
                     limits=limits,
                     timeout=timeout,
                 )
-            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+            elif not _has_proxy_env():
                 transport = httpx.AsyncHTTPTransport(
                     retries=1,
                     limits=limits,
@@ -1335,7 +1417,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
     async with _MEDIA_HTTP_CLIENT_LOCK:
         if _MEDIA_HTTP_CLIENT is None or _MEDIA_HTTP_CLIENT.is_closed:
             limits = httpx.Limits(max_connections=120, max_keepalive_connections=60)
-            timeout = httpx.Timeout(connect=8.0, read=45.0, write=10.0, pool=10.0)
+            timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
             if TVER_UPSTREAM_PROXY:
                 _MEDIA_HTTP_CLIENT = httpx.AsyncClient(
                     proxy=TVER_UPSTREAM_PROXY,
@@ -1343,7 +1425,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
                     limits=limits,
                     timeout=timeout,
                 )
-            elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+            elif not _has_proxy_env():
                 transport = httpx.AsyncHTTPTransport(
                     retries=2,
                     limits=limits,
@@ -1418,7 +1500,7 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
     if any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes):
         _PUBLIC_HOST_CACHE[key] = now
         return
-    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY")):
+    if not _has_proxy_env():
         loop = asyncio.get_running_loop()
         try:
             infos = await loop.run_in_executor(
@@ -1901,9 +1983,10 @@ async def _serve_virtual_wasm_js() -> Response:
 
 _EMPTY_VAST_BYTES = b'<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>'
 _TAG_STUB_BYTES = b"window.dataLayer=window.dataLayer||[];window.googletag=window.googletag||{cmd:[]};"
-_DOUBLESERVE_JS_BYTES = (
-    b'var e=document.createElement("div");e.id="chee4au4yieYohs9";'
-    b'e.style.display="none";(document.body||document.documentElement).appendChild(e);'
+_DOUBLESERVE_BYTES = (
+    b'(function(){try{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){'
+    b'var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";'
+    b'(document.body||document.documentElement).appendChild(d);}}catch(_){}})();'
 )
 _EMPTY_AFFINITY_BYTES = (
     b'{"api_version":"","code":0,"message":"","type":"hash","result":{"exists":false,"customParams":""}}'
@@ -1952,10 +2035,8 @@ def _check_server_short_circuit(host: str, raw_path: str) -> tuple[int, str, byt
     pl = p.lower()
     if host == "platform-api.tver.jp" and p == "/service/api/v1/callAffinity":
         return (200, "application/json; charset=utf-8", _EMPTY_AFFINITY_BYTES)
-    if (host in ("tver.jp", "www.tver.jp") and pl == "/doubleserve.js") or (
-        host == "s.tver.jp" and pl == "/ads/doubleserve.js"
-    ):
-        return (200, "application/javascript; charset=utf-8", _DOUBLESERVE_JS_BYTES)
+    if host in ("tver.jp", "www.tver.jp", "s.tver.jp") and pl.endswith("/doubleserve.js"):
+        return (200, "application/javascript; charset=utf-8", _DOUBLESERVE_BYTES)
     if (host == "adsvr.tver.jp" and pl.startswith("/ad-server")) or (
         host in ("pubads.g.doubleclick.net", "securepubads.g.doubleclick.net")
         and ("/gampad/ads" in pl or "/pagead/ads" in pl)
@@ -2016,7 +2097,7 @@ async def _prefetch_single_static_asset(asset_url: str) -> bytes:
     if cached and (now - cached[0]) < ttl:
         return cached[4]
     if _PREFETCH_ASSET_SEMAPHORE is None:
-        _PREFETCH_ASSET_SEMAPHORE = asyncio.Semaphore(14)
+        _PREFETCH_ASSET_SEMAPHORE = asyncio.Semaphore(6)
     async with _PREFETCH_ASSET_SEMAPHORE:
         cached = _STATIC_ASSET_CACHE.get(asset_url)
         if cached and (time.time() - cached[0]) < ttl:
@@ -2256,7 +2337,7 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
             seen.add(extra_u)
             urls.append(extra_u)
     if urls:
-        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:48]), return_exceptions=True)
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:20]), return_exceptions=True)
     dyn_urls: list[str] = []
     for wp_u in webpack_urls:
         wp_cached = _STATIC_ASSET_CACHE.get(wp_u)
@@ -2280,7 +2361,7 @@ async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
             except Exception:
                 pass
     if dyn_urls:
-        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:48]), return_exceptions=True)
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in dyn_urls[:16]), return_exceptions=True)
 
 
 async def _prewarm_tver_target(target_url: str) -> None:
@@ -3235,8 +3316,6 @@ def _shell_html(initial_target: str) -> str:
 <link rel="preload" href="/tver/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/tver/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
-<link rel="preload" href="/tver/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
-<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
 <script>
 if("serviceWorker"in navigator){{window.__shSwRegP=navigator.serviceWorker.register("/tver/sw.js?v={RUNTIME_REV}",{{scope:"/tver/",updateViaCache:"none",type:"classic"}}).catch(function(){{return null;}});}}
 </script>
@@ -3278,6 +3357,35 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   const REWRITTEN_CACHE_NAME = "sh-tver-rewritten-{RUNTIME_REV}";
   const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
   const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
+  const DOUBLESERVE_JS = '(function(){{try{{if(typeof document!=="undefined"&&!document.getElementById("chee4au4yieYohs9")){{var d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement).appendChild(d);}}}}catch(_){{}}}})();';
+  const directBlockedHosts = new Map();
+  function isHostDirectBlocked(host) {{
+    const exp = directBlockedHosts.get(host);
+    if (!exp) return false;
+    if (Date.now() < exp) return true;
+    directBlockedHosts.delete(host);
+    return false;
+  }}
+  function markHostDirectBlocked(host) {{
+    if (host) directBlockedHosts.set(host, Date.now() + 300000);
+  }}
+  async function fetchDirectWithTimeout(urlStr, opts, timeoutMs, extSignal) {{
+    const ac = new AbortController();
+    const onExtAbort = () => ac.abort();
+    if (extSignal) {{
+      if (extSignal.aborted) throw new DOMException("Aborted", "AbortError");
+      extSignal.addEventListener("abort", onExtAbort, {{ once: true }});
+    }}
+    const timer = setTimeout(() => ac.abort(), timeoutMs || 2800);
+    try {{
+      return await fetch(urlStr, Object.assign({{}}, opts, {{ signal: ac.signal }}));
+    }} finally {{
+      clearTimeout(timer);
+      if (extSignal) {{
+        try {{ extSignal.removeEventListener("abort", onExtAbort); }} catch (_) {{}}
+      }}
+    }}
+  }}
   const SESSION_KEY = "schoolhub.tver.target.v1";
   const SW_GUARD = "schoolhub.tver.sw-reload.v1";
   const MAX_RECOVERY = 3;
@@ -3407,7 +3515,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     const h = String(target.hostname || "").toLowerCase().replace(/\\.$/, "");
     const p = String(target.pathname || "");
     if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
-    if (h === "playback.api.streaks.jp" || h === "ssai.api.streaks.jp") return false;
+    if (h.endsWith(".api.streaks.jp")) return false;
     const isCdnHost = (
       h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") || h.endsWith(".akamaihd.net") ||
       h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") || h.endsWith(".brightcove.com") ||
@@ -3417,7 +3525,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     );
     if (!isCdnHost) return false;
     if (/\\.(m3u8|ts|m4s|mp4|m4a|m4v|aac|cmfv|cmfa|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-    if (/\\/(keys?|license)\\//i.test(p)) return true;
+    if (/\\/(keys?|aes128|hlscrypt|license)(\\/|$)/i.test(p)) return true;
     return false;
   }}
 
@@ -3459,7 +3567,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }}
 
   function isClientDirectApiTarget(urlStr) {{
-    return false;
+    try {{
+      const u = new URL(urlStr);
+      const h = u.hostname.toLowerCase().replace(/\\.$/, "");
+      return h.endsWith(".api.streaks.jp") || h === "edge.api.brightcove.com";
+    }} catch (_) {{
+      return false;
+    }}
   }}
 
   function unwrapMediaTarget(urlStr) {{
@@ -3527,10 +3641,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
           statusText: "OK",
         }};
       }}
-      if (((h === "tver.jp" || h === "www.tver.jp") && p === "/doubleserve.js") || (h === "s.tver.jp" && p === "/ads/doubleserve.js")) {{
-        const dsBody = 'var e=document.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(document.body||document.documentElement).appendChild(e);';
+      if ((h === "tver.jp" || h === "www.tver.jp" || h === "s.tver.jp") && p.toLowerCase().endsWith("/doubleserve.js")) {{
         return {{
-          body: new TextEncoder().encode(dsBody).buffer,
+          body: new TextEncoder().encode(DOUBLESERVE_JS).buffer,
           headers: [
             ["content-type", "application/javascript; charset=utf-8"],
             ["access-control-allow-origin", "*"],
@@ -3714,7 +3827,44 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const canCache = m === "GET" && !rangeEntry && isCacheableImageTarget(unwrapped);
         const isM3u8Path = /\\.m3u8(\\?|$)/i.test(unwrapped.pathname || "");
         try {{
-
+          if (!isTverHost && !canCache && !isHostDirectBlocked(uHost)) {{
+            try {{
+              const cdnHdrs = {{}};
+              if (rangeEntry && rangeEntry[1] && !isM3u8Path) cdnHdrs["Range"] = rangeEntry[1];
+              const cdnResp = await fetchDirectWithTimeout(unwrapped.href, {{
+                method: m,
+                headers: cdnHdrs,
+                mode: "cors",
+                credentials: "omit",
+              }}, 2800, signal);
+              if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
+                const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
+                if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
+                  const rawTxt = await cdnResp.text();
+                  const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
+                  return {{
+                    body: new TextEncoder().encode(rewritten).buffer,
+                    headers: [
+                      ["content-type", "application/vnd.apple.mpegurl"],
+                      ["access-control-allow-origin", "*"],
+                      ["cross-origin-resource-policy", "cross-origin"],
+                      ["cache-control", "no-cache"],
+                    ],
+                    status: 200,
+                    statusText: "OK",
+                  }};
+                }}
+                return {{
+                  body: m === "HEAD" ? new ArrayBuffer(0) : await cdnResp.arrayBuffer(),
+                  headers: [...cdnResp.headers.entries()],
+                  status: cdnResp.status,
+                  statusText: cdnResp.statusText || "OK",
+                }};
+              }}
+            }} catch (_) {{
+              if (!signal?.aborted) markHostDirectBlocked(uHost);
+            }}
+          }}
           if (canCache && typeof caches !== "undefined") {{
             try {{
               const cache = await caches.open(MEDIA_CACHE_NAME);
@@ -3756,43 +3906,60 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       }}
 
       if (isClientDirectApiTarget(urlStr)) {{
-        try {{
-          const corsHeaders = {{}};
-          for (const [hk, hv] of list) {{
-            const kl = String(hk || "").toLowerCase();
-            if (!kl || !hv) continue;
-            if (
-              kl === "accept" || kl === "content-type" || kl === "authorization" ||
-              kl === "x-requested-with" || kl === "if-modified-since" ||
-              kl === "bcov-policy" || kl === "policy-key"
-            ) {{
-              corsHeaders[hk] = hv;
+        const apiHost = (() => {{
+          try {{ return new URL(urlStr).hostname.toLowerCase().replace(/\\.$/, ""); }} catch (_) {{ return ""; }}
+        }})();
+        if (apiHost && !isHostDirectBlocked(apiHost)) {{
+          try {{
+            const isSsai = apiHost === "ssai.api.streaks.jp";
+            const corsHeaders = {{}};
+            for (const [hk, hv] of list) {{
+              const kl = String(hk || "").toLowerCase();
+              if (!kl || !hv) continue;
+              if (
+                kl === "accept" || kl === "content-type" || kl === "authorization" ||
+                kl === "x-requested-with" || kl === "if-modified-since" ||
+                (!isSsai && (kl.startsWith("x-streaks-") || kl === "bcov-policy" || kl === "policy-key"))
+              ) {{
+                corsHeaders[hk] = hv;
+              }}
             }}
+            const directBody = (m === "GET" || m === "HEAD") ? undefined : await serializeRequestBody(body);
+            const apiResp = await fetchDirectWithTimeout(
+              urlStr,
+              {{
+                method: m,
+                headers: corsHeaders,
+                body: directBody && directBody.byteLength > 0 ? directBody : undefined,
+                mode: "cors",
+                credentials: "omit",
+                cache: "no-store",
+              }},
+              2800,
+              signal
+            );
+            if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
+              let outBuf = m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer();
+              if (apiHost === "playback.api.streaks.jp" && m === "GET" && outBuf.byteLength > 0) {{
+                try {{
+                  const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
+                  if (parsedPb && typeof parsedPb === "object" && "ads" in parsedPb) {{
+                    delete parsedPb.ads;
+                    outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
+                  }}
+                }} catch (_) {{}}
+              }}
+              return {{
+                body: outBuf,
+                headers: [...apiResp.headers.entries()],
+                status: apiResp.status,
+                statusText: apiResp.statusText || "OK",
+              }};
+            }}
+          }} catch (_) {{
+            if (!signal?.aborted) markHostDirectBlocked(apiHost);
           }}
-          const directBody = (m === "GET" || m === "HEAD") ? undefined : await serializeRequestBody(body);
-          const apiResp = await withTimeout(
-            fetch(urlStr, {{
-              method: m,
-              headers: corsHeaders,
-              body: directBody && directBody.byteLength > 0 ? directBody : undefined,
-              mode: "cors",
-              credentials: "omit",
-              cache: "no-store",
-              signal,
-            }}),
-            6500,
-            "direct brightcove api"
-          );
-          if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
-            const outBuf = m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer();
-            return {{
-              body: outBuf,
-              headers: [...apiResp.headers.entries()],
-              status: apiResp.status,
-              statusText: apiResp.statusText || "OK",
-            }};
-          }}
-        }} catch (_) {{}}
+        }}
       }}
 
       const canClientCache = !rangeEntry && isClientCacheableAsset(m, urlStr);
@@ -4315,7 +4482,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 
 @router.on_event("startup")
 async def _prewarm_tver_on_startup() -> None:
-    _schedule_tver_prewarm(TVER_HOME)
+    async def _delayed() -> None:
+        await asyncio.sleep(0.8)
+        await _prewarm_tver_target(TVER_HOME)
+
+    try:
+        asyncio.get_running_loop().create_task(_delayed())
+    except Exception:
+        pass
 
 
 @router.get("/tver", include_in_schema=False)

@@ -883,6 +883,9 @@ _DEFAULT_FEATURED = {
 }
 
 
+_HOME_REFRESH_TASK: asyncio.Task | None = None
+
+
 async def _fetch_home_data_fresh() -> dict:
     categories = [
         ("ゲーム", "日本 ゲーム"), ("アニメ・マンガ", "日本 アニメ"), ("料理・グルメ", "日本 料理 グルメ"),
@@ -891,7 +894,9 @@ async def _fetch_home_data_fresh() -> dict:
         ("ニュース", "日本 ニュース"), ("ライフスタイル", "日本 ライフスタイル"), ("映画・エンタメ", "日本 映画 エンタメ"),
     ]
     tasks = [asyncio.create_task(search_videos(q)) for _, q in categories]
-    done, pending = await asyncio.wait(tasks, timeout=3.0)
+    trend_task = asyncio.create_task(fetch_trending("JP"))
+    all_tasks = [*tasks, trend_task]
+    done, pending = await asyncio.wait(all_tasks, timeout=1.8)
     for p in pending:
         p.cancel()
 
@@ -919,10 +924,12 @@ async def _fetch_home_data_fresh() -> dict:
             except Exception:
                 pass
 
-    try:
-        trend = await asyncio.wait_for(fetch_trending("JP"), timeout=1.5)
-    except Exception:
-        trend = []
+    trend = []
+    if trend_task in done and not trend_task.cancelled():
+        try:
+            trend = trend_task.result() or []
+        except Exception:
+            trend = []
 
     trend = [v for v in trend if v.get("title") and v.get("author")]
     for v in trend:
@@ -935,16 +942,35 @@ async def _fetch_home_data_fresh() -> dict:
     return {"featured": featured, "trend": merged[:80], "lanes": lanes}
 
 
-async def _get_home_data() -> dict:
+async def _refresh_home_cache_bg() -> None:
     global _HOME_CACHE
-    now = time.monotonic()
-    if _HOME_CACHE and (now - _HOME_CACHE[0]) < 300:
-        return _HOME_CACHE[1]
-
     try:
         data = await _fetch_home_data_fresh()
         if data.get("lanes") or data.get("trend"):
-            _HOME_CACHE = (now, data)
+            _HOME_CACHE = (time.monotonic(), data)
+    except Exception as exc:
+        print(f"[WAKAME HOME] bg refresh error: {exc}", flush=True)
+
+
+async def _get_home_data() -> dict:
+    global _HOME_CACHE, _HOME_REFRESH_TASK
+    now = time.monotonic()
+    if _HOME_CACHE:
+        age = now - _HOME_CACHE[0]
+        if age < 300:
+            return _HOME_CACHE[1]
+        if _HOME_REFRESH_TASK is None or _HOME_REFRESH_TASK.done():
+            _HOME_REFRESH_TASK = asyncio.create_task(_refresh_home_cache_bg())
+        return _HOME_CACHE[1]
+
+    try:
+        if _HOME_REFRESH_TASK is not None and not _HOME_REFRESH_TASK.done():
+            await asyncio.wait({_HOME_REFRESH_TASK}, timeout=1.9)
+            if _HOME_CACHE:
+                return _HOME_CACHE[1]
+        data = await _fetch_home_data_fresh()
+        if data.get("lanes") or data.get("trend"):
+            _HOME_CACHE = (time.monotonic(), data)
             return data
     except Exception as exc:
         print(f"[WAKAME HOME] fetch error: {exc}", flush=True)
@@ -954,6 +980,13 @@ async def _get_home_data() -> dict:
     fallback = {"featured": _DEFAULT_FEATURED, "trend": [_DEFAULT_FEATURED], "lanes": []}
     _HOME_CACHE = (now, fallback)
     return fallback
+
+
+@router.on_event("startup")
+async def _wakame_prewarm_on_startup() -> None:
+    global _HOME_REFRESH_TASK
+    if _HOME_CACHE is None and (_HOME_REFRESH_TASK is None or _HOME_REFRESH_TASK.done()):
+        _HOME_REFRESH_TASK = asyncio.create_task(_refresh_home_cache_bg())
 
 
 async def _personal_recommend(history: list, searches: list) -> list[dict]:

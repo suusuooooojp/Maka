@@ -433,6 +433,13 @@ def _ensure_background_warm() -> None:
         pass
 
 
+@router.on_event("startup")
+async def _utopia_warm_core_on_startup() -> None:
+    global _WARM_TASK
+    if _WARM_TASK is None or _WARM_TASK.done():
+        _WARM_TASK = asyncio.create_task(_warm_core_files())
+
+
 # ---------------------------------------------------------------------------
 # Utopia Custom Overrides & Rewriters under /utopia/
 # ---------------------------------------------------------------------------
