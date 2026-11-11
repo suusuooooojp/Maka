@@ -17,10 +17,12 @@ Features:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -31,11 +33,12 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
 import okline
 from okline import LineApiError, OkLine, Session
 from okline.auth import _append_secret
+from okline.exceptions import LineTransportError
 from okline.models import Message
 
 SERVICE_NAME = "LINE"
@@ -43,6 +46,19 @@ SERVICE_ICON = "💬"
 SERVICE_PATH = "/line/"
 
 router = APIRouter()
+
+
+def _is_user_mid(mid: str) -> bool:
+    return bool(mid and mid[:1].lower() == "u")
+
+
+def _is_group_mid(mid: str) -> bool:
+    return bool(mid and mid[:1].lower() in ("c", "r", "s"))
+
+
+def _is_room_mid(mid: str) -> bool:
+    return bool(mid and mid[:1].lower() == "r")
+
 
 # ---------------------------------------------------------------------------
 # Global State & Session Management
@@ -76,6 +92,8 @@ def _load_persisted_sessions() -> None:
                         "api": api,
                         "sessionData": sdata,
                         "profile": entry.get("profile") or {},
+                        "ioLock": threading.RLock(),
+                        "boxMessagesCache": {},
                         "createdAt": entry.get("createdAt") or time.time(),
                         "updatedAt": time.time(),
                     }
@@ -97,8 +115,16 @@ def _save_persisted_sessions() -> None:
                     "createdAt": item.get("createdAt") or time.time(),
                     "updatedAt": time.time(),
                 }
-        with open(_SESSION_STORE_PATH, "w", encoding="utf-8") as f:
-            json.dump(serializable, f, ensure_ascii=False)
+        fd, tmp_path = tempfile.mkstemp(prefix=".sh_okline_", dir=os.path.dirname(_SESSION_STORE_PATH))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, ensure_ascii=False)
+            os.replace(tmp_path, _SESSION_STORE_PATH)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -123,10 +149,28 @@ def _build_okline_from_session_data(session_data: Dict[str, Any]) -> OkLine:
     )
     if session_data.get("certificate"):
         api.transport.tokens.certificate = str(session_data["certificate"])
+    issue_sec = session_data.get("tokenIssueTimeEpochSec")
+    dur_sec = session_data.get("durationUntilRefreshInSec")
+    retry_pol = session_data.get("refreshApiRetryPolicy")
+    if issue_sec is not None and dur_sec is not None:
+        try:
+            api.auth._set_token_schedule(
+                float(issue_sec),
+                float(dur_sec),
+                retry_pol if isinstance(retry_pol, dict) else None,
+            )
+        except Exception:
+            pass
     e2ee_data = session_data.get("e2ee")
     if isinstance(e2ee_data, dict) and e2ee_data.get("keys"):
         try:
             api.e2ee.load_from_export(e2ee_data)
+        except Exception:
+            pass
+    peer_pubs = session_data.get("e2eePeerPubs")
+    if isinstance(peer_pubs, dict) and hasattr(api.e2ee, "load_peer_pubkeys"):
+        try:
+            api.e2ee.load_peer_pubkeys(peer_pubs)
         except Exception:
             pass
     _sync_my_mid(api, session_data.get("mid") or (e2ee_data.get("mid") if isinstance(e2ee_data, dict) else None))
@@ -142,6 +186,12 @@ def _export_session_data(api: OkLine, fallback: Optional[Dict[str, Any]] = None)
         base["refreshToken"] = tokens.refresh_token
     if tokens.certificate:
         base["certificate"] = tokens.certificate
+    if getattr(tokens, "token_issue_time_epoch_sec", None) is not None:
+        base["tokenIssueTimeEpochSec"] = tokens.token_issue_time_epoch_sec
+    if getattr(tokens, "duration_until_refresh_sec", None) is not None:
+        base["durationUntilRefreshInSec"] = tokens.duration_until_refresh_sec
+    if isinstance(getattr(tokens, "refresh_api_retry_policy", None), dict):
+        base["refreshApiRetryPolicy"] = tokens.refresh_api_retry_policy
     mid = _sync_my_mid(api, base.get("mid"))
     if mid:
         base["mid"] = mid
@@ -150,6 +200,17 @@ def _export_session_data(api: OkLine, fallback: Optional[Dict[str, Any]] = None)
             exported = api.e2ee.export_keys()
             if exported and exported.get("keys"):
                 base["e2ee"] = exported
+        except Exception:
+            pass
+    if hasattr(api.e2ee, "export_peer_pubkeys"):
+        try:
+            pubs = api.e2ee.export_peer_pubkeys()
+            if pubs:
+                merged_pubs = dict(base.get("e2eePeerPubs") or {})
+                merged_pubs.update(pubs)
+                if len(merged_pubs) > 400:
+                    merged_pubs = dict(list(merged_pubs.items())[-400:])
+                base["e2eePeerPubs"] = merged_pubs
         except Exception:
             pass
     base["exportedAt"] = int(time.time())
@@ -163,15 +224,24 @@ def _get_or_restore_session(
     with _LOCK:
         if session_id and session_id in _SESSIONS:
             entry = _SESSIONS[session_id]
+            entry.setdefault("ioLock", threading.RLock())
+            entry.setdefault("boxMessagesCache", {})
             api = entry["api"]
             prof_mid = (entry.get("profile") or {}).get("mid")
             _sync_my_mid(api, prof_mid or (session_data or {}).get("mid"))
-            if not api.e2ee.is_ready() and isinstance(session_data, dict):
-                e2ee_in = session_data.get("e2ee")
-                if isinstance(e2ee_in, dict) and e2ee_in.get("keys"):
+            if isinstance(session_data, dict):
+                if not api.e2ee.is_ready():
+                    e2ee_in = session_data.get("e2ee")
+                    if isinstance(e2ee_in, dict) and e2ee_in.get("keys"):
+                        try:
+                            api.e2ee.load_from_export(e2ee_in)
+                            _sync_my_mid(api, prof_mid or e2ee_in.get("mid"))
+                        except Exception:
+                            pass
+                peer_pubs = session_data.get("e2eePeerPubs")
+                if isinstance(peer_pubs, dict) and hasattr(api.e2ee, "load_peer_pubkeys"):
                     try:
-                        api.e2ee.load_from_export(e2ee_in)
-                        _sync_my_mid(api, prof_mid or e2ee_in.get("mid"))
+                        api.e2ee.load_peer_pubkeys(peer_pubs)
                     except Exception:
                         pass
             entry["updatedAt"] = time.time()
@@ -185,6 +255,8 @@ def _get_or_restore_session(
                 "api": api,
                 "sessionData": _export_session_data(api, session_data),
                 "profile": {},
+                "ioLock": threading.RLock(),
+                "boxMessagesCache": {},
                 "createdAt": time.time(),
                 "updatedAt": time.time(),
             }
@@ -426,7 +498,7 @@ def _decrypt_and_serialize_message(
     ct = int(m.get("contentType") or 0)
     sender_mid = str(m.get("from") or m.get("_from") or m.get("fromMid") or "")
     to_mid = str(m.get("to") or m.get("toMid") or "")
-    if not sender_mid and my_mid and not to_mid.startswith(("c", "r")):
+    if not sender_mid and my_mid and not _is_group_mid(to_mid):
         # Sent message payload returned by sendMessage often omits `from`
         sender_mid = my_mid
     sender_info = (sender_map or {}).get(sender_mid) or {}
@@ -529,7 +601,16 @@ _load_persisted_sessions()
 # Background Workers for Non-Blocking QR & Email Login
 # ---------------------------------------------------------------------------
 
-def _qr_login_worker(login_id: str) -> None:
+def _safe_close_api(api: Optional[OkLine]) -> None:
+    if api is None:
+        return
+    try:
+        api.close()
+    except Exception:
+        pass
+
+
+def _qr_login_worker(login_id: str, event_sink: Optional[queue.Queue] = None) -> None:
     with _LOCK:
         state = _QR_LOGINS.get(login_id)
     if not state:
@@ -539,8 +620,15 @@ def _qr_login_worker(login_id: str) -> None:
     auth_session_id: str = state["authSessionId"]
     curve_key_id: int = state["curveKeyId"]
     certificate: Optional[str] = state.get("certificate")
-    interval: int = int(state.get("interval") or 3)
     max_polls: int = int(state.get("maxPolls") or 35)
+    adopted_into_sessions = False
+
+    def _emit(evt: str, payload: Dict[str, Any]) -> None:
+        if event_sink is not None:
+            try:
+                event_sink.put_nowait((evt, payload))
+            except Exception:
+                pass
 
     try:
         # Phase 1: Wait for QR Code scan on smartphone (poll in 25s windows up to ~4 minutes)
@@ -558,16 +646,20 @@ def _qr_login_worker(login_id: str) -> None:
                 if getattr(exc, "status", None) in (408, 410) or getattr(exc, "code", None) in (408, 410, 10052):
                     continue
                 raise
+            except LineTransportError:
+                continue
             except Exception as exc:
                 if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
                     continue
                 raise
 
         if not scanned:
+            err_msg = "QRコードの有効期限が切れました。「QRコードを更新」を押してください。"
             with _LOCK:
                 if login_id in _QR_LOGINS:
                     _QR_LOGINS[login_id]["status"] = "expired"
-                    _QR_LOGINS[login_id]["error"] = "QRコードの有効期限が切れました。「QRコードを更新」を押してください。"
+                    _QR_LOGINS[login_id]["error"] = err_msg
+            _emit("expired", {"status": "expired", "error": err_msg})
             return
 
         # Phase 2: Certificate verify (REQUIRED by LINE state machine even when cert is empty) -> 6-digit PIN verification
@@ -580,11 +672,12 @@ def _qr_login_worker(login_id: str) -> None:
             need_pin = True
 
         if need_pin:
-            pin = api.auth.qr_create_pincode(auth_session_id)
+            pin = str(api.auth.qr_create_pincode(auth_session_id))
             with _LOCK:
                 if login_id in _QR_LOGINS:
                     _QR_LOGINS[login_id]["status"] = "waiting_pin"
-                    _QR_LOGINS[login_id]["pinCode"] = str(pin)
+                    _QR_LOGINS[login_id]["pinCode"] = pin
+            _emit("waiting_pin", {"status": "waiting_pin", "pinCode": pin})
 
             pin_verified = False
             for _ in range(poll_attempts):
@@ -599,16 +692,20 @@ def _qr_login_worker(login_id: str) -> None:
                     if getattr(exc, "status", None) in (408, 410) or getattr(exc, "code", None) in (408, 410, 10052):
                         continue
                     raise
+                except LineTransportError:
+                    continue
                 except Exception as exc:
                     if "timeout" in str(exc).lower() or "timed out" in str(exc).lower():
                         continue
                     raise
 
             if not pin_verified:
+                err_msg = "PINコードの確認がタイムアウトしました。再度お試しください。"
                 with _LOCK:
                     if login_id in _QR_LOGINS:
                         _QR_LOGINS[login_id]["status"] = "expired"
-                        _QR_LOGINS[login_id]["error"] = "PINコードの確認がタイムアウトしました。再度お試しください。"
+                        _QR_LOGINS[login_id]["error"] = err_msg
+                _emit("expired", {"status": "expired", "error": err_msg})
                 return
 
         # Phase 3: Finalize qrLoginV2 & unwrap E2EE keychain
@@ -636,9 +733,12 @@ def _qr_login_worker(login_id: str) -> None:
                 "api": api,
                 "sessionData": sdata,
                 "profile": profile_dict,
+                "ioLock": threading.RLock(),
+                "boxMessagesCache": {},
                 "createdAt": time.time(),
                 "updatedAt": time.time(),
             }
+            adopted_into_sessions = True
             if login_id in _QR_LOGINS:
                 _QR_LOGINS[login_id]["status"] = "authenticated"
                 _QR_LOGINS[login_id]["sessionId"] = sid
@@ -646,12 +746,27 @@ def _qr_login_worker(login_id: str) -> None:
                 _QR_LOGINS[login_id]["profile"] = profile_dict
                 _QR_LOGINS[login_id]["e2eeReady"] = api.e2ee.is_ready()
         _save_persisted_sessions()
+        _emit(
+            "authenticated",
+            {
+                "status": "authenticated",
+                "sessionId": sid,
+                "sessionData": sdata,
+                "profile": profile_dict,
+                "e2eeReady": api.e2ee.is_ready(),
+            },
+        )
 
     except Exception as exc:
         with _LOCK:
             if login_id in _QR_LOGINS:
                 _QR_LOGINS[login_id]["status"] = "error"
                 _QR_LOGINS[login_id]["error"] = str(exc)
+        _emit("error", {"status": "error", "error": str(exc)})
+    finally:
+        if not adopted_into_sessions:
+            _safe_close_api(api)
+        _emit("done", {})
 
 
 def _email_login_worker(login_id: str, email: str, password: str, certificate: Optional[str]) -> None:
@@ -661,6 +776,7 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
         return
 
     api: OkLine = state["api"]
+    adopted_into_sessions = False
 
     def _on_pin(pin: str) -> None:
         with _LOCK:
@@ -683,6 +799,8 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
         if isinstance(key_handles, list) and key_handles:
             api.e2ee.my_keys.clear()
             api.e2ee._export_blobs.clear()
+            api.e2ee._peer_channels.clear()
+            api.e2ee._recv_channels.clear()
             for h in key_handles:
                 try:
                     kid = int(api.transport.bridge.e2ee_get_key_id(h))
@@ -707,9 +825,12 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
                 "api": api,
                 "sessionData": sdata,
                 "profile": profile_dict,
+                "ioLock": threading.RLock(),
+                "boxMessagesCache": {},
                 "createdAt": time.time(),
                 "updatedAt": time.time(),
             }
+            adopted_into_sessions = True
             if login_id in _EMAIL_LOGINS:
                 _EMAIL_LOGINS[login_id]["status"] = "authenticated"
                 _EMAIL_LOGINS[login_id]["sessionId"] = sid
@@ -722,6 +843,69 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
             if login_id in _EMAIL_LOGINS:
                 _EMAIL_LOGINS[login_id]["status"] = "error"
                 _EMAIL_LOGINS[login_id]["error"] = str(exc)
+    finally:
+        if not adopted_into_sessions:
+            _safe_close_api(api)
+
+
+def _create_qr_login_session_sync(
+    certificate: Optional[str],
+    event_sink: Optional[queue.Queue] = None,
+) -> Dict[str, Any]:
+    api = OkLine(auto_refresh_schedule=True)
+    try:
+        auth_session_id = api.auth.qr_create_session()
+        qr_info = api.auth.qr_create_qrcode(auth_session_id)
+        callback_url = qr_info.get("callbackUrl") or ""
+        interval = int(qr_info.get("longPollingIntervalSec") or 3)
+        max_polls = int(qr_info.get("longPollingMaxCount") or 35)
+
+        curve_key_id = api.transport.bridge.curvekey_generate()
+        public_key_b64 = api.transport.bridge.e2ee_public_key(curve_key_id)
+        qr_url = _append_secret(callback_url, public_key_b64)
+        qr_svg = _generate_qr_svg(qr_url)
+
+        login_id = f"qr_{uuid.uuid4().hex[:16]}"
+        with _LOCK:
+            if len(_QR_LOGINS) > 25:
+                oldest = sorted(_QR_LOGINS.keys(), key=lambda k: _QR_LOGINS[k].get("createdAt", 0))[:10]
+                for k in oldest:
+                    old_st = _QR_LOGINS.pop(k, None)
+                    if old_st:
+                        old_st["cancelled"] = True
+
+            _QR_LOGINS[login_id] = {
+                "loginId": login_id,
+                "api": api,
+                "authSessionId": auth_session_id,
+                "curveKeyId": curve_key_id,
+                "publicKey": public_key_b64,
+                "certificate": certificate,
+                "qrUrl": qr_url,
+                "qrSvg": qr_svg,
+                "interval": interval,
+                "maxPolls": max_polls,
+                "status": "waiting_scan",
+                "pinCode": None,
+                "error": None,
+                "createdAt": time.time(),
+                "cancelled": False,
+            }
+
+        t = threading.Thread(target=_qr_login_worker, args=(login_id, event_sink), daemon=True)
+        t.start()
+        return {
+            "ok": True,
+            "loginId": login_id,
+            "authSessionId": auth_session_id,
+            "qrUrl": qr_url,
+            "qrSvg": qr_svg,
+            "status": "waiting_scan",
+            "expiresIn": interval * max_polls,
+        }
+    except Exception:
+        _safe_close_api(api)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -731,15 +915,15 @@ def _email_login_worker(login_id: str, email: str, password: str, certificate: O
 @router.get("/line/api/health")
 async def line_health() -> JSONResponse:
     """Verify OkLine v2.9.2 + Node.js LTSM WASM bridge readiness."""
-    t0 = time.time()
-    try:
+    def _probe() -> Dict[str, Any]:
+        t0 = time.time()
         api = OkLine(auto_refresh_schedule=False)
-        sig = api.transport.signer.sign("/S4", "", '{"health":1}')
-        kid = api.transport.bridge.curvekey_generate()
-        pub = api.transport.bridge.e2ee_public_key(kid)
-        elapsed_ms = int((time.time() - t0) * 1000)
-        return JSONResponse(
-            {
+        try:
+            sig = api.transport.signer.sign("/S4", "", '{"health":1}')
+            kid = api.transport.bridge.curvekey_generate()
+            pub = api.transport.bridge.e2ee_public_key(kid)
+            elapsed_ms = int((time.time() - t0) * 1000)
+            return {
                 "ok": True,
                 "service": "line",
                 "oklineVersion": getattr(okline, "__version__", "2.9.2"),
@@ -749,7 +933,12 @@ async def line_health() -> JSONResponse:
                 "activeSessions": len(_SESSIONS),
                 "latencyMs": elapsed_ms,
             }
-        )
+        finally:
+            _safe_close_api(api)
+
+    try:
+        res = await asyncio.to_thread(_probe)
+        return JSONResponse(res)
     except Exception as exc:
         return JSONResponse(
             {
@@ -771,59 +960,8 @@ async def line_qr_start(request: Request) -> JSONResponse:
 
     certificate = (body.get("certificate") or "").strip() or None
     try:
-        api = OkLine(auto_refresh_schedule=True)
-        auth_session_id = api.auth.qr_create_session()
-        qr_info = api.auth.qr_create_qrcode(auth_session_id)
-        callback_url = qr_info.get("callbackUrl") or ""
-        interval = int(qr_info.get("longPollingIntervalSec") or 3)
-        max_polls = int(qr_info.get("longPollingMaxCount") or 35)
-
-        curve_key_id = api.transport.bridge.curvekey_generate()
-        public_key_b64 = api.transport.bridge.e2ee_public_key(curve_key_id)
-        qr_url = _append_secret(callback_url, public_key_b64)
-        qr_svg = _generate_qr_svg(qr_url)
-
-        login_id = f"qr_{uuid.uuid4().hex[:16]}"
-        with _LOCK:
-            # Cancel older pending QR logins if too many accumulate
-            if len(_QR_LOGINS) > 25:
-                oldest = sorted(_QR_LOGINS.keys(), key=lambda k: _QR_LOGINS[k].get("createdAt", 0))[:10]
-                for k in oldest:
-                    _QR_LOGINS[k]["cancelled"] = True
-                    _QR_LOGINS.pop(k, None)
-
-            _QR_LOGINS[login_id] = {
-                "loginId": login_id,
-                "api": api,
-                "authSessionId": auth_session_id,
-                "curveKeyId": curve_key_id,
-                "publicKey": public_key_b64,
-                "certificate": certificate,
-                "qrUrl": qr_url,
-                "qrSvg": qr_svg,
-                "interval": interval,
-                "maxPolls": max_polls,
-                "status": "waiting_scan",
-                "pinCode": None,
-                "error": None,
-                "createdAt": time.time(),
-                "cancelled": False,
-            }
-
-        t = threading.Thread(target=_qr_login_worker, args=(login_id,), daemon=True)
-        t.start()
-
-        return JSONResponse(
-            {
-                "ok": True,
-                "loginId": login_id,
-                "authSessionId": auth_session_id,
-                "qrUrl": qr_url,
-                "qrSvg": qr_svg,
-                "status": "waiting_scan",
-                "expiresIn": interval * max_polls,
-            }
-        )
+        payload = await asyncio.to_thread(_create_qr_login_session_sync, certificate, None)
+        return JSONResponse(payload)
     except Exception as exc:
         return JSONResponse(
             {
@@ -832,6 +970,51 @@ async def line_qr_start(request: Request) -> JSONResponse:
             },
             status_code=500,
         )
+
+
+@router.get("/line/api/auth/qr/stream")
+async def line_qr_stream(request: Request, certificate: str = Query("")) -> StreamingResponse:
+    """Single-connection SSE QR login flow so multi-instance Cloud Run stays pinned to one WASM instance."""
+    cert_clean = certificate.strip() or None
+    ev_queue: queue.Queue = queue.Queue()
+
+    async def _gen():
+        login_id: Optional[str] = None
+        try:
+            init_payload = await asyncio.to_thread(_create_qr_login_session_sync, cert_clean, ev_queue)
+            login_id = init_payload.get("loginId")
+            yield f"event: qr\ndata: {json.dumps(init_payload, ensure_ascii=False)}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    if login_id:
+                        with _LOCK:
+                            if login_id in _QR_LOGINS:
+                                _QR_LOGINS[login_id]["cancelled"] = True
+                    break
+                try:
+                    evt, data = await asyncio.to_thread(ev_queue.get, True, 4.0)
+                except queue.Empty:
+                    yield ": keepalive\n\n"
+                    continue
+                if evt == "done":
+                    break
+                yield f"event: {evt}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                if evt in ("authenticated", "expired", "error"):
+                    break
+        except Exception as exc:
+            err_payload = {"ok": False, "status": "error", "error": f"QRコードの生成に失敗しました: {exc}"}
+            yield f"event: error\ndata: {json.dumps(err_payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/line/api/auth/qr/status")
@@ -947,17 +1130,17 @@ async def line_auth_restore(request: Request) -> JSONResponse:
                 "e2ee": body.get("e2ee") if isinstance(body.get("e2ee"), dict) else None,
             }
 
-    try:
+    def _restore_sync() -> Dict[str, Any]:
         sid, entry = _get_or_restore_session(session_id=session_id, session_data=session_data)
-        api: OkLine = entry["api"]
-        profile_obj = api.get_profile()
-        profile_dict = _serialize_profile(profile_obj)
-        _sync_my_mid(api, profile_dict.get("mid"))
-        entry["profile"] = profile_dict
-        entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
-        _save_persisted_sessions()
-        return JSONResponse(
-            {
+        with entry["ioLock"]:
+            api: OkLine = entry["api"]
+            profile_obj = api.get_profile()
+            profile_dict = _serialize_profile(profile_obj)
+            _sync_my_mid(api, profile_dict.get("mid"))
+            entry["profile"] = profile_dict
+            entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
+            _save_persisted_sessions()
+            return {
                 "ok": True,
                 "sessionId": sid,
                 "sessionData": entry["sessionData"],
@@ -965,7 +1148,12 @@ async def line_auth_restore(request: Request) -> JSONResponse:
                 "e2eeReady": api.e2ee.is_ready(),
                 "e2eeKeyCount": len(api.e2ee.my_keys),
             }
-        )
+
+    try:
+        res = await asyncio.to_thread(_restore_sync)
+        return JSONResponse(res)
+    except HTTPException as he:
+        return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
         return JSONResponse(
             {"ok": False, "error": f"セッション復元に失敗しました: {exc}"},
@@ -983,27 +1171,14 @@ async def line_auth_logout(request: Request) -> JSONResponse:
     with _LOCK:
         entry = _SESSIONS.pop(sid, None)
     if entry:
-        try:
-            entry["api"].close()
-        except Exception:
-            pass
+        _safe_close_api(entry.get("api"))
         _save_persisted_sessions()
     return JSONResponse({"ok": True})
 
 
-@router.post("/line/api/overview")
-async def line_overview(request: Request) -> JSONResponse:
-    """Fetch profile, talks (message boxes), contacts, and groups."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    sid = str(body.get("sessionId") or "").strip() or None
-    sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
-
-    try:
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+def _overview_sync(sid_in: Optional[str], sdata_in: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    sid, entry = _get_or_restore_session(session_id=sid_in, session_data=sdata_in)
+    with entry["ioLock"]:
         api: OkLine = entry["api"]
 
         # 1. Profile
@@ -1016,6 +1191,8 @@ async def line_overview(request: Request) -> JSONResponse:
         # 2. Contacts
         contacts_map: Dict[str, Dict[str, Any]] = {}
         contacts_list: List[Dict[str, Any]] = []
+        if my_mid and profile_dict.get("displayName"):
+            contacts_map[my_mid] = profile_dict
         try:
             contact_ids = api.get_all_contact_ids() or []
             if isinstance(contact_ids, dict):
@@ -1029,7 +1206,8 @@ async def line_overview(request: Request) -> JSONResponse:
                         cmid = c_info.get("mid")
                         if cmid and cmid not in contacts_map:
                             contacts_map[cmid] = c_info
-                            contacts_list.append(c_info)
+                            if cmid != my_mid:
+                                contacts_list.append(c_info)
         except Exception:
             pass
 
@@ -1067,13 +1245,14 @@ async def line_overview(request: Request) -> JSONResponse:
         missing_group_mids: List[str] = []
         missing_room_mids: List[str] = []
         boxes_by_id: Dict[str, Dict[str, Any]] = {}
+        box_messages_cache: Dict[str, List[Dict[str, Any]]] = dict(entry.get("boxMessagesCache") or {})
 
         for active_flag in (False, True):
             try:
                 mb_res = api.get_message_boxes(
                     limit=100,
                     active_only=active_flag,
-                    last_messages_per_box=3,
+                    last_messages_per_box=10,
                     unread_only=False,
                 )
                 mb_dict = (
@@ -1081,28 +1260,36 @@ async def line_overview(request: Request) -> JSONResponse:
                     if isinstance(mb_res, dict)
                     else (getattr(mb_res, "raw", None) if isinstance(getattr(mb_res, "raw", None), dict) else {})
                 )
-                box_items = mb_dict.get("messageBoxes") if isinstance(mb_dict, dict) else (mb_res if isinstance(mb_res, list) else [])
+                box_items = (
+                    mb_dict.get("messageBoxes")
+                    if isinstance(mb_dict, dict)
+                    else (mb_res if isinstance(mb_res, list) else [])
+                )
                 for b in box_items or []:
                     if isinstance(b, dict) and b.get("id"):
                         bid = str(b["id"])
+                        b_msgs = [x for x in (b.get("lastMessages") or []) if isinstance(x, dict)]
+                        if b_msgs:
+                            box_messages_cache[bid] = b_msgs
                         prev = boxes_by_id.get(bid)
-                        if not prev or (b.get("lastMessages") and not prev.get("lastMessages")):
+                        if not prev or (b_msgs and not prev.get("lastMessages")):
                             boxes_by_id[bid] = b
             except Exception:
                 continue
 
+        entry["boxMessagesCache"] = box_messages_cache
         raw_boxes: List[Dict[str, Any]] = list(boxes_by_id.values())
 
         for box in raw_boxes:
             mid = str(box.get("id") or "")
             if not mid:
                 continue
-            if mid.startswith("u") and mid not in contacts_map and mid != my_mid:
+            if _is_user_mid(mid) and mid not in contacts_map and mid != my_mid:
                 missing_user_mids.append(mid)
-            elif mid.startswith("c") and mid not in groups_map:
-                missing_group_mids.append(mid)
-            elif mid.startswith("r") and mid not in groups_map:
+            elif _is_room_mid(mid) and mid not in groups_map:
                 missing_room_mids.append(mid)
+            elif _is_group_mid(mid) and mid not in groups_map:
+                missing_group_mids.append(mid)
 
         if missing_user_mids:
             try:
@@ -1137,7 +1324,7 @@ async def line_overview(request: Request) -> JSONResponse:
                 continue
             seen_chat_mids.add(chat_mid)
 
-            is_group = chat_mid.startswith(("c", "r"))
+            is_group = _is_group_mid(chat_mid)
             if is_group:
                 g_info = groups_map.get(chat_mid) or {}
                 title = g_info.get("chatName") or f"グループ ({chat_mid[:8]})"
@@ -1145,7 +1332,9 @@ async def line_overview(request: Request) -> JSONResponse:
                 member_count = g_info.get("memberCount") or 0
             else:
                 c_info = contacts_map.get(chat_mid) or {}
-                title = c_info.get("displayName") or ("Keepメモ (自分)" if chat_mid == my_mid else f"LINE User ({chat_mid[:8]})")
+                title = c_info.get("displayName") or (
+                    "Keepメモ (自分)" if chat_mid == my_mid else f"LINE User ({chat_mid[:8]})"
+                )
                 pic = c_info.get("picturePath") or ""
                 member_count = 1
 
@@ -1219,22 +1408,36 @@ async def line_overview(request: Request) -> JSONResponse:
         entry["groupsMap"] = groups_map
         _save_persisted_sessions()
 
-        return JSONResponse(
-            {
-                "ok": True,
-                "sessionId": sid,
-                "sessionData": entry["sessionData"],
-                "profile": profile_dict,
-                "e2ee": {
-                    "ready": api.e2ee.is_ready(),
-                    "keyCount": len(api.e2ee.my_keys),
-                },
-                "chats": chats_list,
-                "contacts": contacts_list,
-                "groups": groups_list,
-                "invitedGroups": invited_groups_list,
-            }
-        )
+        return {
+            "ok": True,
+            "sessionId": sid,
+            "sessionData": entry["sessionData"],
+            "profile": profile_dict,
+            "e2ee": {
+                "ready": api.e2ee.is_ready(),
+                "keyCount": len(api.e2ee.my_keys),
+            },
+            "chats": chats_list,
+            "contacts": contacts_list,
+            "groups": groups_list,
+            "invitedGroups": invited_groups_list,
+        }
+
+
+@router.post("/line/api/overview")
+async def line_overview(request: Request) -> JSONResponse:
+    """Fetch profile, talks (message boxes), contacts, and groups."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    sid = str(body.get("sessionId") or "").strip() or None
+    sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
+
+    try:
+        res = await asyncio.to_thread(_overview_sync, sid, sdata)
+        return JSONResponse(res)
     except HTTPException as he:
         return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
@@ -1244,27 +1447,25 @@ async def line_overview(request: Request) -> JSONResponse:
         )
 
 
-@router.post("/line/api/messages")
-async def line_messages(request: Request) -> JSONResponse:
-    """Fetch recent or previous messages for a chatMid and decrypt Letter-Sealed payloads."""
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+def _extract_raw_message_list(res_msgs: Any) -> List[Any]:
+    if isinstance(res_msgs, dict):
+        return list(res_msgs.get("messages") or [])
+    if isinstance(res_msgs, list):
+        return list(res_msgs)
+    return []
 
-    sid = str(body.get("sessionId") or "").strip() or None
-    sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
-    chat_mid = str(body.get("chatMid") or "").strip()
-    count = min(max(int(body.get("count") or 60), 1), 100)
-    mark_read = bool(body.get("markRead", False))
-    before_message_id = str(body.get("beforeMessageId") or "").strip()
-    before_delivered_time = int(body.get("beforeDeliveredTime") or 0)
 
-    if not chat_mid:
-        return JSONResponse({"ok": False, "error": "chatMidが指定されていません。"}, status_code=400)
-
-    try:
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+def _messages_sync(
+    sid_in: Optional[str],
+    sdata_in: Optional[Dict[str, Any]],
+    chat_mid: str,
+    count: int,
+    mark_read: bool,
+    before_message_id: str,
+    before_delivered_time: int,
+) -> Dict[str, Any]:
+    sid, entry = _get_or_restore_session(session_id=sid_in, session_data=sdata_in)
+    with entry["ioLock"]:
         api: OkLine = entry["api"]
         profile_dict = entry.get("profile") or {}
         if not profile_dict.get("mid") and not getattr(api.transport.tokens, "mid", None):
@@ -1278,29 +1479,110 @@ async def line_messages(request: Request) -> JSONResponse:
         if my_mid and profile_dict.get("displayName"):
             contacts_map.setdefault(my_mid, profile_dict)
 
-        if before_message_id and before_delivered_time > 0:
+        raw_msgs: List[Any] = []
+        fetched_page_size = 0
+
+        if before_message_id:
+            eff_time = int(before_delivered_time or 0)
+            if eff_time <= 0:
+                eff_time = int(time.time() * 1000)
             res_msgs = api.get_previous_messages(
                 chat_mid,
                 before_message_id,
-                before_delivered_time,
+                eff_time,
                 count=count,
             )
+            raw_msgs = _extract_raw_message_list(res_msgs)
+            fetched_page_size = len(raw_msgs)
         else:
-            res_msgs = api.get_recent_messages(chat_mid, count=count)
+            recent_err: Optional[Exception] = None
+            try:
+                res_msgs = api.get_recent_messages(chat_mid, count=count)
+                raw_msgs = _extract_raw_message_list(res_msgs)
+                fetched_page_size = len(raw_msgs)
+            except Exception as exc:
+                recent_err = exc
+                raw_msgs = []
 
-        if isinstance(res_msgs, dict):
-            raw_msgs = res_msgs.get("messages") or []
-        elif isinstance(res_msgs, list):
-            raw_msgs = res_msgs
-        else:
-            raw_msgs = []
+            # Multi-tier fallback: if getRecentMessagesV2 returned empty or errored,
+            # query getMessageBoxesByIds + lastMessages + getPreviousMessagesV2WithRequest!
+            if not raw_msgs:
+                merged_by_id: Dict[str, Dict[str, Any]] = {}
+                for cached_m in (entry.get("boxMessagesCache") or {}).get(chat_mid, []):
+                    cm = _coerce_message_dict(cached_m)
+                    if cm.get("id"):
+                        merged_by_id[str(cm["id"])] = cm
 
-        # Resolve any unknown sender MIDs so group & 1:1 chat messages show real names & avatars
-        unknown_senders = []
+                try:
+                    mb_res = api.get_message_boxes_by_ids(
+                        [chat_mid],
+                        last_messages_count=min(count, 50),
+                    )
+                    mb_list = (
+                        mb_res.get("messageBoxes")
+                        if isinstance(mb_res, dict)
+                        else (mb_res if isinstance(mb_res, list) else [])
+                    ) or []
+                    for box in mb_list:
+                        if not isinstance(box, dict):
+                            continue
+                        for bm in box.get("lastMessages") or []:
+                            bmd = _coerce_message_dict(bm)
+                            if bmd.get("id"):
+                                merged_by_id[str(bmd["id"])] = bmd
+                        ld = box.get("lastDeliveredMessageId")
+                        ld_id = ""
+                        ld_time = 0
+                        if isinstance(ld, dict):
+                            ld_id = str(ld.get("messageId") or "")
+                            ld_time = int(ld.get("deliveredTime") or 0)
+                        elif ld:
+                            ld_id = str(ld)
+                        if not ld_time:
+                            ld_time = int(box.get("lastDeliveredMessageTime") or 0)
+                        if ld_time and ld_time < 10_000_000_000:
+                            ld_time *= 1000
+                        if ld_id and ld_time > 0:
+                            try:
+                                prev_res = api.get_previous_messages(
+                                    chat_mid,
+                                    ld_id,
+                                    ld_time,
+                                    count=count,
+                                )
+                                prev_list = _extract_raw_message_list(prev_res)
+                                fetched_page_size = max(fetched_page_size, len(prev_list))
+                                for pm in prev_list:
+                                    pmd = _coerce_message_dict(pm)
+                                    if pmd.get("id"):
+                                        merged_by_id[str(pmd["id"])] = pmd
+                            except Exception:
+                                pass
+                except Exception:
+                    if recent_err is not None and not merged_by_id:
+                        raise recent_err
+
+                if merged_by_id:
+                    raw_msgs = list(merged_by_id.values())
+                    fetched_page_size = max(fetched_page_size, len(raw_msgs))
+
+        # Deduplicate raw_msgs by id while preserving message payload richness
+        dedup_raw: Dict[str, Dict[str, Any]] = {}
+        anon_raw: List[Dict[str, Any]] = []
         for m in raw_msgs:
             md = _coerce_message_dict(m)
+            mid_val = str(md.get("id") or "")
+            if mid_val:
+                dedup_raw[mid_val] = md
+            else:
+                anon_raw.append(md)
+        clean_raw_msgs = list(dedup_raw.values()) + anon_raw
+
+        # Resolve any unknown sender MIDs (case-insensitive for modern U... MIDs)
+        unknown_senders = []
+        for md in clean_raw_msgs:
             fmid = str(md.get("from") or md.get("_from") or md.get("fromMid") or "")
-            if fmid and fmid.startswith("u") and fmid != my_mid and fmid not in contacts_map:
+            if _is_user_mid(fmid) and fmid != my_mid and fmid not in contacts_map:
                 unknown_senders.append(fmid)
         if unknown_senders:
             try:
@@ -1314,8 +1596,8 @@ async def line_messages(request: Request) -> JSONResponse:
 
         # Messages from getRecentMessagesV2 / getPreviousMessagesV2WithRequest are newest-first; sort oldest-first
         serialized = [
-            _decrypt_and_serialize_message(api, m, contacts_map, my_mid)
-            for m in raw_msgs
+            _decrypt_and_serialize_message(api, md, contacts_map, my_mid)
+            for md in clean_raw_msgs
         ]
         serialized.sort(
             key=lambda x: (
@@ -1341,19 +1623,50 @@ async def line_messages(request: Request) -> JSONResponse:
         )
 
         entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
-        return JSONResponse(
-            {
-                "ok": True,
-                "sessionId": sid,
-                "chatMid": chat_mid,
-                "messages": serialized,
-                "hasMore": len(raw_msgs) >= count and bool(oldest_id) and oldest_time > 0,
-                "oldestMessageId": oldest_id,
-                "oldestDeliveredTime": oldest_time,
-                "e2eeReady": api.e2ee.is_ready(),
-                "sessionData": entry["sessionData"],
-            }
+        return {
+            "ok": True,
+            "sessionId": sid,
+            "chatMid": chat_mid,
+            "messages": serialized,
+            "hasMore": (fetched_page_size >= min(count, 20) or len(serialized) >= count) and bool(oldest_id) and oldest_time > 0,
+            "oldestMessageId": oldest_id,
+            "oldestDeliveredTime": oldest_time,
+            "e2eeReady": api.e2ee.is_ready(),
+            "sessionData": entry["sessionData"],
+        }
+
+
+@router.post("/line/api/messages")
+async def line_messages(request: Request) -> JSONResponse:
+    """Fetch recent or previous messages for a chatMid and decrypt Letter-Sealed payloads."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    sid = str(body.get("sessionId") or "").strip() or None
+    sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
+    chat_mid = str(body.get("chatMid") or "").strip()
+    count = min(max(int(body.get("count") or 60), 1), 100)
+    mark_read = bool(body.get("markRead", False))
+    before_message_id = str(body.get("beforeMessageId") or "").strip()
+    before_delivered_time = int(body.get("beforeDeliveredTime") or 0)
+
+    if not chat_mid:
+        return JSONResponse({"ok": False, "error": "chatMidが指定されていません。"}, status_code=400)
+
+    try:
+        res = await asyncio.to_thread(
+            _messages_sync,
+            sid,
+            sdata,
+            chat_mid,
+            count,
+            mark_read,
+            before_message_id,
+            before_delivered_time,
         )
+        return JSONResponse(res)
     except HTTPException as he:
         return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
@@ -1380,33 +1693,37 @@ async def line_send_message(request: Request) -> JSONResponse:
     if not to_mid or not text:
         return JSONResponse({"ok": False, "error": "送信先とメッセージを入力してください。"}, status_code=400)
 
-    try:
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
-        api: OkLine = entry["api"]
-        my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
-        contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
+    def _send_sync() -> Dict[str, Any]:
+        r_sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+        with entry["ioLock"]:
+            api: OkLine = entry["api"]
+            my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
+            contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
 
-        if reply_to_id:
-            sent = api.reply_text(to_mid, text, reply_to_id)
-        else:
-            sent = api.send_text(to_mid, text)
+            if reply_to_id:
+                sent = api.reply_text(to_mid, text, reply_to_id)
+            else:
+                sent = api.send_text(to_mid, text)
 
-        serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
-        if not serialized.get("text") or serialized["text"].startswith("🔒"):
-            serialized["text"] = text
-        serialized["isMe"] = True
-        if not serialized.get("createdTime"):
-            serialized["createdTime"] = int(time.time() * 1000)
+            serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
+            if not serialized.get("text") or serialized["text"].startswith("🔒"):
+                serialized["text"] = text
+            serialized["isMe"] = True
+            if not serialized.get("createdTime"):
+                serialized["createdTime"] = int(time.time() * 1000)
 
-        entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
-        _save_persisted_sessions()
-        return JSONResponse(
-            {
+            entry["sessionData"] = _export_session_data(api, entry.get("sessionData"))
+            _save_persisted_sessions()
+            return {
                 "ok": True,
+                "sessionId": r_sid,
                 "message": serialized,
                 "sessionData": entry["sessionData"],
             }
-        )
+
+    try:
+        res = await asyncio.to_thread(_send_sync)
+        return JSONResponse(res)
     except HTTPException as he:
         return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
@@ -1437,19 +1754,25 @@ async def line_send_sticker(request: Request) -> JSONResponse:
     if not to_mid:
         return JSONResponse({"ok": False, "error": "送信先が指定されていません。"}, status_code=400)
 
+    def _sticker_sync() -> Dict[str, Any]:
+        _, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+        with entry["ioLock"]:
+            api: OkLine = entry["api"]
+            my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
+            contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
+
+            sent = api.send_sticker(to_mid, package_id, sticker_id, version_int)
+            serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
+            serialized["isMe"] = True
+            if not serialized.get("createdTime"):
+                serialized["createdTime"] = int(time.time() * 1000)
+            return {"ok": True, "message": serialized}
+
     try:
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
-        api: OkLine = entry["api"]
-        my_mid = _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
-        contacts_map: Dict[str, Dict[str, Any]] = dict(entry.get("contactsMap") or {})
-
-        sent = api.send_sticker(to_mid, package_id, sticker_id, version_int)
-        serialized = _decrypt_and_serialize_message(api, sent, contacts_map, my_mid)
-        serialized["isMe"] = True
-        if not serialized.get("createdTime"):
-            serialized["createdTime"] = int(time.time() * 1000)
-
-        return JSONResponse({"ok": True, "message": serialized})
+        res = await asyncio.to_thread(_sticker_sync)
+        return JSONResponse(res)
+    except HTTPException as he:
+        return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
         return JSONResponse({"ok": False, "error": f"スタンプ送信エラー: {exc}"}, status_code=500)
 
@@ -1475,29 +1798,36 @@ async def line_send_media(request: Request) -> JSONResponse:
     if not to_mid or not data_b64:
         return JSONResponse({"ok": False, "error": "送信データが空です。"}, status_code=400)
 
-    try:
+    def _media_upload_sync() -> Dict[str, Any]:
         raw_bytes = base64.b64decode(data_b64)
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
-        api: OkLine = entry["api"]
-        _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
+        _, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+        with entry["ioLock"]:
+            api: OkLine = entry["api"]
+            _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
-        suffix = os.path.splitext(filename)[1] or ".bin"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(raw_bytes)
-            tmp_path = tmp.name
+            suffix = os.path.splitext(filename)[1] or ".bin"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(raw_bytes)
+                tmp_path = tmp.name
 
-        try:
-            if mime_type.startswith("image/"):
-                res = api.send_image(to_mid, tmp_path)
-            else:
-                res = api.send_file(to_mid, tmp_path, filename=filename)
-        finally:
             try:
-                os.unlink(tmp_path)
-            except Exception:
-                pass
+                if mime_type.startswith("image/"):
+                    res = api.send_image(to_mid, tmp_path)
+                else:
+                    res = api.send_file(to_mid, tmp_path, filename=filename)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
 
-        return JSONResponse({"ok": True, "result": res if isinstance(res, dict) else getattr(res, "raw", str(res))})
+            return {"ok": True, "result": res if isinstance(res, dict) else getattr(res, "raw", str(res))}
+
+    try:
+        res = await asyncio.to_thread(_media_upload_sync)
+        return JSONResponse(res)
+    except HTTPException as he:
+        return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
         return JSONResponse({"ok": False, "error": f"メディア送信エラー: {exc}"}, status_code=500)
 
@@ -1514,80 +1844,82 @@ async def line_action(request: Request) -> JSONResponse:
     sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
     action = str(body.get("action") or "").strip()
 
-    try:
-        sid, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
-        api: OkLine = entry["api"]
-        _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
+    def _action_sync() -> tuple[Dict[str, Any], int]:
+        _, entry = _get_or_restore_session(session_id=sid, session_data=sdata)
+        with entry["ioLock"]:
+            api: OkLine = entry["api"]
+            _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
-        if action == "react":
-            message_id = str(body.get("messageId") or "").strip()
-            reaction_type = int(body.get("reactionType") or 2)
-            api.react(message_id, reaction_type)
-            return JSONResponse({"ok": True})
+            if action == "react":
+                message_id = str(body.get("messageId") or "").strip()
+                reaction_type = int(body.get("reactionType") or 2)
+                api.react(message_id, reaction_type)
+                return {"ok": True}, 200
 
-        if action == "unsend":
-            message_id = str(body.get("messageId") or "").strip()
-            api.unsend_message(message_id)
-            return JSONResponse({"ok": True})
+            if action == "unsend":
+                message_id = str(body.get("messageId") or "").strip()
+                api.unsend_message(message_id)
+                return {"ok": True}, 200
 
-        if action == "mark_read":
-            chat_mid = str(body.get("chatMid") or "").strip()
-            message_id = str(body.get("messageId") or "").strip()
-            api.mark_as_read(chat_mid, message_id)
-            return JSONResponse({"ok": True})
+            if action == "mark_read":
+                chat_mid = str(body.get("chatMid") or "").strip()
+                message_id = str(body.get("messageId") or "").strip()
+                api.mark_as_read(chat_mid, message_id)
+                return {"ok": True}, 200
 
-        if action == "find_contact":
-            user_id = str(body.get("userId") or "").strip().lstrip("@")
-            if not user_id:
-                return JSONResponse({"ok": False, "error": "検索するLINE IDを入力してください。"}, status_code=400)
-            c = api.find_contact_by_userid(user_id)
-            return JSONResponse({"ok": True, "contact": _serialize_profile(c)})
+            if action == "find_contact":
+                user_id = str(body.get("userId") or "").strip().lstrip("@")
+                if not user_id:
+                    return {"ok": False, "error": "検索するLINE IDを入力してください。"}, 400
+                c = api.find_contact_by_userid(user_id)
+                return {"ok": True, "contact": _serialize_profile(c)}, 200
 
-        if action == "add_friend":
-            mid = str(body.get("mid") or "").strip()
-            if not mid:
-                return JSONResponse({"ok": False, "error": "追加する友だちのMIDが指定されていません。"}, status_code=400)
-            api.add_friend_by_mid(mid)
-            return JSONResponse({"ok": True})
+            if action == "add_friend":
+                mid = str(body.get("mid") or "").strip()
+                if not mid:
+                    return {"ok": False, "error": "追加する友だちのMIDが指定されていません。"}, 400
+                api.add_friend_by_mid(mid)
+                return {"ok": True}, 200
 
-        if action == "create_group":
-            name = str(body.get("name") or "").strip()
-            member_mids = body.get("memberMids") or []
-            if not name:
-                return JSONResponse({"ok": False, "error": "グループ名を入力してください。"}, status_code=400)
-            g = api.create_group(name, [str(m) for m in member_mids if m])
-            extracted = _extract_chats_list(g)
-            g_out = extracted[0] if extracted else {"chatMid": "", "chatName": name}
-            return JSONResponse(
-                {
+            if action == "create_group":
+                name = str(body.get("name") or "").strip()
+                member_mids = body.get("memberMids") or []
+                if not name:
+                    return {"ok": False, "error": "グループ名を入力してください。"}, 400
+                g = api.create_group(name, [str(m) for m in member_mids if m])
+                extracted = _extract_chats_list(g)
+                g_out = extracted[0] if extracted else {"chatMid": "", "chatName": name}
+                return {
                     "ok": True,
                     "group": {
                         "chatMid": g_out.get("chatMid", ""),
                         "chatName": g_out.get("chatName") or name,
                     },
-                }
-            )
+                }, 200
 
-        if action == "accept_group":
-            chat_mid = str(body.get("chatMid") or "").strip()
-            api.accept_chat_invitation(chat_mid)
-            return JSONResponse({"ok": True})
+            if action == "accept_group":
+                chat_mid = str(body.get("chatMid") or "").strip()
+                api.accept_chat_invitation(chat_mid)
+                return {"ok": True}, 200
 
-        if action == "update_profile":
-            display_name = body.get("displayName")
-            status_message = body.get("statusMessage")
-            if display_name is not None and str(display_name).strip():
-                api.set_display_name(str(display_name).strip())
-            if status_message is not None:
-                api.set_status_message(str(status_message))
-            profile_dict = _serialize_profile(api.get_profile())
-            _sync_my_mid(api, profile_dict.get("mid"))
-            entry["profile"] = profile_dict
-            _save_persisted_sessions()
-            return JSONResponse({"ok": True, "profile": profile_dict})
+            if action == "update_profile":
+                display_name = body.get("displayName")
+                status_message = body.get("statusMessage")
+                if display_name is not None and str(display_name).strip():
+                    api.set_display_name(str(display_name).strip())
+                if status_message is not None:
+                    api.set_status_message(str(status_message))
+                profile_dict = _serialize_profile(api.get_profile())
+                _sync_my_mid(api, profile_dict.get("mid"))
+                entry["profile"] = profile_dict
+                _save_persisted_sessions()
+                return {"ok": True, "profile": profile_dict}, 200
 
-        return JSONResponse({"ok": False, "error": f"未対応のアクションです: {action}"}, status_code=400)
+            return {"ok": False, "error": f"未対応のアクションです: {action}"}, 400
 
+    try:
+        res_dict, status_code = await asyncio.to_thread(_action_sync)
+        return JSONResponse(res_dict, status_code=status_code)
     except HTTPException as he:
         return JSONResponse({"ok": False, "error": he.detail}, status_code=he.status_code)
     except Exception as exc:
@@ -1649,39 +1981,46 @@ async def line_avatar_proxy(
     return Response(content=svg.encode("utf-8"), media_type="image/svg+xml", headers={"Cache-Control": "public, max-age=600"})
 
 
-@router.get("/line/api/media")
-async def line_media_proxy(
-    sessionId: str = Query(...),
-    chatMid: str = Query(""),
-    messageId: str = Query(...),
-) -> Response:
-    """Download and serve chat media (supports both E2EE sealed media and plain OBS media)."""
-    try:
-        _, entry = _get_or_restore_session(session_id=sessionId)
+def _fetch_media_bytes_sync(
+    session_id: Optional[str],
+    session_data: Optional[Dict[str, Any]],
+    chat_mid: str,
+    message_id: str,
+    meta_hint: Optional[Dict[str, Any]] = None,
+) -> tuple[bytes, str]:
+    _, entry = _get_or_restore_session(session_id=session_id, session_data=session_data)
+    with entry["ioLock"]:
         api: OkLine = entry["api"]
         _sync_my_mid(api, (entry.get("profile") or {}).get("mid"))
 
-        data = None
-        oid = str(messageId)
-        sid_obs = "m"
-        if chatMid:
+        data: Optional[bytes] = None
+        hint = meta_hint if isinstance(meta_hint, dict) else {}
+        oid = str(hint.get("OID") or message_id)
+        enc_km = hint.get("ENC_KM") or hint.get("keyMaterial")
+        sid_obs = str(hint.get("SID") or ("emi" if enc_km else "m"))
+
+        if enc_km:
+            from okline import e2ee_crypto as _fr
+
+            raw_blob = api.obs.download_object("talk", sid_obs, oid, message_id=str(message_id))
+            km_bytes = base64.b64decode(str(enc_km) + "=" * (-len(str(enc_km)) % 4))
+            data = _fr.decrypt_blob(km_bytes, raw_blob)
+        elif chat_mid and not hint.get("OID"):
             try:
-                recent = api.get_recent_messages(chatMid, count=80) or []
-                if isinstance(recent, dict):
-                    recent = recent.get("messages") or []
+                recent = _extract_raw_message_list(api.get_recent_messages(chat_mid, count=80))
                 for m in recent:
                     md = _coerce_message_dict(m)
-                    if str(md.get("id") or "") == str(messageId):
+                    if str(md.get("id") or "") == str(message_id):
                         dec_fn = getattr(api, "decrypt_message", None) or api.e2ee.decrypt
-                        dm = dec_fn(md) if api.e2ee.is_ready() else md
+                        dm = dec_fn(md) if (api.e2ee.is_ready() and (md.get("chunks") or (md.get("contentMetadata") or {}).get("e2eeVersion"))) else md
                         meta = (dm.get("contentMetadata") if isinstance(dm, dict) else None) or {}
-                        oid = str(meta.get("OID") or messageId)
+                        oid = str(meta.get("OID") or message_id)
                         enc_km = meta.get("ENC_KM") or meta.get("keyMaterial")
                         sid_obs = str(meta.get("SID") or ("emi" if enc_km else "m"))
                         if enc_km:
                             from okline import e2ee_crypto as _fr
 
-                            raw_blob = api.obs.download_object("talk", sid_obs, oid, message_id=str(messageId))
+                            raw_blob = api.obs.download_object("talk", sid_obs, oid, message_id=str(message_id))
                             km_bytes = base64.b64decode(str(enc_km) + "=" * (-len(str(enc_km)) % 4))
                             data = _fr.decrypt_blob(km_bytes, raw_blob)
                         break
@@ -1689,9 +2028,8 @@ async def line_media_proxy(
                 data = None
 
         if not data:
-            data = api.obs.download_object("talk", sid_obs, oid, message_id=str(messageId))
+            data = api.obs.download_object("talk", sid_obs, oid, message_id=str(message_id))
 
-        # Sniff content type
         ctype = "application/octet-stream"
         if data.startswith(b"\xff\xd8\xff"):
             ctype = "image/jpeg"
@@ -1703,8 +2041,63 @@ async def line_media_proxy(
             ctype = "image/webp"
         elif b"ftyp" in data[:32]:
             ctype = "video/mp4"
+        elif data.startswith((b"ID3", b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")):
+            ctype = "audio/mpeg"
+        elif data.startswith(b"OggS"):
+            ctype = "audio/ogg"
+        return data, ctype
 
+
+@router.get("/line/api/media")
+async def line_media_proxy(
+    sessionId: str = Query(...),
+    chatMid: str = Query(""),
+    messageId: str = Query(...),
+) -> Response:
+    """Download and serve chat media (GET compatibility endpoint)."""
+    try:
+        data, ctype = await asyncio.to_thread(
+            _fetch_media_bytes_sync,
+            sessionId,
+            None,
+            chatMid,
+            messageId,
+            None,
+        )
         return Response(content=data, media_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"メディアを取得できませんでした: {exc}")
+
+
+@router.post("/line/api/media")
+async def line_media_proxy_post(request: Request) -> Response:
+    """Stateless media download & E2EE decryption endpoint (works across multi-instance Cloud Run & older history)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    sid = str(body.get("sessionId") or "").strip() or None
+    sdata = body.get("sessionData") if isinstance(body.get("sessionData"), dict) else None
+    chat_mid = str(body.get("chatMid") or "").strip()
+    message_id = str(body.get("messageId") or "").strip()
+    meta_hint = body.get("contentMetadata") if isinstance(body.get("contentMetadata"), dict) else None
+
+    if not message_id:
+        raise HTTPException(status_code=400, detail="messageIdが指定されていません。")
+
+    try:
+        data, ctype = await asyncio.to_thread(
+            _fetch_media_bytes_sync,
+            sid,
+            sdata,
+            chat_mid,
+            message_id,
+            meta_hint,
+        )
+        return Response(content=data, media_type=ctype, headers={"Cache-Control": "private, max-age=3600"})
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=404, detail=f"メディアを取得できませんでした: {exc}")
 
@@ -2196,8 +2589,22 @@ let currentReplyTo = null;
 
 let qrLoginId = null;
 let qrPollTimer = null;
+let qrEventSource = null;
 let emailPollTimer = null;
 let chatPollTimer = null;
+let overviewInFlight = false;
+const mediaBlobCache = new Map();
+
+function stopQrFlow() {
+  if (qrEventSource) {
+    try { qrEventSource.close(); } catch (e) {}
+    qrEventSource = null;
+  }
+  if (qrPollTimer) {
+    clearInterval(qrPollTimer);
+    qrPollTimer = null;
+  }
+}
 
 // Popular official LINE stickers (Moon, Brown, Cony)
 const DEFAULT_STICKERS = [
@@ -2270,21 +2677,10 @@ function switchLoginTab(tab) {
   document.getElementById("paneToken").style.display = tab === "token" ? "block" : "none";
 }
 
-async function startQrLogin() {
-  if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
+async function startQrLoginPollingFallback(cert) {
   const svgBox = document.getElementById("qrSvgContainer");
-  const pinOverlay = document.getElementById("qrPinOverlay");
   const statusText = document.getElementById("qrStatusText");
   const reloadBtn = document.getElementById("btnReloadQr");
-
-  pinOverlay.style.display = "none";
-  reloadBtn.disabled = true;
-  svgBox.innerHTML = `<span style="color:#475569;font-size:13px;font-weight:600;">LINEサーバーからQRコードを取得中...</span>`;
-  statusText.textContent = "QRコードセッションを作成中...";
-
-  const vault = loadVault();
-  const cert = vault && vault.sessionData ? vault.sessionData.certificate : null;
-
   try {
     const resp = await fetch("/line/api/auth/qr/start", {
       method: "POST",
@@ -2309,6 +2705,109 @@ async function startQrLogin() {
   }
 }
 
+async function startQrLogin() {
+  stopQrFlow();
+  qrLoginId = null;
+  const svgBox = document.getElementById("qrSvgContainer");
+  const pinOverlay = document.getElementById("qrPinOverlay");
+  const pinDigits = document.getElementById("qrPinDigits");
+  const statusText = document.getElementById("qrStatusText");
+  const reloadBtn = document.getElementById("btnReloadQr");
+
+  pinOverlay.style.display = "none";
+  reloadBtn.disabled = true;
+  svgBox.innerHTML = `<span style="color:#475569;font-size:13px;font-weight:600;">LINEサーバーからQRコードを取得中...</span>`;
+  statusText.textContent = "QRコードセッションを作成中...";
+
+  const vault = loadVault();
+  const cert = vault && vault.sessionData ? vault.sessionData.certificate : null;
+
+  if (typeof window.EventSource !== "function") {
+    await startQrLoginPollingFallback(cert);
+    return;
+  }
+
+  let receivedQr = false;
+  const qs = cert ? `?certificate=${encodeURIComponent(cert)}` : "";
+  try {
+    const es = new EventSource(`/line/api/auth/qr/stream${qs}`);
+    qrEventSource = es;
+
+    es.addEventListener("qr", (ev) => {
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        receivedQr = true;
+        reloadBtn.disabled = false;
+        if (!data.ok) {
+          stopQrFlow();
+          svgBox.innerHTML = `<span style="color:#ef4444;font-size:13px;padding:12px;">${escapeHtml(data.error || "エラー")}</span>`;
+          statusText.textContent = "QRコード取得失敗";
+          return;
+        }
+        qrLoginId = data.loginId;
+        svgBox.innerHTML = data.qrSvg;
+        statusText.textContent = "スマホのLINEアプリでQRコードを読み取ってください";
+      } catch (e) {}
+    });
+
+    es.addEventListener("waiting_pin", (ev) => {
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        pinOverlay.style.display = "flex";
+        pinDigits.textContent = data.pinCode || "------";
+        statusText.textContent = `スマホのLINE画面に「${data.pinCode || ""}」を入力してください`;
+      } catch (e) {}
+    });
+
+    es.addEventListener("authenticated", (ev) => {
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        stopQrFlow();
+        saveVault(data.sessionId, data.sessionData);
+        myProfile = data.profile || {};
+        onLoginSuccess();
+      } catch (e) {}
+    });
+
+    es.addEventListener("expired", (ev) => {
+      let errMsg = "QRコードの有効期限が切れました";
+      try {
+        const data = JSON.parse(ev.data || "{}");
+        if (data.error) errMsg = data.error;
+      } catch (e) {}
+      stopQrFlow();
+      reloadBtn.disabled = false;
+      pinOverlay.style.display = "none";
+      statusText.textContent = errMsg;
+    });
+
+    es.addEventListener("error", (ev) => {
+      if (ev && typeof ev.data === "string" && ev.data) {
+        let errMsg = "QR認証エラーが発生しました";
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.error) errMsg = data.error;
+        } catch (e) {}
+        stopQrFlow();
+        reloadBtn.disabled = false;
+        pinOverlay.style.display = "none";
+        svgBox.innerHTML = `<span style="color:#ef4444;font-size:13px;padding:12px;">${escapeHtml(errMsg)}</span>`;
+        statusText.textContent = errMsg;
+        return;
+      }
+      stopQrFlow();
+      if (!receivedQr) {
+        startQrLoginPollingFallback(cert);
+      } else if (qrLoginId) {
+        qrPollTimer = setInterval(pollQrStatus, 1400);
+      }
+    });
+  } catch (e) {
+    stopQrFlow();
+    await startQrLoginPollingFallback(cert);
+  }
+}
+
 async function pollQrStatus() {
   if (!qrLoginId) return;
   try {
@@ -2325,14 +2824,12 @@ async function pollQrStatus() {
       pinDigits.textContent = data.pinCode || "------";
       statusText.textContent = `スマホのLINE画面に「${data.pinCode}」を入力してください`;
     } else if (data.status === "authenticated") {
-      clearInterval(qrPollTimer);
-      qrPollTimer = null;
+      stopQrFlow();
       saveVault(data.sessionId, data.sessionData);
       myProfile = data.profile || {};
       onLoginSuccess();
     } else if (data.status === "expired" || data.status === "error") {
-      clearInterval(qrPollTimer);
-      qrPollTimer = null;
+      stopQrFlow();
       pinOverlay.style.display = "none";
       statusText.textContent = data.error || "QRコードの有効期限が切れました";
     }
@@ -2442,7 +2939,7 @@ async function restoreFromInput() {
 }
 
 function onLoginSuccess() {
-  if (qrPollTimer) { clearInterval(qrPollTimer); qrPollTimer = null; }
+  stopQrFlow();
   if (emailPollTimer) { clearInterval(emailPollTimer); emailPollTimer = null; }
   document.getElementById("loginView").style.display = "none";
   document.getElementById("appView").style.display = "grid";
@@ -2458,6 +2955,8 @@ function onLoginSuccess() {
 }
 
 async function refreshOverview() {
+  if (overviewInFlight) return;
+  overviewInFlight = true;
   try {
     const resp = await fetch("/line/api/overview", {
       method: "POST",
@@ -2497,7 +2996,10 @@ async function refreshOverview() {
     }
 
     renderCurrentList();
-  } catch (e) {}
+  } catch (e) {
+  } finally {
+    overviewInFlight = false;
+  }
 }
 
 function switchMainTab(tab) {
@@ -2641,6 +3143,7 @@ function ensureChatHistoryState(chatMid) {
       oldestMessageId: "",
       oldestDeliveredTime: 0,
       initialized: false,
+      loadingRecent: false,
       loadingOlder: false,
       lastRenderKey: ""
     };
@@ -2673,6 +3176,59 @@ function computeRenderKey(state) {
     parts.push(`${m.id}:${(m.text || "").length}:${(m.reactions || []).length}:${m.wasEncrypted ? 1 : 0}`);
   }
   return parts.join("|");
+}
+
+async function resolveStatelessMediaUrl(chatMid, msg) {
+  const key = `${chatMid}:${msg.id}`;
+  if (mediaBlobCache.has(key)) {
+    return mediaBlobCache.get(key);
+  }
+  const fallbackUrl = `/line/api/media?sessionId=${encodeURIComponent(sessionId || "")}&chatMid=${encodeURIComponent(chatMid)}&messageId=${encodeURIComponent(msg.id)}`;
+  try {
+    const resp = await fetch("/line/api/media", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        sessionData,
+        chatMid,
+        messageId: msg.id,
+        contentMetadata: msg.contentMetadata || {}
+      })
+    });
+    if (!resp.ok) return fallbackUrl;
+    const blob = await resp.blob();
+    if (!blob || blob.size === 0) return fallbackUrl;
+    const objUrl = URL.createObjectURL(blob);
+    mediaBlobCache.set(key, objUrl);
+    return objUrl;
+  } catch (e) {
+    return fallbackUrl;
+  }
+}
+
+function hydrateChatMediaElements(container, chatMid, msgs) {
+  const msgMap = new Map();
+  for (const m of (msgs || [])) {
+    if (m && m.id) msgMap.set(String(m.id), m);
+  }
+  const els = container.querySelectorAll("[data-media-msg-id]");
+  els.forEach((el) => {
+    const mid = el.getAttribute("data-media-msg-id");
+    const msg = msgMap.get(String(mid || ""));
+    if (!msg) return;
+    resolveStatelessMediaUrl(chatMid, msg).then((url) => {
+      if (!url || !el.isConnected) return;
+      if (el.tagName === "A") {
+        el.href = url;
+      } else {
+        el.src = url;
+        if (el.tagName === "IMG") {
+          el.onclick = () => window.open(url, "_blank");
+        }
+      }
+    });
+  });
 }
 
 function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
@@ -2712,18 +3268,19 @@ function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
     const row = document.createElement("div");
     row.className = "msg-row " + (m.isMe ? "me" : "other");
 
-    const mediaUrl = `/line/api/media?sessionId=${encodeURIComponent(sessionId)}&chatMid=${encodeURIComponent(chatMid)}&messageId=${encodeURIComponent(m.id)}`;
+    const cachedMediaUrl = mediaBlobCache.get(`${chatMid}:${m.id}`) || "";
+    const escMid = escapeHtml(m.id);
     let innerContent = "";
     if (m.contentType === 7 && m.stickerUrl) {
       innerContent = `<img class="msg-sticker" src="${escapeHtml(m.stickerUrl)}" alt="[スタンプ]" />`;
     } else if (m.contentType === 1) {
-      innerContent = `<img class="msg-image" src="${mediaUrl}" alt="画像" onclick="window.open('${mediaUrl}','_blank')" onerror="this.outerHTML='<div class=msg-bubble>📷 [画像]</div>'" />`;
+      innerContent = `<img class="msg-image" ${cachedMediaUrl ? `src="${escapeHtml(cachedMediaUrl)}"` : `data-media-msg-id="${escMid}"`} alt="画像" onerror="this.outerHTML='<div class=msg-bubble>📷 [画像]</div>'" />`;
     } else if (m.contentType === 2) {
-      innerContent = `<video class="msg-image" controls preload="metadata" src="${mediaUrl}" style="max-height:260px;background:#000;"></video>`;
+      innerContent = `<video class="msg-image" controls preload="metadata" ${cachedMediaUrl ? `src="${escapeHtml(cachedMediaUrl)}"` : `data-media-msg-id="${escMid}"`} style="max-height:260px;background:#000;"></video>`;
     } else if (m.contentType === 3) {
-      innerContent = `<div class="msg-bubble"><div style="font-size:11.5px;margin-bottom:4px;">🎤 音声メッセージ</div><audio controls preload="none" src="${mediaUrl}" style="max-width:230px;height:34px;"></audio></div>`;
+      innerContent = `<div class="msg-bubble"><div style="font-size:11.5px;margin-bottom:4px;">🎤 音声メッセージ</div><audio controls preload="none" ${cachedMediaUrl ? `src="${escapeHtml(cachedMediaUrl)}"` : `data-media-msg-id="${escMid}"`} style="max-width:230px;height:34px;"></audio></div>`;
     } else if (m.contentType === 14) {
-      innerContent = `<div class="msg-bubble"><a href="${mediaUrl}" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">${escapeHtml(m.text || "📎 ファイルをダウンロード")}</a></div>`;
+      innerContent = `<div class="msg-bubble"><a ${cachedMediaUrl ? `href="${escapeHtml(cachedMediaUrl)}"` : `href="#" data-media-msg-id="${escMid}"`} target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;font-weight:600;">${escapeHtml(m.text || "📎 ファイルをダウンロード")}</a></div>`;
     } else {
       const replyBadge = m.relatedMessageId ? `<div style="font-size:11px;opacity:0.75;border-left:2px solid currentColor;padding-left:6px;margin-bottom:4px;">↩ 返信メッセージ</div>` : "";
       innerContent = `<div class="msg-bubble" title="クリックで返信 / 右クリックでメニュー">${replyBadge}${escapeHtml(m.text)}</div>`;
@@ -2758,6 +3315,8 @@ function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
     box.appendChild(row);
   }
 
+  hydrateChatMediaElements(box, chatMid, msgs);
+
   if (preserveScrollDelta) {
     box.scrollTop = Math.max(0, box.scrollHeight - prevHeight + prevTop);
   } else if (scrollToBottom || wasNearBottom) {
@@ -2768,6 +3327,8 @@ function renderChatMessages(chatMid, scrollToBottom, preserveScrollDelta) {
 async function loadMessages(chatMid, markRead, forceScroll) {
   if (!chatMid) return;
   const state = ensureChatHistoryState(chatMid);
+  if (state.loadingRecent && !forceScroll) return;
+  state.loadingRecent = true;
   const box = document.getElementById("chatMessagesBox");
 
   try {
@@ -2803,17 +3364,29 @@ async function loadMessages(chatMid, markRead, forceScroll) {
 
     const incoming = data.messages || [];
     mergeMessagesIntoState(state, incoming);
-    if (!state.initialized) {
+    if (!state.initialized || !state.oldestMessageId) {
       state.hasMore = Boolean(data.hasMore);
       state.oldestMessageId = data.oldestMessageId || "";
       state.oldestDeliveredTime = Number(data.oldestDeliveredTime || 0);
       state.initialized = true;
+    }
+    if (state.messages.length > 0) {
+      const latest = state.messages[state.messages.length - 1];
+      const chatEntry = chatsData.find(c => c.chatMid === chatMid);
+      if (chatEntry && latest) {
+        chatEntry.lastMessage = latest;
+        chatEntry.lastTime = latest.createdTime || latest.deliveredTime || chatEntry.lastTime;
+        if (markRead) chatEntry.unreadCount = 0;
+        renderCurrentList();
+      }
     }
     renderChatMessages(chatMid, Boolean(markRead || forceScroll), false);
   } catch (e) {
     if (chatMid === currentChatMid && !state.messages.length) {
       box.innerHTML = `<div style="margin:auto;text-align:center;background:rgba(15,23,42,0.72);color:#fff;padding:14px 20px;border-radius:16px;font-size:12.5px;">通信エラーが発生しました。しばらくしてから再試行してください。</div>`;
     }
+  } finally {
+    state.loadingRecent = false;
   }
 }
 
@@ -3199,6 +3772,10 @@ function closeModal() {
 }
 
 function showLoginScreen() {
+  if (chatPollTimer) {
+    clearInterval(chatPollTimer);
+    chatPollTimer = null;
+  }
   document.getElementById("appView").style.display = "none";
   document.getElementById("loginView").style.display = "flex";
   document.getElementById("btnRefreshOverview").style.display = "none";
@@ -3218,6 +3795,10 @@ async function logoutLine() {
   } catch (e) {}
   try { localStorage.removeItem(VAULT_KEY); } catch (e) {}
   for (const k of Object.keys(chatHistoryMap)) delete chatHistoryMap[k];
+  for (const u of mediaBlobCache.values()) {
+    try { URL.revokeObjectURL(u); } catch (e) {}
+  }
+  mediaBlobCache.clear();
   sessionId = null;
   sessionData = null;
   currentChatMid = null;

@@ -92,6 +92,10 @@ class E2EEManager:
         self.latest_key_id: int | None = None
         # peer mid -> (channel, my_key_id, peer_key_id)
         self._peer_channels: dict[str, tuple[int, int, int]] = {}
+        # (my_handle, peer_mid, peer_key_id) -> receive/own wasm channel handle
+        self._recv_channels: dict[tuple[int, str, int], int] = {}
+        # (peer_mid, peer_key_id) -> base64 public key (immutable per keyId)
+        self._peer_pubkeys: dict[tuple[str, int], str] = {}
         # peer mid -> {specVersion, allowedTypes} from negotiateE2EEPublicKey
         self._peer_negotiation: dict[str, dict[str, Any]] = {}
         # group mid -> {specVersion, allowedTypes} from the group shared key
@@ -125,6 +129,8 @@ class E2EEManager:
             return False
         self.my_keys.clear()
         self._export_blobs.clear()  # fresh unwrapped keys — re-export from scratch
+        self._peer_channels.clear()
+        self._recv_channels.clear()
         for h in handles:
             try:
                 kid = int(self._bridge.e2ee_get_key_id(h))
@@ -174,6 +180,8 @@ class E2EEManager:
         if not keys:
             return False
         self.my_keys.clear()
+        self._peer_channels.clear()
+        self._recv_channels.clear()
         for kid_s, blob in keys.items():
             try:
                 self.my_keys[int(kid_s)] = int(self._bridge.e2ee_load_key(blob))
@@ -196,6 +204,27 @@ class E2EEManager:
         log.info("E2EE restored: %d key(s), latest=%s", len(self.my_keys), self.latest_key_id)
         return self.is_ready()
 
+    def export_peer_pubkeys(self, max_entries: int = 400) -> dict[str, str]:
+        """Serialize cached ``(mid, keyId) -> keyData`` public keys for stateless session reuse."""
+        out: dict[str, str] = {}
+        items = list(self._peer_pubkeys.items())[-max_entries:]
+        for (mid, kid), pub in items:
+            if mid and pub:
+                out[f"{mid}:{kid}"] = pub
+        return out
+
+    def load_peer_pubkeys(self, data: dict[str, str] | None) -> None:
+        if not isinstance(data, dict):
+            return
+        for k, pub in data.items():
+            if not isinstance(k, str) or not isinstance(pub, str) or ":" not in k or not pub:
+                continue
+            mid, kid_s = k.rsplit(":", 1)
+            try:
+                self._peer_pubkeys[(mid, int(kid_s))] = pub
+            except ValueError:
+                continue
+
     # -- channels ------------------------------------------------------------
     def _negotiate_peer(self, peer_mid: str) -> tuple[str, int]:
         """Return the peer's (public_key_b64, key_id) via negotiate/getE2EEPublicKey.
@@ -215,12 +244,16 @@ class E2EEManager:
             }
             pk = neg.get("publicKey")
             if isinstance(pk, dict) and pk.get("keyData") and pk.get("keyId") is not None:
-                return pk["keyData"], int(pk["keyId"])
+                kid_i = int(pk["keyId"])
+                self._peer_pubkeys[(peer_mid, kid_i)] = pk["keyData"]
+                return pk["keyData"], kid_i
         # fall back to getE2EEPublicKey (no negotiation info beyond defaults)
         self._peer_negotiation.setdefault(peer_mid, {"specVersion": 2, "allowedTypes": []})
         gk = self.api.get_e2ee_public_key(peer_mid, 1, 0)
         if isinstance(gk, dict) and gk.get("keyData") is not None:
-            return gk["keyData"], int(gk.get("keyId", 0))
+            kid_i = int(gk.get("keyId", 0))
+            self._peer_pubkeys[(peer_mid, kid_i)] = gk["keyData"]
+            return gk["keyData"], kid_i
         raise RuntimeError(f"could not negotiate E2EE key for {peer_mid}")
 
     def _channel_for_send(self, peer_mid: str) -> tuple[int, int, int]:
@@ -244,11 +277,14 @@ class E2EEManager:
             my_handle = self.my_keys.get(self.latest_key_id or 0)
         if my_handle is None:
             raise RuntimeError("no local E2EE key to decrypt with")
-        sender_pub = self.api.get_e2ee_public_key(sender_mid, 1, sender_key_id)
-        pub_b64 = sender_pub.get("keyData") if isinstance(sender_pub, dict) else None
-        if not pub_b64:
-            raise RuntimeError(f"no public key for sender {sender_mid}")
-        return self._bridge.e2ee_create_channel_with_pubkey(my_handle, pub_b64)
+        cache_key = (int(my_handle), sender_mid, int(sender_key_id))
+        cached = self._recv_channels.get(cache_key)
+        if cached is not None:
+            return cached
+        pub_b64 = self._user_pub(sender_mid, int(sender_key_id))
+        ch = int(self._bridge.e2ee_create_channel_with_pubkey(my_handle, pub_b64))
+        self._recv_channels[cache_key] = ch
+        return ch
 
     def _channel_for_own(self, peer_mid: str, sender_key_id: int, receiver_key_id: int) -> int:
         """Channel for our **own** sealed 1:1 messages read back from history.
@@ -264,9 +300,18 @@ class E2EEManager:
             my_handle = self.my_keys.get(self.latest_key_id or 0)
         if my_handle is None:
             raise RuntimeError("no local E2EE key to decrypt with")
-        return self._bridge.e2ee_create_channel_with_pubkey(
-            my_handle, self._user_pub(peer_mid, receiver_key_id or 0)
+        rkid = int(receiver_key_id or 0)
+        cache_key = (int(my_handle), peer_mid, rkid)
+        cached = self._recv_channels.get(cache_key)
+        if cached is not None:
+            return cached
+        ch = int(
+            self._bridge.e2ee_create_channel_with_pubkey(
+                my_handle, self._user_pub(peer_mid, rkid)
+            )
         )
+        self._recv_channels[cache_key] = ch
+        return ch
 
     # -- encrypt / decrypt (routers) -----------------------------------------
     @staticmethod
@@ -483,10 +528,17 @@ class E2EEManager:
     # -- group ---------------------------------------------------------------
     def _user_pub(self, mid: str, key_id: int) -> str:
         """The Curve25519 public key (base64) of ``mid`` for ``key_id``."""
-        pk = self.api.get_e2ee_public_key(mid, 1, int(key_id))
+        kid = int(key_id)
+        cached = self._peer_pubkeys.get((mid, kid))
+        if cached:
+            return cached
+        pk = self.api.get_e2ee_public_key(mid, 1, kid)
         data = pk.get("keyData") if isinstance(pk, dict) else None
         if not data:
-            raise RuntimeError(f"no E2EE public key for {mid} keyId={key_id}")
+            raise RuntimeError(f"no E2EE public key for {mid} keyId={kid}")
+        self._peer_pubkeys[(mid, kid)] = data
+        if isinstance(pk, dict) and pk.get("keyId") is not None:
+            self._peer_pubkeys[(mid, int(pk["keyId"]))] = data
         return data
 
     def _group_key_handle(
