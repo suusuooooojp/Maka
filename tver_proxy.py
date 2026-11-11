@@ -51,19 +51,6 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy") or TVER_UPSTREAM_PROXY):
-            ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
-            if ipresolve is not None:
-                curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
-        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
-        if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 3500)
-        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
-        if happy_eyeballs_ms is not None:
-            curl.setopt(happy_eyeballs_ms, 300)
-        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
-        if dns_cache_timeout is not None:
-            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -330,7 +317,7 @@ def _patch_controller_sw(source: bytes) -> bytes:
         'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
         'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
     )
-    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},350)", 1)
     return text.encode("utf-8")
 
 
@@ -669,6 +656,20 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _uad=navigator.userAgentData,_brands=_uad.brands||[];'
         'try{Object.defineProperty(_np,"userAgentData",{get:()=>({brands:_brands,mobile:false,platform:_tvChPlat,getHighEntropyValues:async()=>({brands:_brands,mobile:false,platform:_tvChPlat,platformVersion:"15.0.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"131.0.0.0"}),toJSON:()=>({brands:_brands,mobile:false,platform:_tvChPlat})}),enumerable:true,configurable:true})}catch(_){}'
         '}}}'
+        'if(typeof document!=="undefined"){'
+        'const _oGei=typeof Document!=="undefined"&&Document.prototype?Document.prototype.getElementById:null;'
+        'const _ensureTvAd=()=>{try{const existing=_oGei?_oGei.call(document,"chee4au4yieYohs9"):null;if(!existing){const d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement)?.appendChild(d);}}catch(_){}};'
+        '_ensureTvAd();'
+        'document.addEventListener("DOMContentLoaded",_ensureTvAd,{once:true});'
+        'document.addEventListener("readystatechange",_ensureTvAd);'
+        'if(_oGei&&typeof Document!=="undefined"&&Document.prototype){try{Document.prototype.getElementById=function(id){if(id==="chee4au4yieYohs9")_ensureTvAd();return _oGei.call(this,id);};}catch(_){}}'
+        'if(typeof Node!=="undefined"&&Node.prototype){'
+        'const _isDs=(n)=>{try{if(!n||n.nodeType!==1||String(n.tagName||"").toUpperCase()!=="SCRIPT")return false;const s=String(n.getAttribute?.("src")||n.src||"");return /doubleserve\\.js/i.test(s);}catch(_){return false;}};'
+        'const _shimDs=(n)=>{try{_ensureTvAd();n.removeAttribute("src");setTimeout(()=>{try{_ensureTvAd();n.dispatchEvent(new Event("load"));}catch(_){}},0);}catch(_){}};'
+        'const _oAp=Node.prototype.appendChild,_oIb=Node.prototype.insertBefore;'
+        'if(_oAp){Node.prototype.appendChild=function(c){if(_isDs(c)){_shimDs(c);}return _oAp.call(this,c);};}'
+        'if(_oIb){Node.prototype.insertBefore=function(c,r){if(_isDs(c)){_shimDs(c);}return _oIb.call(this,c,r);};}'
+        '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
         'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)&&!/Chrome\\\\//i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
@@ -1367,7 +1368,6 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=1,
                     limits=limits,
                 )
@@ -1403,7 +1403,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )

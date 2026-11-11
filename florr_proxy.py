@@ -583,7 +583,7 @@ _florr_limits = httpx.Limits(
 _florr_timeout = httpx.Timeout(connect=6.0, read=60.0, write=30.0, pool=10.0)
 if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
     HTTP_CLIENT = httpx.AsyncClient(
-        transport=httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_florr_limits),
+        transport=httpx.AsyncHTTPTransport(retries=1, limits=_florr_limits),
         follow_redirects=False,
         verify=True,
         timeout=_florr_timeout,

@@ -209,7 +209,7 @@ def _get_is_http_client() -> httpx.AsyncClient:
             or os.environ.get("http_proxy")
             or os.environ.get("all_proxy")
         )
-        transport = None if has_proxy else httpx.AsyncHTTPTransport(local_address="0.0.0.0", verify=False, retries=2)
+        transport = None if has_proxy else httpx.AsyncHTTPTransport(verify=False, retries=2)
         _INTERSTELLAR_HTTP_CLIENT = httpx.AsyncClient(
             transport=transport,
             follow_redirects=True,

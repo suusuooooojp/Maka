@@ -117,7 +117,7 @@ def _get_http_client() -> httpx.AsyncClient:
             transport=(
                 None
                 if _HAS_PROXY_ENV
-                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
+                else httpx.AsyncHTTPTransport(retries=1, limits=_limits)
             ),
             follow_redirects=True,
             timeout=httpx.Timeout(25.0, connect=6.0),

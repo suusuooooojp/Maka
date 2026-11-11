@@ -74,19 +74,6 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
-            ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
-            if ipresolve is not None:
-                curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
-        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
-        if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 15000)
-        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
-        if happy_eyeballs_ms is not None:
-            curl.setopt(happy_eyeballs_ms, 300)
-        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
-        if dns_cache_timeout is not None:
-            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -1164,7 +1151,6 @@ async def _get_media_http_client() -> httpx.AsyncClient:
             timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
-                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
