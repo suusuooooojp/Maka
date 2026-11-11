@@ -118,7 +118,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261111-tver7"
+RUNTIME_REV = "20261111-tver8"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -1398,14 +1398,17 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
                 path.startswith("/_next/static/")
                 or path.startswith("/streaksplayer/")
                 or path == "/config/streaks_info_v2.json"
+                or path == "/setting.js"
                 or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf", ".svg", ".png", ".jpg", ".webp", ".ico"))
             )
-            and path != "/setting.js"
         ):
             return True
     except Exception:
         pass
     return False
+
+
+_PACKED_RELAY_FRAMES: dict[str, tuple[float, bytes, bytes | None]] = {}
 
 
 def _pack_relay_response(
@@ -1414,7 +1417,28 @@ def _pack_relay_response(
     headers_list: list[list[str]],
     body: bytes,
     request: Request | None = None,
+    cache_key: str = "",
 ) -> Response:
+    resp_headers = {
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    wants_gzip = (
+        request is not None
+        and "gzip" in (request.headers.get("accept-encoding") or "").lower()
+    )
+    if cache_key:
+        now = time.time()
+        ttl = 300.0 if cache_key.endswith("/setting.js") else _STATIC_ASSET_TTL
+        packed = _PACKED_RELAY_FRAMES.get(cache_key)
+        if packed and (now - packed[0]) < ttl:
+            _, raw_frame, gz_frame = packed
+            if wants_gzip and gz_frame is not None:
+                resp_headers["Content-Encoding"] = "gzip"
+                return Response(gz_frame, media_type="application/octet-stream", headers=resp_headers)
+            return Response(raw_frame, media_type="application/octet-stream", headers=resp_headers)
+
     meta_bytes = json.dumps(
         {
             "status": status,
@@ -1423,21 +1447,19 @@ def _pack_relay_response(
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    payload = struct.pack(">I", len(meta_bytes)) + meta_bytes + body
-    resp_headers = {
-        "Cache-Control": "private, no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-        "Vary": "Accept-Encoding",
-    }
-    if (
-        request is not None
-        and len(payload) >= 1024
-        and "gzip" in (request.headers.get("accept-encoding") or "").lower()
-    ):
-        payload = gzip.compress(payload, compresslevel=5)
+    raw_frame = struct.pack(">I", len(meta_bytes)) + meta_bytes + body
+    gz_frame: bytes | None = None
+    if len(raw_frame) >= 1024 and (wants_gzip or cache_key):
+        gz_frame = gzip.compress(raw_frame, compresslevel=5)
+    if cache_key and len(raw_frame) <= _STATIC_ASSET_MAX_BYTES + 8192:
+        if len(_PACKED_RELAY_FRAMES) >= _STATIC_ASSET_MAX_ITEMS:
+            _PACKED_RELAY_FRAMES.pop(next(iter(_PACKED_RELAY_FRAMES)), None)
+        _PACKED_RELAY_FRAMES[cache_key] = (time.time(), raw_frame, gz_frame)
+    if wants_gzip and gz_frame is not None:
         resp_headers["Content-Encoding"] = "gzip"
+        return Response(gz_frame, media_type="application/octet-stream", headers=resp_headers)
     return Response(
-        payload,
+        raw_frame,
         media_type="application/octet-stream",
         headers=resp_headers,
     )
@@ -1730,6 +1752,7 @@ async def _serve_virtual_wasm_js() -> Response:
 
 
 _EMPTY_VAST_BYTES = b'<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>'
+_TAG_STUB_BYTES = b"window.dataLayer=window.dataLayer||[];window.googletag=window.googletag||{cmd:[]};"
 _SHORT_CIRCUIT_HOSTS = frozenset(
     {
         "m-tag.tver.jp",
@@ -1742,6 +1765,7 @@ _SHORT_CIRCUIT_HOSTS = frozenset(
         "b99.yahoo.co.jp",
         "yjtag.yahoo.co.jp",
         "yads.c.yimg.jp",
+        "s.yimg.jp",
         "dmp.im-apps.net",
         "connect.facebook.net",
         "gum.criteo.com",
@@ -1754,6 +1778,8 @@ _SHORT_CIRCUIT_HOSTS = frozenset(
         "region1.google-analytics.com",
         "analytics.google.com",
         "stats.g.doubleclick.net",
+        "js-sec.indexww.com",
+        "c.amazon-adsystem.com",
     }
 )
 
@@ -1766,19 +1792,196 @@ def _check_server_short_circuit(host: str, raw_path: str) -> tuple[int, str, byt
         and ("/gampad/ads" in pl or "/pagead/ads" in pl)
     ):
         return (200, "application/xml; charset=utf-8", _EMPTY_VAST_BYTES)
-    if host in ("imasdk.googleapis.com", "pagead2.googlesyndication.com") and (
-        "omweb-v1.js" in pl or "omsdk-v1.js" in pl
+    if host in ("www.googletagmanager.com", "googletagmanager.com") or (
+        host in ("imasdk.googleapis.com", "pagead2.googlesyndication.com", "securepubads.g.doubleclick.net")
+        and (
+            "omweb-v1.js" in pl
+            or "omsdk-v1.js" in pl
+            or "/tag/js/gpt.js" in pl
+            or "/gpt/pubads_impl" in pl
+        )
     ):
-        return (200, "application/javascript; charset=utf-8", b"")
+        return (200, "application/javascript; charset=utf-8", _TAG_STUB_BYTES)
     if (
         host in _SHORT_CIRCUIT_HOSTS
-        or host.endswith(".ads-twitter.com")
+        or host.endswith((".ads-twitter.com", ".karte.io", ".braze.com", ".amazon-adsystem.com"))
         or (host == "www.facebook.com" and pl.startswith("/tr"))
     ):
-        if pl.endswith(".js"):
+        if pl.endswith(".js") or "/js" in pl:
             return (200, "application/javascript; charset=utf-8", b"")
         return (200, "application/json", b"{}")
     return None
+
+
+_GUEST_HTML_CACHE: dict[str, tuple[float, int, str, list[list[str]], bytes]] = {}
+_GUEST_HTML_TTL = 45.0
+_GUEST_HTML_MAX_ITEMS = 32
+_PREWARM_INFLIGHT: set[str] = set()
+_PREFETCH_ASSET_SEMAPHORE: asyncio.Semaphore | None = None
+_HTML_STATIC_REF_RE = re.compile(
+    rb"""(?:href|src)=["'](https://(?:tver\.jp|s\.tver\.jp|statics\.tver\.jp|player\.tver\.jp)/[^"'\s<>]+|/_next/static/[^"'\s<>]+)["']""",
+    re.I,
+)
+
+
+async def _prefetch_single_static_asset(asset_url: str) -> None:
+    global _PREFETCH_ASSET_SEMAPHORE
+    if not _is_cacheable_static_asset("GET", asset_url):
+        return
+    now = time.time()
+    cached = _STATIC_ASSET_CACHE.get(asset_url)
+    if cached and (now - cached[0]) < _STATIC_ASSET_TTL:
+        return
+    if _PREFETCH_ASSET_SEMAPHORE is None:
+        _PREFETCH_ASSET_SEMAPHORE = asyncio.Semaphore(12)
+    async with _PREFETCH_ASSET_SEMAPHORE:
+        cached = _STATIC_ASSET_CACHE.get(asset_url)
+        if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+            return
+        try:
+            client = await _get_relay_http_client()
+            resp = await client.get(
+                asset_url,
+                headers={
+                    "User-Agent": _DESKTOP_CHROME_UA,
+                    "Accept": "*/*",
+                    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                    "Referer": "https://tver.jp/",
+                    "Origin": "https://tver.jp",
+                },
+            )
+            if resp.status_code != 200:
+                return
+            body = bytes(resp.content or b"")
+            if not (0 < len(body) <= _STATIC_ASSET_MAX_BYTES):
+                return
+            has_sc = False
+            out_hdrs: list[list[str]] = []
+            for k, v in resp.headers.multi_items():
+                kl = k.lower()
+                if kl in _RELAY_STRIP_RESP_HEADERS or kl.startswith(":"):
+                    continue
+                if kl == "set-cookie":
+                    has_sc = True
+                    break
+                out_hdrs.append([k, v])
+            if has_sc:
+                return
+            if len(_STATIC_ASSET_CACHE) >= _STATIC_ASSET_MAX_ITEMS:
+                _STATIC_ASSET_CACHE.pop(next(iter(_STATIC_ASSET_CACHE)), None)
+            _STATIC_ASSET_CACHE[asset_url] = (
+                time.time(),
+                200,
+                str(resp.reason_phrase or "OK"),
+                out_hdrs,
+                body,
+            )
+        except Exception:
+            pass
+
+
+async def _prefetch_static_from_html(html_bytes: bytes, page_url: str) -> None:
+    if not html_bytes:
+        return
+    urls: list[str] = []
+    seen: set[str] = set()
+    for m in _HTML_STATIC_REF_RE.finditer(html_bytes):
+        try:
+            ref = m.group(1).decode("utf-8", "ignore")
+            abs_u = urljoin(page_url, ref)
+            if abs_u not in seen and _is_cacheable_static_asset("GET", abs_u):
+                seen.add(abs_u)
+                urls.append(abs_u)
+        except Exception:
+            continue
+    extra_cfg = "https://player.tver.jp/config/streaks_info_v2.json"
+    if extra_cfg not in seen:
+        urls.append(extra_cfg)
+    if urls:
+        await asyncio.gather(*(_prefetch_single_static_asset(u) for u in urls[:28]), return_exceptions=True)
+
+
+async def _prewarm_tver_target(target_url: str) -> None:
+    clean_url = _strip_dollar_query(target_url or TVER_HOME)
+    if clean_url in _PREWARM_INFLIGHT:
+        return
+    _PREWARM_INFLIGHT.add(clean_url)
+    try:
+        await asyncio.gather(
+            _ensure_patched_runtime("scramjet.js", _patch_scramjet_js),
+            _ensure_patched_runtime("controller.api.js", _patch_controller_api),
+            _ensure_patched_runtime("controller.sw.js", _patch_controller_sw),
+            _ensure_patched_runtime("controller.inject.js", _patch_controller_inject),
+            _serve_virtual_wasm_js(),
+            return_exceptions=True,
+        )
+        parsed = urlparse(clean_url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if host not in ("tver.jp", "www.tver.jp"):
+            return
+        cached_html = _GUEST_HTML_CACHE.get(clean_url)
+        if cached_html and (time.time() - cached_html[0]) < _GUEST_HTML_TTL:
+            await _prefetch_static_from_html(cached_html[4], clean_url)
+            return
+        client = await _get_relay_http_client()
+        resp = await client.get(
+            clean_url,
+            headers={
+                "User-Agent": _DESKTOP_CHROME_UA,
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Referer": "https://tver.jp/",
+            },
+        )
+        if resp.status_code != 200:
+            return
+        body = bytes(resp.content or b"")
+        if not body:
+            return
+        if b"modulepreload" in body:
+            body = re.sub(
+                rb'<link\b[^>]*\brel=["\']?modulepreload["\']?[^>]*>',
+                b"",
+                body,
+                flags=re.I,
+            )
+        has_sc = False
+        is_html = False
+        out_hdrs: list[list[str]] = []
+        for k, v in resp.headers.multi_items():
+            kl = k.lower()
+            if kl in _RELAY_STRIP_RESP_HEADERS or kl.startswith(":"):
+                continue
+            if kl == "set-cookie":
+                has_sc = True
+                break
+            if kl == "content-type" and "text/html" in v.lower():
+                is_html = True
+            out_hdrs.append([k, v])
+        if is_html and not has_sc and len(body) <= 512 * 1024:
+            if len(_GUEST_HTML_CACHE) >= _GUEST_HTML_MAX_ITEMS:
+                _GUEST_HTML_CACHE.pop(next(iter(_GUEST_HTML_CACHE)), None)
+            _GUEST_HTML_CACHE[clean_url] = (
+                time.time(),
+                200,
+                str(resp.reason_phrase or "OK"),
+                out_hdrs,
+                body,
+            )
+        if is_html:
+            await _prefetch_static_from_html(body, clean_url)
+    except Exception:
+        pass
+    finally:
+        _PREWARM_INFLIGHT.discard(clean_url)
+
+
+def _schedule_tver_prewarm(target_url: str = TVER_HOME) -> None:
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_prewarm_tver_target(target_url))
+    except Exception:
+        pass
 
 
 @router.api_route(
@@ -2096,14 +2299,34 @@ async def tver_http_relay(request: Request):
                     ["cross-origin-resource-policy", "cross-origin"],
                 ],
                 b"" if method == "HEAD" else c_body,
+                request=request,
             )
 
     cacheable = (not has_range) and _is_cacheable_static_asset(method, url)
     if cacheable:
         cached = _STATIC_ASSET_CACHE.get(url)
-        if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+        static_ttl = 300.0 if path_lower == "/setting.js" else _STATIC_ASSET_TTL
+        if cached and (time.time() - cached[0]) < static_ttl:
             _, c_status, c_text, c_headers, c_body = cached
-            return _pack_relay_response(c_status, c_text, c_headers, c_body, request=request)
+            return _pack_relay_response(c_status, c_text, c_headers, c_body, request=request, cache_key=url)
+
+    if (
+        not cacheable
+        and not cookie_str
+        and not has_range
+        and method in ("GET", "HEAD")
+        and host in ("tver.jp", "www.tver.jp")
+    ):
+        cached_guest = _GUEST_HTML_CACHE.get(url)
+        if cached_guest and (time.time() - cached_guest[0]) < _GUEST_HTML_TTL:
+            _, g_status, g_text, g_headers, g_body = cached_guest
+            return _pack_relay_response(
+                g_status,
+                g_text,
+                g_headers,
+                b"" if method == "HEAD" else g_body,
+                request=request,
+            )
 
     impersonate_profile = _select_curl_impersonate(client_ua)
     if impersonate_profile.startswith("safari"):
@@ -2290,6 +2513,29 @@ async def tver_http_relay(request: Request):
             resp_body,
         )
 
+    if is_html and status == 200 and resp_body:
+        if (
+            not cookie_str
+            and not has_range
+            and not has_set_cookie
+            and method == "GET"
+            and host in ("tver.jp", "www.tver.jp")
+            and len(resp_body) <= 512 * 1024
+        ):
+            if len(_GUEST_HTML_CACHE) >= _GUEST_HTML_MAX_ITEMS:
+                _GUEST_HTML_CACHE.pop(next(iter(_GUEST_HTML_CACHE)), None)
+            _GUEST_HTML_CACHE[url] = (
+                time.time(),
+                status,
+                status_text,
+                out_headers,
+                resp_body,
+            )
+        try:
+            asyncio.get_running_loop().create_task(_prefetch_static_from_html(resp_body, url))
+        except Exception:
+            pass
+
     return _pack_relay_response(status, status_text, out_headers, resp_body, request=request)
 
 
@@ -2373,6 +2619,9 @@ def _shell_html(initial_target: str) -> str:
 <link rel="preload" href="/tver/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/tver/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
 <link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
+<script>
+if("serviceWorker"in navigator){{window.__shSwRegP=navigator.serviceWorker.register("/tver/sw.js?v={RUNTIME_REV}",{{scope:"/tver/",updateViaCache:"none",type:"classic"}}).catch(function(){{return null;}});}}
+</script>
 <style>
 *{{box-sizing:border-box}}
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Noto Sans JP","Segoe UI",Roboto,sans-serif}}
@@ -2643,11 +2892,12 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         }};
       }}
       if (
-        (h === "imasdk.googleapis.com" || h === "pagead2.googlesyndication.com") &&
-        (p.includes("omweb-v1.js") || p.includes("omsdk-v1.js"))
+        h === "www.googletagmanager.com" || h === "googletagmanager.com" ||
+        ((h === "imasdk.googleapis.com" || h === "pagead2.googlesyndication.com" || h === "securepubads.g.doubleclick.net") &&
+          (p.includes("omweb-v1.js") || p.includes("omsdk-v1.js") || p.includes("/tag/js/gpt.js") || p.includes("/gpt/pubads_impl")))
       ) {{
         return {{
-          body: new ArrayBuffer(0),
+          body: new TextEncoder().encode("window.dataLayer=window.dataLayer||[];window.googletag=window.googletag||{{cmd:[]}};").buffer,
           headers: [
             ["content-type", "application/javascript; charset=utf-8"],
             ["access-control-allow-origin", "*"],
@@ -2660,15 +2910,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         h === "m-tag.tver.jp" || h === "s-tag.tver.jp" || h === "ce-api.tver.jp" || h === "log.tver.jp" ||
         h === "analytics.tiktok.com" || h === "analytics.twitter.com" ||
         h === "ads-twitter.com" || h.endsWith(".ads-twitter.com") ||
-        h === "b99.yahoo.co.jp" || h === "yjtag.yahoo.co.jp" || h === "yads.c.yimg.jp" ||
+        h === "b99.yahoo.co.jp" || h === "yjtag.yahoo.co.jp" || h === "yads.c.yimg.jp" || h === "s.yimg.jp" ||
         h === "dmp.im-apps.net" || h === "connect.facebook.net" ||
         (h === "www.facebook.com" && p.startsWith("/tr")) ||
         h === "gum.criteo.com" || h === "static.criteo.net" || h === "bidder.criteo.com" ||
         h === "cnt.fout.jp" || h === "sync.fout.jp" || h === "js.fout.jp" ||
         h === "www.google-analytics.com" || h === "region1.google-analytics.com" ||
-        h === "analytics.google.com" || h === "stats.g.doubleclick.net"
+        h === "analytics.google.com" || h === "stats.g.doubleclick.net" ||
+        h.endsWith(".karte.io") || h.endsWith(".braze.com") ||
+        h === "js-sec.indexww.com" || h === "c.amazon-adsystem.com" || h.endsWith(".amazon-adsystem.com")
       ) {{
-        const isJs = /\\.js(\\?|$)/i.test(p);
+        const isJs = /\\.js(\\?|$)/i.test(p) || p.includes("/js");
         const b = new TextEncoder().encode(isJs ? "" : "{{}}").buffer;
         return {{
           body: b,
@@ -2930,23 +3182,23 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
             }}
             if (setCookieEntries.length > 0) {{
               controller.applyCookieSyncEntries?.(setCookieEntries);
-              await controller.persistCookies?.();
-              await controller.propagateCookieSync?.(setCookieEntries, {{}});
+              Promise.resolve(controller.persistCookies?.()).catch(() => {{}});
+              Promise.resolve(controller.propagateCookieSync?.(setCookieEntries, {{}})).catch(() => {{}});
             }}
           }} catch (_) {{}}
         }}
         const statusNum = Number(meta.status || 200);
         if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
-          try {{
+          const cachedClone = respBody.slice(0);
+          caches.open(STATIC_CACHE_NAME).then((cache) => {{
             const hObj = new Headers();
             for (const [k, v] of respHeaders) {{
               if (k && k.toLowerCase() !== "set-cookie") {{
                 try {{ hObj.append(k, v); }} catch (_) {{}}
               }}
             }}
-            const cache = await caches.open(STATIC_CACHE_NAME);
-            await cache.put(urlStr, new Response(respBody.slice(0), {{ status: 200, headers: hObj }}));
-          }} catch (_) {{}}
+            return cache.put(urlStr, new Response(cachedClone, {{ status: 200, headers: hObj }}));
+          }}).catch(() => {{}});
         }}
         return {{
           body: respBody,
@@ -3045,9 +3297,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         try {{
           const img = imgs[i];
           const actualSrc = rawGetAttr.call(img, "src") || "";
-          if (rawGetAttr.call(img, "loading") === "lazy") {{
-            rawSetAttr.call(img, "loading", "eager");
-          }}
           if (actualSrc.includes("/tver/~/sj/") && actualSrc.includes("/data:")) {{
             const dIdx = actualSrc.indexOf("/data:");
             if (dIdx >= 0) {{
@@ -3260,7 +3509,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
           ensurePageMedia();
         }}
       }}
-    }}, 250);
+    }}, 120);
   }}
 
   function bindFrame() {{
@@ -3288,22 +3537,20 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     try {{
       const revKey = "sh:tver:rev";
       if (localStorage.getItem(revKey) !== "{RUNTIME_REV}" && typeof caches !== "undefined") {{
-        const cKeys = await caches.keys();
-        await Promise.all(cKeys.filter((k) => k.startsWith("sh-tver-")).map((k) => caches.delete(k).catch(() => {{}})));
         localStorage.setItem(revKey, "{RUNTIME_REV}");
+        caches.keys().then((cKeys) => Promise.all(
+          cKeys.filter((k) => k.startsWith("sh-tver-") && k !== STATIC_CACHE_NAME && k !== MEDIA_CACHE_NAME).map((k) => caches.delete(k).catch(() => {{}}))
+        )).catch(() => {{}});
       }}
     }} catch (_) {{}}
 
+    const initialRegP = window.__shSwRegP || navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }});
     if (isOurSw(navigator.serviceWorker.controller)) {{
       try {{ sessionStorage.removeItem(SW_GUARD); }} catch (_) {{}}
-      setTimeout(() => {{
-        navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }})
-          .then((r) => {{ registration = r; }})
-          .catch(() => {{}});
-      }}, 0);
+      Promise.resolve(initialRegP).then((r) => {{ if (r) registration = r; }}).catch(() => {{}});
     }} else {{
       registration = await withTimeout(
-        navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }}),
+        Promise.resolve(initialRegP).then((r) => r || navigator.serviceWorker.getRegistration(SW_SCOPE)),
         4500,
         "SW register"
       ).catch(async () => await navigator.serviceWorker.getRegistration(SW_SCOPE));
@@ -3360,6 +3607,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 </html>"""
 
 
+@router.on_event("startup")
+async def _prewarm_tver_on_startup() -> None:
+    _schedule_tver_prewarm(TVER_HOME)
+
+
 @router.get("/tver", include_in_schema=False)
 async def tver_redirect():
     return RedirectResponse("/tver/", status_code=307)
@@ -3368,6 +3620,7 @@ async def tver_redirect():
 @router.get("/tver/", response_class=HTMLResponse, include_in_schema=False)
 async def tver_home(q: str = "", url: str = ""):
     target = _target_from_input(url or q)
+    _schedule_tver_prewarm(target)
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
@@ -3397,6 +3650,7 @@ async def tver_deep_link(subpath: str, request: Request):
         return Response(b"not found", status_code=404)
     q = f"?{request.url.query}" if request.url.query else ""
     target = f"https://tver.jp/{clean}{q}"
+    _schedule_tver_prewarm(target)
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"

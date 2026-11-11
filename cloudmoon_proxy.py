@@ -364,6 +364,21 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       destroyUnits: function() { return Promise.resolve(); },
       settings: {}
     };
+    window.pbjs = window.pbjs || {
+      libLoaded: true,
+      que: { push: function(fn) { try { if (typeof fn === 'function') fn(); } catch (_) {} } },
+      onEvent: function() {},
+      setConfig: function() {},
+      addAdUnits: function() {},
+      removeAdUnit: function() {},
+      getBidResponsesForAdUnitCode: function() { return { bids: [] }; },
+      getHighestCpmBids: function() { return []; },
+      setTargetingForGPTAsync: function() {},
+      requestBids: function(opts) {
+        try { if (opts && typeof opts.bidsBackHandler === 'function') opts.bidsBackHandler(); } catch (_) {}
+        return Promise.resolve();
+      }
+    };
   } catch (_) {}
 
   // 1. Safe localStorage guard & forced ad-free / same-window settings
@@ -763,15 +778,38 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
 
   try {
     if (typeof RTCPeerConnection !== 'undefined') {
-      const origCreateDc = RTCPeerConnection.prototype.createDataChannel;
-      RTCPeerConnection.prototype.createDataChannel = function(label, options) {
-        const pc = this;
-        const dc = origCreateDc.apply(this, arguments);
-        try {
-          window.__cm_pc = pc;
+      const bindCmDataChannel = function(dc) {
+        if (!dc || dc.__cm_bound) return;
+        dc.__cm_bound = true;
+        window.__cm_dc = dc;
+        dc.addEventListener('open', function() {
           window.__cm_dc = dc;
-          window.__cm_dc_opened_at = 0;
-          pc.addEventListener('connectionstatechange', function() {
+          window.__cm_dc_opened_at = Date.now();
+          window.__cm_reconnecting = false;
+          try {
+            const b = document.getElementById('__cm_reconnect_badge');
+            if (b && b.parentNode) b.parentNode.removeChild(b);
+          } catch (_) {}
+          try { dc.send('adBlock>false'); } catch (_) {}
+        });
+        dc.addEventListener('close', function() {
+          if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
+            setTimeout(function() {
+              if ((!window.__cm_dc || window.__cm_dc.readyState !== 'open') && (!window.__cm_pc || window.__cm_pc.connectionState === 'failed' || window.__cm_pc.connectionState === 'closed')) {
+                window.__cmAutoReconnect('datachannel_closed');
+              }
+            }, 3500);
+          }
+        });
+      };
+      const bindCmPeer = function(pc) {
+        if (!pc || pc.__cm_peer_bound) return;
+        pc.__cm_peer_bound = true;
+        window.__cm_pc = pc;
+        pc.addEventListener('datachannel', function(ev) {
+          if (ev && ev.channel) bindCmDataChannel(ev.channel);
+        });
+        pc.addEventListener('connectionstatechange', function() {
             if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
               if (pc.connectionState === 'failed') {
                 try { if (typeof pc.restartIce === 'function') pc.restartIce(); } catch (_) {}
@@ -791,28 +829,25 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
               }
             }
           });
-          dc.addEventListener('open', function() {
-            window.__cm_dc = dc;
-            window.__cm_dc_opened_at = Date.now();
-            window.__cm_reconnecting = false;
-            try {
-              const b = document.getElementById('__cm_reconnect_badge');
-              if (b && b.parentNode) b.parentNode.removeChild(b);
-            } catch (_) {}
-            try { dc.send('adBlock>false'); } catch (_) {}
-          });
-          dc.addEventListener('close', function() {
-            if (!window.__cm_intentional_exit && window.__cm_dc_opened_at > 0) {
-              setTimeout(function() {
-                if ((!window.__cm_dc || window.__cm_dc.readyState !== 'open') && (!window.__cm_pc || window.__cm_pc.connectionState === 'failed' || window.__cm_pc.connectionState === 'closed')) {
-                  window.__cmAutoReconnect('datachannel_closed');
-                }
-              }, 3500);
-            }
-          });
+      };
+      const origCreateDc = RTCPeerConnection.prototype.createDataChannel;
+      RTCPeerConnection.prototype.createDataChannel = function(label, options) {
+        const pc = this;
+        const dc = origCreateDc.apply(this, arguments);
+        try {
+          window.__cm_dc_opened_at = 0;
+          bindCmPeer(pc);
+          bindCmDataChannel(dc);
         } catch (_) {}
         return dc;
       };
+      const origSetRemote = RTCPeerConnection.prototype.setRemoteDescription;
+      if (origSetRemote) {
+        RTCPeerConnection.prototype.setRemoteDescription = function() {
+          try { bindCmPeer(this); } catch (_) {}
+          return origSetRemote.apply(this, arguments);
+        };
+      }
     }
   } catch (_) {}
 
@@ -1036,25 +1071,50 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       "無料ゲーム時間を使い切りました",
       "今日の無料ゲーム時間"
     ];
-    const dismissNoTimeDialog = function() {
+    let lazyImgCounter = 0;
+    const isLobbyPage = !(window.location.pathname || '').startsWith('/run-site');
+    const checkDialogElement = function(el) {
+      if (!el || el.nodeType !== 1) return;
+      const txt = el.textContent || '';
+      if (!txt) return;
+      for (let j = 0; j < NO_TIME_PATTERNS.length; j++) {
+        if (txt.includes(NO_TIME_PATTERNS[j])) {
+          el.style.display = 'none';
+          el.remove();
+          return;
+        }
+      }
+    };
+    const handleMutations = function(mutations) {
       try {
-        const dialogs = document.querySelectorAll('.dialog-backdrop, [role="dialog"], .modal-backdrop, .alert-modal');
-        for (let i = 0; i < dialogs.length; i++) {
-          const el = dialogs[i];
-          const txt = (el.innerText || el.textContent || '');
-          for (let j = 0; j < NO_TIME_PATTERNS.length; j++) {
-            if (txt.includes(NO_TIME_PATTERNS[j])) {
-              console.warn('[CloudMoon Unlimited] Suppressed free-time limit dialog');
-              el.style.display = 'none';
-              el.remove();
-              break;
+        for (let m = 0; m < mutations.length; m++) {
+          const added = mutations[m].addedNodes;
+          if (!added || !added.length) continue;
+          for (let i = 0; i < added.length; i++) {
+            const node = added[i];
+            if (!node || node.nodeType !== 1) continue;
+            if (node.matches && node.matches('.dialog-backdrop, [role="dialog"], .modal-backdrop, .alert-modal')) {
+              checkDialogElement(node);
+            } else if (node.querySelectorAll) {
+              const dialogs = node.querySelectorAll('.dialog-backdrop, [role="dialog"], .modal-backdrop, .alert-modal');
+              for (let d = 0; d < dialogs.length; d++) checkDialogElement(dialogs[d]);
+            }
+            if (isLobbyPage) {
+              const imgs = (node.tagName === 'IMG') ? [node] : (node.querySelectorAll ? node.querySelectorAll('img') : []);
+              for (let k = 0; k < imgs.length; k++) {
+                const img = imgs[k];
+                img.decoding = 'async';
+                if (++lazyImgCounter > 16 && !img.getAttribute('loading')) {
+                  img.setAttribute('loading', 'lazy');
+                }
+              }
             }
           }
         }
       } catch (_) {}
     };
     if (typeof MutationObserver !== 'undefined') {
-      const mo = new MutationObserver(dismissNoTimeDialog);
+      const mo = new MutationObserver(handleMutations);
       if (document.documentElement) {
         mo.observe(document.documentElement, { childList: true, subtree: true });
       } else {
@@ -1072,13 +1132,19 @@ _CM_ENGINE_JS = r"""// CloudMoon Ad-Free, Anti-Crash & Unlimited Playtime Engine
       let urlStr = String(url || '');
       if (urlStr.includes('html-load.cc') || urlStr.includes('ad-shield')) {
         console.warn('[CloudMoon AdBlock] Blocked Ad-Shield WebSocket:', urlStr);
-        const dummy = Object.create(OrigWebSocket.prototype);
-        dummy.readyState = 3;
-        dummy.close = function() {};
-        dummy.send = function() {};
-        dummy.addEventListener = function() {};
-        dummy.removeEventListener = function() {};
-        return dummy;
+        return {
+          url: urlStr,
+          readyState: 3,
+          bufferedAmount: 0,
+          extensions: '',
+          protocol: '',
+          binaryType: 'blob',
+          close: function() {},
+          send: function() {},
+          addEventListener: function() {},
+          removeEventListener: function() {},
+          dispatchEvent: function() { return false; }
+        };
       }
       // Rewrite wss://host/client/socket.io?__sh_ws_host=<target>&... into /cloudmoon/ws-proxy/<target>/client/socket.io
       if (urlStr.includes('__sh_ws_host=')) {
@@ -1500,7 +1566,7 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         "function xe(){return Promise.resolve(!1);return new Promise",
     )
     # 2. Force ad_unblock: true in Pe() (/phone/connect request payload in DU-wofq6.js) while keeping screen_res:"720x1280"
-    js_text = js_text.replace("ad_unblock:!a", "ad_unblock:!0")
+    js_text = re.sub(r"\bad_unblock:![A-Za-z_$][\w$]*\b", "ad_unblock:!0", js_text)
     # 3. Ensure default $phoneData store (H) in DU-wofq6.js starts with unlimited time_left_sec & isUnlimitLocale: true
     js_text = js_text.replace(
         "level:null,is_paid:!1,time_left_set:null,use_time_type:0,time_left_sec:0,is_subscription:!1,subscription_channel:null,subscription_product_id:null,backup_time:null,locale:null,isUnlimitLocale:!1,useProxy:!1",
@@ -1512,20 +1578,23 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
         'video_level:[{level:"HD",min_vip_level:0},{level:"SD",min_vip_level:0},{level:"LD",min_vip_level:0},{level:"ULD",min_vip_level:0}]',
     )
     # 3c. Unlock HD selection in navbar quality dropdown (BCl_jh-1.js) & prevent auto-downgrade from HD to SD
-    js_text = js_text.replace("if(s.min_vip_level>v().level)", "if(!1)")
-    js_text = js_text.replace('v().level===1&&e(I)==="HD"', "!1")
-    js_text = js_text.replace(
-        "((pe=e(W))==null?void 0:pe.min_vip_level)&&((ze=e(W))==null?void 0:ze.min_vip_level)>1",
+    js_text = re.sub(r"if\([A-Za-z_$][\w$]*\.min_vip_level>[A-Za-z_$][\w$]*\(\)\.level\)", "if(!1)", js_text)
+    js_text = re.sub(r'[A-Za-z_$][\w$]*\(\)\.level===1&&[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)==="HD"', "!1", js_text)
+    js_text = re.sub(
+        r"\(\([A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\)==null\?void 0:[A-Za-z_$][\w$]*\.min_vip_level\)&&\(\([A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\([A-Za-z_$][\w$]*\)\)==null\?void 0:[A-Za-z_$][\w$]*\.min_vip_level\)>1",
         "!1",
+        js_text,
     )
     # 4. Eliminate "Today's free game time has been used up" (alert.noTimeContent) modal checks in CtKM5s2L.js
-    js_text = js_text.replace(
-        'if((!h().isUnlimitLocale||h().useProxy)&&h().time_left_sec<=0){Ce(f()("alert.notice"),f()("alert.noTimeContent"),f()("alert.noTimeBtn"));return}',
+    js_text = re.sub(
+        r'if\(\(![A-Za-z_$][\w$]*\(\)\.isUnlimitLocale\|\|[A-Za-z_$][\w$]*\(\)\.useProxy\)&&[A-Za-z_$][\w$]*\(\)\.time_left_sec<=0\)\{[^}]*"alert\.noTimeContent"[^}]*;return\}',
         "if(!1){}",
+        js_text,
     )
-    js_text = js_text.replace(
-        'u.err_code===30002?Ce(f()("alert.notice"),f()("alert.blockFree"),f()("alert.buy")):u.err_code===30003?Ce(f()("alert.notice"),f()("alert.noTimeContent"),f()("alert.noTimeBtn")):',
-        "u.err_code===30002?void 0:u.err_code===30003?void 0:",
+    js_text = re.sub(
+        r'([A-Za-z_$][\w$]*)\.err_code===30002\?[A-Za-z_$][\w$]*\([^:]+?\):(\1)\.err_code===30003\?[A-Za-z_$][\w$]*\([^:]+?\):',
+        r"\1.err_code===30002?void 0:\1.err_code===30003?void 0:",
+        js_text,
     )
     # 5. Neutralize Xa()/Ya()/Ja()/$a() ad-block detectors and prevent sending adBlock>true over WebRTC DataChannel in 2.D2AbakOU.js / 2.C7CpNCnt.js
     js_text = js_text.replace(
@@ -1536,10 +1605,15 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
     js_text = js_text.replace("async function Ja(){", "async function Ja(){return!1;")
     js_text = js_text.replace(
         "async function $a(){",
-        "async function $a(){return{status:`clear`,isBlocked:!1};",
+        "async function $a(){return`clear`;",
     )
-    js_text = js_text.replace("Z?.send(`adBlock>true`)", "void 0")
-    js_text = js_text.replace('Z?.send("adBlock>true")', "void 0")
+    js_text = re.sub(
+        r"async function ([A-Za-z_$][\w$]*)\(\)\{(?=let [A-Za-z_$][\w$]*=await [A-Za-z_$][\w$]*\(\);[^}]{0,400}user_block_ad)",
+        r"async function \1(){return;",
+        js_text,
+    )
+    js_text = js_text.replace("`adBlock>true`", "`adBlock>false`")
+    js_text = js_text.replace('"adBlock>true"', '"adBlock>false"')
     js_text = js_text.replace("Z?.send(`adBlock>${e}`)", "Z?.send(`adBlock>false`)")
     js_text = js_text.replace("Z?.send(`adBlock>${n(b).isBlocked}`)", "Z?.send(`adBlock>false`)")
 
@@ -1737,8 +1811,13 @@ def _transform_js(js_text: str, is_runsite: bool = False) -> str:
             'let r=z.lang||"en";',
             'let r=(z.lang==="cloudmoon"?"ja":z.lang)||"ja";',
         )
-        # Disable background 34-request category prefetch flood while browsing/launching games
+        # Disable background 34-category prefetch loop regardless of minified identifier names
         js_text = js_text.replace("async function je(){if(!J){", "async function je(){return;if(!J){")
+        js_text = re.sub(
+            r"async function ([A-Za-z_$][\w$]*)\(\)\{if\(!([A-Za-z_$][\w$]*)\)\{\2=!0;try\{(?=[^}]{0,320}category_\$\{)",
+            r"async function \1(){return;if(!\2){\2=!0;try{",
+            js_text,
+        )
 
     return js_text
 
