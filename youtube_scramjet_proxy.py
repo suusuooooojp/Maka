@@ -152,7 +152,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261109-v34"
+RUNTIME_REV = "20261112-yt-v41"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -168,6 +168,8 @@ YOUTUBE_HOSTS = {
     "www.youtube.com",
     "m.youtube.com",
     "music.youtube.com",
+    "studio.youtube.com",
+    "upload.youtube.com",
     "youtu.be",
 }
 YOUTUBE_IMAGE_SUFFIXES = (
@@ -189,7 +191,13 @@ YOUTUBE_IMAGE_SUFFIXES = (
     "usercontent.goog",
     "playables.usercontent.goog",
 )
-AUTH_HOSTS = {"accounts.google.com", "accounts.youtube.com"}
+AUTH_HOSTS = {
+    "accounts.google.com",
+    "accounts.youtube.com",
+    "myaccount.google.com",
+    "gds.google.com",
+    "ogs.google.com",
+}
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
 router = APIRouter()
@@ -218,9 +226,9 @@ def _patch_controller_api(source: bytes) -> bytes:
         'try{indexedDB.deleteDatabase("__scramjet_controller")}catch(_){}'
         'const _shVaultKey="__sh_cookie_vault_yt";'
         "function g(){return Promise.resolve(null)}"
-        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};res={updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}try{let xRaw=localStorage.getItem('__sh_cookie_vault_x')||sessionStorage.getItem('__sh_cookie_vault_x');if(xRaw){let xObj=u(JSON.parse(xRaw)),xCookies=JSON.parse(xObj?.cookies||'{}'),cur=JSON.parse(res?.cookies||'{}'),changed=false;for(let[ck,cv]of Object.entries(xCookies)){if(ck.includes('google.com')&&!(ck in cur)){cur[ck]=cv;changed=true}}if(changed)res={updatedAt:Math.max(res?.updatedAt||0,xObj?.updatedAt||Date.now()),cookies:JSON.stringify(cur)}}}catch(_){}return res}"
+        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}');res=a.updatedAt>=b.updatedAt?a:b}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}return res}"
         "async function w(){return _readVaultRaw()}"
-        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0){merged=s.cookies}else{merged=JSON.stringify({...prev,...curr})}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
+        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0&&!globalThis.__shExplicitClear){merged=s.cookies}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
     )
     text = text.replace(old_idb, new_idb, 1)
     text = text.replace(
@@ -647,6 +655,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     new_rew = (
         'try{'
         'if(A.pathname==="/youtube/runtime/image-relay"&&(A.searchParams.has("k")||A.searchParams.has("url")))return A.href;'
+        'if(A.pathname==="/youtube/runtime/gv-stream"&&(A.searchParams.has("k")||A.searchParams.has("url")))return A.href;'
         'if(A.pathname.startsWith("/youtube/runtime/stream/"))return A.href;'
         'const _sm=A.pathname.match(/^\\/yts\\/stream\\/([A-Za-z0-9_-]{11})\\.mp4$/);'
         'if(_sm)return t.prefix.origin+"/youtube/runtime/stream/"+_sm[1]+A.search;'
@@ -671,7 +680,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
     if old_attr_iter in text:
         text = text.replace(old_attr_iter, new_attr_iter, 1)
     old_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&r.startsWith(e.context.prefix.href)?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{for(let r of e.config.maskedfiles)if((0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t)).endsWith(r))return!1;return!0}))}})'
-    new_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&(r.startsWith(e.context.prefix.href)||r.includes("/youtube/runtime/image-relay")||r.includes("/youtube/runtime/stream/"))?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{const _nm=(0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t))||"",_nc=_nm.split("?")[0];if(_nc.includes("/youtube/runtime/scramjet")||_nc.includes("/youtube/runtime/controller")||_nc.endsWith("scramjet.wasm.js"))return!1;for(let r of e.config.maskedfiles)if(_nc.endsWith(r))return!1;return!0}))}})'
+    new_perf = 'e.Trap("PerformanceEntry.prototype.name",{get(t){let r=(0,i.Qf)(t.get());return r&&(r.startsWith(e.context.prefix.href)||r.includes("/youtube/runtime/image-relay")||r.includes("/youtube/runtime/gv-stream")||r.includes("/youtube/runtime/stream/"))?e.unrewriteUrl(r):r}}),e.Proxy(["Performance.prototype.getEntries","Performance.prototype.getEntriesByType","Performance.prototype.getEntriesByName","PerformanceObserverEntryList.prototype.getEntries","PerformanceObserverEntryList.prototype.getEntriesByType","PerformanceObserverEntryList.prototype.getEntriesByName"],{apply(t){let r=t.call();return t.return(r.filter(t=>{const _nm=(0,i.Qf)(e.descriptors.get("PerformanceEntry.prototype.name",t))||"",_nc=_nm.split("?")[0];if(_nc.includes("/youtube/runtime/scramjet")||_nc.includes("/youtube/runtime/controller")||_nc.endsWith("scramjet.wasm.js"))return!1;for(let r of e.config.maskedfiles)if(_nc.endsWith(r))return!1;return!0}))}})'
     if old_perf in text:
         text = text.replace(old_perf, new_perf, 1)
     old_wasm_init = "(0,n.QR)({module:new WebAssembly.Module(i)});"
@@ -876,9 +885,6 @@ function checkShortCircuit(target) {{
   if (!target) return null;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
-  if (h === 'youtube.com' && (p === '' || p === '/')) {{
-    return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
-  }}
   if (h.endsWith('.googlevideo.com') || h.endsWith('.c.youtube.com')) {{
     const exp = target.searchParams.get('expire') || '';
     if (p.includes(' ') || exp === '9421968081' || exp === '1685394838') {{
@@ -888,19 +894,15 @@ function checkShortCircuit(target) {{
   if (
     (p.includes('generate_204') && h !== 'accounts.google.com') || p.includes('error_204') || p.includes('csi_204') ||
     p.startsWith('/pagead/') || p.startsWith('/api/stats/') || p.startsWith('/ptracking') ||
-    p.startsWith('/s/search/audio/') ||
     h.endsWith('doubleclick.net') || h.endsWith('googlesyndication.com') ||
     h.endsWith('googleadservices.com') || h.includes('adservice.google') ||
-    h.endsWith('google-analytics.com') || h === 'play.google.com' || h.endsWith('.play.google.com')
+    h.endsWith('google-analytics.com') || ((h === 'play.google.com' || h.endsWith('.play.google.com')) && p.includes('log'))
   ) {{
     return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
   }}
   if (
     p.startsWith('/youtubei/v1/log_event') ||
-    p.startsWith('/youtubei/v1/att/') ||
     p.startsWith('/youtubei/v1/ads/') ||
-    p.startsWith('/youtubei/v1/feedback') ||
-    p.startsWith('/youtubei/v1/notification/') ||
     p.startsWith('/youtubei/v1/player/ad_break') ||
     p.includes('/get_midroll_info')
   ) {{
@@ -916,7 +918,7 @@ self.addEventListener('activate', event => event.waitUntil(self.clients.claim())
 self.addEventListener('fetch', event => {{
   try {{
     const reqUrlObj = new URL(event.request.url);
-    if (reqUrlObj.origin === self.location.origin && reqUrlObj.pathname.startsWith('/youtube/runtime/stream/')) {{
+    if (reqUrlObj.origin === self.location.origin && (reqUrlObj.pathname.startsWith('/youtube/runtime/stream/') || reqUrlObj.pathname.startsWith('/youtube/runtime/gv-stream'))) {{
       return;
     }}
     const sjIdx = reqUrlObj.pathname.indexOf('/youtube/~/sj/');
@@ -933,6 +935,31 @@ self.addEventListener('fetch', event => {{
       const sc = checkShortCircuit(anyTarget);
       if (sc) {{
         event.respondWith(sc);
+        return;
+      }}
+      const anyHost = String(anyTarget.hostname || '').toLowerCase().replace(/\\.$/, '');
+      if (anyHost.endsWith('.googlevideo.com') || anyHost.endsWith('.c.youtube.com')) {{
+        const gvRelay = new URL('/youtube/runtime/gv-stream', self.location.origin);
+        gvRelay.searchParams.set('k', encodeMediaKey(anyTarget.href));
+        const m = event.request.method;
+        const fwdHeaders = {{}};
+        const rng = event.request.headers.get('range');
+        if (rng) fwdHeaders['Range'] = rng;
+        const acc = event.request.headers.get('accept');
+        if (acc) fwdHeaders['Accept'] = acc;
+        const ct = event.request.headers.get('content-type');
+        if (ct) fwdHeaders['Content-Type'] = ct;
+        event.respondWith((async () => {{
+          const bodyBuf = (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS')
+            ? await event.request.arrayBuffer().catch(() => null)
+            : null;
+          return fetch(gvRelay.href, {{
+            method: m,
+            headers: fwdHeaders,
+            body: (bodyBuf && bodyBuf.byteLength > 0) ? bodyBuf : undefined,
+            credentials: 'omit',
+          }});
+        }})());
         return;
       }}
     }}
@@ -3235,10 +3262,116 @@ def _strip_feed_ads(data: any) -> None:
         data[:] = filtered
 
 
-def _apply_playable_patch(pr_dict: dict, patch_data: dict) -> bool:
+_ANDROID_VR_PLAYER_CACHE: dict[str, tuple[float, dict]] = {}
+_ANDROID_VR_UA = (
+    "com.google.android.apps.youtube.vr.oculus/1.60.19 "
+    "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+)
+
+
+def _has_playable_streaming_data(sd: any) -> bool:
+    if not isinstance(sd, dict):
+        return False
+    if sd.get("hlsManifestUrl") or sd.get("dashManifestUrl"):
+        return True
+    for key in ("formats", "adaptiveFormats"):
+        items = sd.get(key)
+        if isinstance(items, list):
+            for f in items:
+                if isinstance(f, dict) and (f.get("url") or f.get("signatureCipher") or f.get("cipher")):
+                    return True
+    return False
+
+
+async def _fetch_android_vr_player(vid: str) -> dict | None:
+    if not vid or not VIDEO_ID_RE.match(vid):
+        return None
+    now = time.time()
+    cached = _ANDROID_VR_PLAYER_CACHE.get(vid)
+    if cached and (now - cached[0]) < 1200.0:
+        return cached[1] or None
+    payload = json.dumps(
+        {
+            "videoId": vid,
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.60.19",
+                    "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3",
+                    "osName": "Android",
+                    "osVersion": "12L",
+                    "androidSdkVersion": 32,
+                    "hl": "ja",
+                    "gl": "JP",
+                }
+            },
+            "contentCheckOk": True,
+            "racyCheckOk": True,
+        }
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": _ANDROID_VR_UA,
+        "X-YouTube-Client-Name": "28",
+        "Origin": "https://www.youtube.com",
+    }
+    try:
+        session = await _get_curl_session()
+        if session is not None:
+            r = await session.post(
+                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                headers=headers,
+                data=payload,
+                timeout=3.5,
+            )
+            raw = r.text
+            sc = r.status_code
+        else:
+            client = await _get_media_http_client()
+            r = await client.post(
+                "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
+                headers=headers,
+                content=payload,
+                timeout=3.5,
+            )
+            raw = r.text
+            sc = r.status_code
+        if sc == 200 and raw:
+            d = json.loads(raw)
+            st = (d.get("playabilityStatus") or {}).get("status")
+            sd = d.get("streamingData") or {}
+            direct_ok = bool(sd.get("hlsManifestUrl")) or any(
+                isinstance(f, dict) and f.get("url")
+                for f in ((sd.get("formats") or []) + (sd.get("adaptiveFormats") or []))
+            )
+            if st == "OK" and direct_ok:
+                out = {
+                    "playabilityStatus": {"status": "OK", "playableInEmbed": True},
+                    "streamingData": sd,
+                }
+                if isinstance(d.get("videoDetails"), dict):
+                    out["videoDetails"] = d["videoDetails"]
+                if isinstance(d.get("captions"), dict):
+                    out["captions"] = d["captions"]
+                if isinstance(d.get("storyboards"), dict):
+                    out["storyboards"] = d["storyboards"]
+                if len(_ANDROID_VR_PLAYER_CACHE) >= 256:
+                    _ANDROID_VR_PLAYER_CACHE.pop(next(iter(_ANDROID_VR_PLAYER_CACHE)), None)
+                _ANDROID_VR_PLAYER_CACHE[vid] = (now, out)
+                return out
+            _ANDROID_VR_PLAYER_CACHE[vid] = (now, {})
+    except Exception:
+        pass
+    return None
+
+
+def _apply_playable_patch(
+    pr_dict: dict, patch_data: dict, *, has_user_auth_cookie: bool = False
+) -> bool:
     if not isinstance(pr_dict, dict):
         return False
-    # Safely remove all ad structures from playerResponse
+    removed_ad = False
     for ad_key in (
         "adPlacements",
         "adSlots",
@@ -3248,17 +3381,41 @@ def _apply_playable_patch(pr_dict: dict, patch_data: dict) -> bool:
         "invideoAds",
         "adSignalsInfo",
     ):
-        pr_dict.pop(ad_key, None)
-    status = (pr_dict.get("playabilityStatus") or {}).get("status")
-    if status != "OK":
-        for err_key in ("frameworkUpdates", "auxiliaryUi", "errorScreen", "messages"):
-            pr_dict.pop(err_key, None)
-        pr_dict.update(patch_data)
-        return True
-    pr_dict["streamingData"] = patch_data["streamingData"]
-    if not isinstance(pr_dict.get("videoDetails"), dict) or not pr_dict["videoDetails"].get("videoId"):
-        pr_dict["videoDetails"] = patch_data["videoDetails"]
+        if ad_key in pr_dict:
+            pr_dict.pop(ad_key, None)
+            removed_ad = True
+    ps = pr_dict.get("playabilityStatus") or {}
+    status = ps.get("status")
+    if status == "OK" and _has_playable_streaming_data(pr_dict.get("streamingData")):
+        return removed_ad
+    if has_user_auth_cookie and status not in ("LOGIN_REQUIRED", None):
+        reason_str = str(ps.get("reason") or "").lower()
+        if "bot" not in reason_str:
+            return removed_ad
+    for err_key in ("frameworkUpdates", "auxiliaryUi", "errorScreen", "messages"):
+        pr_dict.pop(err_key, None)
+    pr_dict.update(patch_data)
     return True
+
+
+async def _build_best_fallback_patch(
+    vid: str,
+    title: str,
+    author: str,
+    cid: str,
+    stream_task: asyncio.Task | None,
+    req_vid: str,
+    *,
+    is_shorts: bool = False,
+    fallback_dur: float = 0.0,
+) -> dict:
+    vr_patch = await _fetch_android_vr_player(vid)
+    if vr_patch:
+        return vr_patch
+    clen, dur_s = await _ensure_resolved_stream_meta(
+        vid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=fallback_dur
+    )
+    return _build_playable_response_patch(vid, title, author, cid, clen, dur_s)
 
 
 async def _ensure_resolved_stream_meta(
@@ -3270,8 +3427,6 @@ async def _ensure_resolved_stream_meta(
 ) -> tuple[int, float]:
     dur_s = fallback_dur if fallback_dur > 0 else (60.0 if is_shorts else 240.0)
     _PREWARM_REQUESTED_VIDS.add(vid)
-    # Immediately trigger moov head pre-warming using the deterministic companion URL
-    # so that downloading the moov atom overlaps with HTML/JS parsing on long videos.
     _ensure_stream_head_prewarm(
         vid,
         f"https://invid-api.poketube.fun/companion/latest_version?id={vid}&itag=18&local=true",
@@ -3283,8 +3438,6 @@ async def _ensure_resolved_stream_meta(
             if (stream_task is not None and vid == req_vid)
             else asyncio.create_task(_resolve_stream_info(vid))
         )
-        # Never block GET /watch or get_watch for 1.5s waiting on upstream APIs;
-        # the stream endpoint resolves or serves directly from the prewarm buffer.
         wait_timeout = 0.15
         try:
             await asyncio.wait_for(asyncio.shield(t_task), timeout=wait_timeout)
@@ -3300,11 +3453,13 @@ async def _ensure_resolved_stream_meta(
     return clen, dur_s
 
 
-def _patch_reel_sequence_obj(seq_obj: dict) -> bool:
+def _patch_reel_sequence_obj(seq_obj: dict, *, has_user_auth_cookie: bool = False) -> bool:
     if not isinstance(seq_obj, dict):
         return False
     changed = False
     _strip_feed_ads(seq_obj)
+    if has_user_auth_cookie:
+        return True
     rep_vid = (
         seq_obj.get("replacementEndpoint", {})
         .get("reelWatchEndpoint", {})
@@ -3362,6 +3517,8 @@ async def _maybe_patch_youtube_payload(
     stream_task: asyncio.Task | None,
     home_task: asyncio.Task | None,
     next_task: asyncio.Task | None = None,
+    *,
+    has_user_auth_cookie: bool = False,
 ) -> bytes:
     ctype = ""
     for k, v in headers_list:
@@ -3378,9 +3535,9 @@ async def _maybe_patch_youtube_payload(
 
     modified = False
 
-    # 1. Populate empty Home feed nudge with real native richItemRenderer video cards
+    # 1. Populate empty Home feed nudge ONLY when unauthenticated
     is_sh_watch = bool(parsed_url and "sh_watch=" in (parsed_url.query or ""))
-    if '"feedNudgeRenderer"' in text and not is_sh_watch:
+    if not has_user_auth_cookie and '"feedNudgeRenderer"' in text and not is_sh_watch:
         rich_items: list[dict] = []
         if home_task is not None:
             try:
@@ -3450,7 +3607,7 @@ async def _maybe_patch_youtube_payload(
         if parsed_id_data:
             try:
                 _strip_feed_ads(parsed_id_data)
-                if not is_shorts and not _has_related_video_items(parsed_id_data) and vid:
+                if not has_user_auth_cookie and not is_shorts and not _has_related_video_items(parsed_id_data) and vid:
                     full_wn = (
                         await asyncio.wait_for(next_task, timeout=2.0)
                         if next_task is not None
@@ -3474,7 +3631,7 @@ async def _maybe_patch_youtube_payload(
                 vid, title, author, cid = _extract_details_from_watch_next(
                     parsed_id_data, vid
                 )
-                if vid and isinstance(parsed_id_data, dict) and "contents" in parsed_id_data:
+                if not has_user_auth_cookie and vid and isinstance(parsed_id_data, dict) and "contents" in parsed_id_data:
                     if len(_WATCH_NEXT_CACHE) >= 256:
                         _WATCH_NEXT_CACHE.pop(next(iter(_WATCH_NEXT_CACHE)), None)
                     _WATCH_NEXT_CACHE[vid] = (time.time(), parsed_id_data)
@@ -3482,55 +3639,66 @@ async def _maybe_patch_youtube_payload(
                 pass
 
         if vid:
-            vd_len = 0.0
-            m_len = re.search(r'"lengthSeconds"\s*:\s*"(\d+)"', text)
-            if m_len:
-                try:
-                    vd_len = float(m_len.group(1))
-                except Exception:
-                    pass
-            if vd_len <= 0:
-                m_approx = re.search(r'"approxDurationMs"\s*:\s*"(\d+)"', text)
-                if m_approx:
+            initial_pr = _extract_js_var_json(text, "var ytInitialPlayerResponse = ")
+            pr_already_ok = (
+                isinstance(initial_pr, dict)
+                and (initial_pr.get("playabilityStatus") or {}).get("status") == "OK"
+                and _has_playable_streaming_data(initial_pr.get("streamingData"))
+            )
+            if pr_already_ok:
+                text, did_pr = _replace_js_var_json(
+                    text,
+                    "var ytInitialPlayerResponse = ",
+                    lambda orig: _apply_playable_patch(orig, {}, has_user_auth_cookie=has_user_auth_cookie),
+                )
+                if did_pr:
+                    modified = True
+            else:
+                vd_len = 0.0
+                m_len = re.search(r'"lengthSeconds"\s*:\s*"(\d+)"', text)
+                if m_len:
                     try:
-                        vd_len = float(m_approx.group(1)) / 1000.0
+                        vd_len = float(m_len.group(1))
                     except Exception:
                         pass
-            clen, dur_s = await _ensure_resolved_stream_meta(
-                vid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
-            )
-            patch_data = _build_playable_response_patch(
-                vid, title, author, cid, clen, dur_s
-            )
-            text, did_pr = _replace_js_var_json(
-                text,
-                "var ytInitialPlayerResponse = ",
-                lambda orig: _apply_playable_patch(orig, patch_data),
-            )
-            if did_pr:
-                modified = True
+                if vd_len <= 0:
+                    m_approx = re.search(r'"approxDurationMs"\s*:\s*"(\d+)"', text)
+                    if m_approx:
+                        try:
+                            vd_len = float(m_approx.group(1)) / 1000.0
+                        except Exception:
+                            pass
+                patch_data = await _build_best_fallback_patch(
+                    vid, title, author, cid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
+                )
+                text, did_pr = _replace_js_var_json(
+                    text,
+                    "var ytInitialPlayerResponse = ",
+                    lambda orig: _apply_playable_patch(orig, patch_data, has_user_auth_cookie=has_user_auth_cookie),
+                )
+                if did_pr:
+                    modified = True
 
-            # If on /shorts root with replacementEndpoint, attach unserializedPrefetchData so initial Short plays immediately
-            if is_shorts and isinstance(parsed_id_data, dict) and isinstance(parsed_id_data.get("replacementEndpoint"), dict):
-                rwe_rep = parsed_id_data["replacementEndpoint"].get("reelWatchEndpoint")
-                if isinstance(rwe_rep, dict) and rwe_rep.get("videoId") == vid:
-                    rwe_rep["unserializedPrefetchData"] = {"playerResponse": patch_data}
-                    text, did_rep = _replace_js_var_json(
-                        text,
-                        "var ytInitialData = ",
-                        lambda orig: (orig.clear(), orig.update(parsed_id_data), True)[2],
-                    )
-                    if did_rep:
-                        modified = True
+                if not has_user_auth_cookie and is_shorts and isinstance(parsed_id_data, dict) and isinstance(parsed_id_data.get("replacementEndpoint"), dict):
+                    rwe_rep = parsed_id_data["replacementEndpoint"].get("reelWatchEndpoint")
+                    if isinstance(rwe_rep, dict) and rwe_rep.get("videoId") == vid:
+                        rwe_rep["unserializedPrefetchData"] = {"playerResponse": patch_data}
+                        text, did_rep = _replace_js_var_json(
+                            text,
+                            "var ytInitialData = ",
+                            lambda orig: (orig.clear(), orig.update(parsed_id_data), True)[2],
+                        )
+                        if did_rep:
+                            modified = True
 
         if "var ytInitialReelWatchSequenceResponse = " in text:
             def _mutate_reel_seq(seq_d: dict) -> bool:
-                did_s = _patch_reel_sequence_obj(seq_d)
-                if not seq_d.get("entries") and vid and is_shorts and isinstance(parsed_id_data, dict):
+                did_s = _patch_reel_sequence_obj(seq_d, has_user_auth_cookie=has_user_auth_cookie)
+                if not has_user_auth_cookie and not seq_d.get("entries") and vid and is_shorts and isinstance(parsed_id_data, dict):
                     rep_ep = parsed_id_data.get("replacementEndpoint")
                     if isinstance(rep_ep, dict):
                         seq_d["entries"] = [{"command": rep_ep}]
-                        _patch_reel_sequence_obj(seq_d)
+                        _patch_reel_sequence_obj(seq_d, has_user_auth_cookie=has_user_auth_cookie)
                         did_s = True
                 return did_s
 
@@ -3549,24 +3717,28 @@ async def _maybe_patch_youtube_payload(
             _strip_feed_ads(arr)
             wn = {}
             vd_len = 0.0
+            any_needs_fallback = False
             for item in arr:
                 if isinstance(item, dict):
                     if isinstance(item.get("watchNextResponse"), dict):
                         wn = item["watchNextResponse"]
-                    if isinstance(item.get("playerResponse"), dict) and vd_len <= 0:
-                        try:
-                            vd_len = float(
-                                (item["playerResponse"].get("videoDetails") or {}).get("lengthSeconds") or 0.0
-                            )
-                        except Exception:
-                            pass
+                    pr_item = item.get("playerResponse")
+                    if isinstance(pr_item, dict):
+                        if vd_len <= 0:
+                            try:
+                                vd_len = float((pr_item.get("videoDetails") or {}).get("lengthSeconds") or 0.0)
+                            except Exception:
+                                pass
+                        st_item = (pr_item.get("playabilityStatus") or {}).get("status")
+                        if st_item != "OK" or not _has_playable_streaming_data(pr_item.get("streamingData")):
+                            any_needs_fallback = True
             vid, title, author, cid = _extract_details_from_watch_next(wn, req_vid)
             if not vid:
                 m_vid = re.search(r'"videoId":\s*"([A-Za-z0-9_-]{11})"', text)
                 vid = m_vid.group(1) if m_vid else ""
             if vid:
                 is_shorts = bool(parsed_url and "/shorts" in (parsed_url.path or ""))
-                if not is_shorts and not _has_related_video_items(wn):
+                if not has_user_auth_cookie and not is_shorts and not _has_related_video_items(wn):
                     full_wn: dict = {}
                     if next_task is not None:
                         try:
@@ -3599,15 +3771,18 @@ async def _maybe_patch_youtube_payload(
                                 if await _ensure_watch_next_secondary_results(item["watchNextResponse"], vid):
                                     modified = True
 
-                clen, dur_s = await _ensure_resolved_stream_meta(
-                    vid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
-                )
-                patch_data = _build_playable_response_patch(
-                    vid, title, author, cid, clen, dur_s
+                patch_data = (
+                    await _build_best_fallback_patch(
+                        vid, title, author, cid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
+                    )
+                    if any_needs_fallback
+                    else {}
                 )
                 for item in arr:
                     if isinstance(item, dict) and isinstance(item.get("playerResponse"), dict):
-                        if _apply_playable_patch(item["playerResponse"], patch_data):
+                        if _apply_playable_patch(
+                            item["playerResponse"], patch_data, has_user_auth_cookie=has_user_auth_cookie
+                        ):
                             modified = True
                 if modified:
                     text = json.dumps(arr, ensure_ascii=False)
@@ -3619,25 +3794,26 @@ async def _maybe_patch_youtube_payload(
         try:
             obj = json.loads(text)
             _strip_feed_ads(obj)
-            vid = req_vid
-            if not vid:
-                vid, _, _, _ = _extract_details_from_watch_next(obj, "")
-            is_shorts = bool(parsed_url and "/shorts" in (parsed_url.path or ""))
-            if not is_shorts and not _has_related_video_items(obj) and vid:
-                full_wn = (
-                    await asyncio.wait_for(next_task, timeout=2.5)
-                    if next_task is not None
-                    else await asyncio.wait_for(_fetch_full_watch_next(vid), timeout=2.5)
-                )
-                if full_wn and _has_related_video_items(full_wn):
-                    _strip_feed_ads(full_wn)
-                    obj = full_wn
-                    modified = True
-                elif await _ensure_watch_next_secondary_results(obj, vid):
-                    modified = True
-            else:
-                if await _ensure_watch_next_secondary_results(obj, vid):
-                    modified = True
+            if not has_user_auth_cookie:
+                vid = req_vid
+                if not vid:
+                    vid, _, _, _ = _extract_details_from_watch_next(obj, "")
+                is_shorts = bool(parsed_url and "/shorts" in (parsed_url.path or ""))
+                if not is_shorts and not _has_related_video_items(obj) and vid:
+                    full_wn = (
+                        await asyncio.wait_for(next_task, timeout=2.5)
+                        if next_task is not None
+                        else await asyncio.wait_for(_fetch_full_watch_next(vid), timeout=2.5)
+                    )
+                    if full_wn and _has_related_video_items(full_wn):
+                        _strip_feed_ads(full_wn)
+                        obj = full_wn
+                        modified = True
+                    elif await _ensure_watch_next_secondary_results(obj, vid):
+                        modified = True
+                else:
+                    if await _ensure_watch_next_secondary_results(obj, vid):
+                        modified = True
             if modified:
                 text = json.dumps(obj, ensure_ascii=False)
         except Exception:
@@ -3649,10 +3825,10 @@ async def _maybe_patch_youtube_payload(
             obj = json.loads(text)
             _strip_feed_ads(obj)
             if isinstance(obj.get("entries"), list):
-                if _patch_reel_sequence_obj(obj):
+                if _patch_reel_sequence_obj(obj, has_user_auth_cookie=has_user_auth_cookie):
                     modified = True
             if isinstance(obj.get("response"), dict):
-                if _patch_reel_sequence_obj(obj["response"]):
+                if _patch_reel_sequence_obj(obj["response"], has_user_auth_cookie=has_user_auth_cookie):
                     modified = True
             if "playerResponse" in obj and isinstance(obj["playerResponse"], dict):
                 pr = obj["playerResponse"]
@@ -3664,62 +3840,71 @@ async def _maybe_patch_youtube_payload(
                     m_vid = re.search(r'"videoId":\s*"([A-Za-z0-9_-]{11})"', text)
                     vid = m_vid.group(1) if m_vid else ""
                 if vid:
-                    is_shorts = bool(
-                        (
-                            parsed_url
-                            and (
-                                "/shorts" in (parsed_url.path or "")
-                                or "/reel/" in (parsed_url.path or "")
-                            )
-                        )
-                        or obj.get("page") == "shorts"
+                    pr_ok = (
+                        (pr.get("playabilityStatus") or {}).get("status") == "OK"
+                        and _has_playable_streaming_data(pr.get("streamingData"))
                     )
-                    vd_len = 0.0
-                    try:
-                        vd_len = float((obj.get("videoDetails") or pr.get("videoDetails") or {}).get("lengthSeconds") or 0.0)
-                    except Exception:
-                        pass
-                    clen, dur_s = await _ensure_resolved_stream_meta(
-                        vid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
-                    )
-                    p_patch = _build_playable_response_patch(
-                        vid, title, author, cid, clen, dur_s
-                    )
-                    if _apply_playable_patch(pr, p_patch):
-                        modified = True
-                    if isinstance(wn_src, dict) and isinstance(wn_src.get("replacementEndpoint"), dict):
-                        rwe_rep = wn_src["replacementEndpoint"].get("reelWatchEndpoint")
-                        if isinstance(rwe_rep, dict) and rwe_rep.get("videoId") == vid:
-                            rwe_rep["unserializedPrefetchData"] = {"playerResponse": p_patch}
+                    if pr_ok:
+                        if _apply_playable_patch(pr, {}, has_user_auth_cookie=has_user_auth_cookie):
                             modified = True
+                    else:
+                        is_shorts = bool(
+                            (
+                                parsed_url
+                                and (
+                                    "/shorts" in (parsed_url.path or "")
+                                    or "/reel/" in (parsed_url.path or "")
+                                )
+                            )
+                            or obj.get("page") == "shorts"
+                        )
+                        vd_len = 0.0
+                        try:
+                            vd_len = float((obj.get("videoDetails") or pr.get("videoDetails") or {}).get("lengthSeconds") or 0.0)
+                        except Exception:
+                            pass
+                        p_patch = await _build_best_fallback_patch(
+                            vid, title, author, cid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
+                        )
+                        if _apply_playable_patch(pr, p_patch, has_user_auth_cookie=has_user_auth_cookie):
+                            modified = True
+                        if not has_user_auth_cookie and isinstance(wn_src, dict) and isinstance(wn_src.get("replacementEndpoint"), dict):
+                            rwe_rep = wn_src["replacementEndpoint"].get("reelWatchEndpoint")
+                            if isinstance(rwe_rep, dict) and rwe_rep.get("videoId") == vid:
+                                rwe_rep["unserializedPrefetchData"] = {"playerResponse": p_patch}
+                                modified = True
             elif isinstance(obj.get("playabilityStatus"), dict):
                 vid = (obj.get("videoDetails") or {}).get("videoId") or req_vid
                 if not vid:
                     m_vid = re.search(r'"videoId":\s*"([A-Za-z0-9_-]{11})"', text)
                     vid = m_vid.group(1) if m_vid else ""
                 if vid:
-                    is_shorts = bool(
-                        parsed_url
-                        and (
-                            "/shorts" in (parsed_url.path or "")
-                            or "/reel/" in (parsed_url.path or "")
+                    pr_ok = (
+                        (obj.get("playabilityStatus") or {}).get("status") == "OK"
+                        and _has_playable_streaming_data(obj.get("streamingData"))
+                    )
+                    if pr_ok:
+                        if _apply_playable_patch(obj, {}, has_user_auth_cookie=has_user_auth_cookie):
+                            modified = True
+                    else:
+                        is_shorts = bool(
+                            parsed_url
+                            and (
+                                "/shorts" in (parsed_url.path or "")
+                                or "/reel/" in (parsed_url.path or "")
+                            )
                         )
-                    )
-                    vd_len = 0.0
-                    try:
-                        vd_len = float((obj.get("videoDetails") or {}).get("lengthSeconds") or 0.0)
-                    except Exception:
-                        pass
-                    clen, dur_s = await _ensure_resolved_stream_meta(
-                        vid, stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
-                    )
-                    if _apply_playable_patch(
-                        obj,
-                        _build_playable_response_patch(
-                            vid, clen=clen, dur_s=dur_s
-                        ),
-                    ):
-                        modified = True
+                        vd_len = 0.0
+                        try:
+                            vd_len = float((obj.get("videoDetails") or {}).get("lengthSeconds") or 0.0)
+                        except Exception:
+                            pass
+                        p_patch = await _build_best_fallback_patch(
+                            vid, "YouTube Video", "YouTube", "UCBR8-60-B28hp2BmDPdntcQ",
+                            stream_task, req_vid, is_shorts=is_shorts, fallback_dur=vd_len
+                        )
+                        if _apply_playable_patch(obj, p_patch, has_user_auth_cookie=has_user_auth_cookie):
+                            modified = True
             if modified:
                 text = json.dumps(obj, ensure_ascii=False)
         except Exception:
@@ -3729,9 +3914,9 @@ async def _maybe_patch_youtube_payload(
     elif text.startswith("{") and ('"reelWatchEndpoint"' in text or '"reelPlayerOverlayRenderer"' in text):
         try:
             obj = json.loads(text)
-            _patch_reel_sequence_obj(obj)
-            text = json.dumps(obj, ensure_ascii=False)
-            modified = True
+            if _patch_reel_sequence_obj(obj, has_user_auth_cookie=has_user_auth_cookie):
+                text = json.dumps(obj, ensure_ascii=False)
+                modified = True
         except Exception:
             pass
 
@@ -3746,6 +3931,99 @@ async def _maybe_patch_youtube_payload(
             pass
 
     return text.encode("utf-8") if modified else resp_body
+
+
+@router.api_route(
+    "/youtube/runtime/gv-stream",
+    methods=["GET", "POST", "HEAD", "OPTIONS"],
+    include_in_schema=False,
+)
+async def youtube_runtime_gv_stream(request: Request):
+    cors_hdrs = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+        "Access-Control-Expose-Headers": "*",
+        "Cross-Origin-Resource-Policy": "cross-origin",
+    }
+    if request.method == "OPTIONS":
+        return Response(status_code=204, headers=cors_hdrs)
+    k_val = (request.query_params.get("k") or "").strip()
+    raw_url = _decode_media_key(k_val) if k_val else (request.query_params.get("url") or "").strip()
+    raw_url = _strip_dollar_query(raw_url)
+    try:
+        parsed = urlparse(raw_url)
+    except Exception:
+        return Response(b"bad url", status_code=400, headers=cors_hdrs)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if parsed.scheme != "https" or not host.endswith((".googlevideo.com", ".c.youtube.com")):
+        return Response(b"forbidden host", status_code=403, headers=cors_hdrs)
+    q_str = parsed.query or ""
+    if (
+        (parsed.path or "") in ("/generate_204", "/gen_204")
+        or " " in (parsed.path or "")
+        or "expire=9421968081" in q_str
+        or "expire=1685394838" in q_str
+    ):
+        return Response(status_code=204, headers=cors_hdrs)
+    try:
+        await _ensure_public_host(host, 443)
+    except Exception:
+        return Response(b"blocked host", status_code=403, headers=cors_hdrs)
+
+    fwd = {
+        "User-Agent": _DESKTOP_CHROME_UA,
+        "Origin": "https://www.youtube.com",
+        "Referer": "https://www.youtube.com/",
+        "Accept": request.headers.get("accept") or "*/*",
+    }
+    for hk in ("range", "content-type", "x-client-data"):
+        hv = request.headers.get(hk)
+        if hv:
+            fwd[hk.title()] = hv
+
+    post_body = await request.body() if request.method not in ("GET", "HEAD", "OPTIONS") else None
+    client = await _get_media_http_client()
+    try:
+        req_out = client.build_request(
+            request.method,
+            raw_url,
+            headers=fwd,
+            content=post_body if post_body else None,
+        )
+        upstream = await client.send(req_out, stream=True, follow_redirects=True)
+    except Exception:
+        return Response(b"upstream media error", status_code=502, headers=cors_hdrs)
+
+    out_hdrs = dict(cors_hdrs)
+    for hk in (
+        "content-type",
+        "content-length",
+        "content-range",
+        "accept-ranges",
+        "cache-control",
+        "x-head-time-millis",
+        "x-head-seqnum",
+        "x-walltime-ms",
+        "x-sequence-num",
+    ):
+        hv = upstream.headers.get(hk)
+        if hv:
+            out_hdrs[hk] = hv
+    if request.method == "HEAD" or upstream.status_code in (204, 304):
+        await upstream.aclose()
+        return Response(status_code=upstream.status_code, headers=out_hdrs)
+
+    async def _iter_gv():
+        try:
+            async for chunk in upstream.aiter_bytes(65536):
+                yield chunk
+        except Exception:
+            pass
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(_iter_gv(), status_code=upstream.status_code, headers=out_hdrs)
 
 
 @router.post("/youtube/runtime/http-relay", include_in_schema=False)
@@ -3933,12 +4211,105 @@ async def youtube_http_relay(request: Request):
     if cookie_parts:
         header_dict["Cookie"] = "; ".join(cookie_parts)
 
-    # Short-circuit dummy googlevideo.com / .c.youtube.com bandwidth probes (real video uses /youtube/runtime/stream/{vid})
+    # Relay real googlevideo.com / .c.youtube.com MSE, SABR, and HLS requests
+    # (dummy bandwidth probes were already filtered above by expire=9421968081 / 1685394838)
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
+        if method == "OPTIONS":
+            return _pack_relay_response(
+                204,
+                "No Content",
+                [
+                    ["access-control-allow-origin", "https://www.youtube.com"],
+                    ["access-control-allow-credentials", "true"],
+                    ["access-control-allow-methods", "GET, HEAD, POST, OPTIONS"],
+                    ["access-control-allow-headers", "*"],
+                    ["access-control-expose-headers", "*"],
+                ],
+                b"",
+            )
+        gv_headers: dict[str, str] = {
+            "User-Agent": _DESKTOP_CHROME_UA,
+            "Origin": "https://www.youtube.com",
+            "Referer": "https://www.youtube.com/",
+            "Accept": header_dict.get("Accept") or header_dict.get("accept") or "*/*",
+        }
+        for hk, hv in header_dict.items():
+            if hk.lower() in ("range", "content-type", "x-client-data"):
+                gv_headers[hk] = hv
+        try:
+            session = await _get_curl_session()
+            cur_gv_url = url
+            status = 502
+            status_text = "Bad Gateway"
+            resp_body = b""
+            raw_multi = []
+            for _hop in range(5):
+                if session is not None:
+                    up = await session.request(
+                        method=method,
+                        url=cur_gv_url,
+                        headers=gv_headers,
+                        data=req_body if req_body else None,
+                        allow_redirects=False,
+                        timeout=25,
+                    )
+                    status = int(up.status_code)
+                    status_text = str(getattr(up, "reason", "") or "OK")
+                    resp_body = bytes(up.content or b"")
+                    raw_multi = list(up.headers.multi_items())
+                else:
+                    client = await _get_media_http_client()
+                    up = await client.request(
+                        method=method,
+                        url=cur_gv_url,
+                        headers=gv_headers,
+                        content=req_body if req_body else None,
+                        follow_redirects=False,
+                    )
+                    status = int(up.status_code)
+                    status_text = str(up.reason_phrase or "OK")
+                    resp_body = bytes(up.content or b"")
+                    raw_multi = list(up.headers.multi_items())
+                if status in (301, 302, 303, 307, 308):
+                    loc = ""
+                    for rk, rv in raw_multi:
+                        if rk.lower() == "location":
+                            loc = rv.strip()
+                            break
+                    if loc:
+                        next_u = urljoin(cur_gv_url, loc)
+                        np = urlparse(next_u)
+                        nh = (np.hostname or "").lower().rstrip(".")
+                        if np.scheme == "https" and nh.endswith((".googlevideo.com", ".c.youtube.com")):
+                            await _ensure_public_host(nh, 443)
+                            cur_gv_url = next_u
+                            continue
+                break
+            gv_out: list[list[str]] = [
+                ["access-control-allow-origin", "https://www.youtube.com"],
+                ["access-control-allow-credentials", "true"],
+                ["access-control-expose-headers", "*"],
+                ["cross-origin-resource-policy", "cross-origin"],
+            ]
+            for rk, rv in raw_multi:
+                rkl = rk.lower()
+                if rkl in _RELAY_STRIP_RESP_HEADERS or rkl.startswith(":") or rkl.startswith("access-control-"):
+                    continue
+                gv_out.append([rk, rv])
+            return _pack_relay_response(status, status_text, gv_out, resp_body)
+        except Exception as exc:
+            return _pack_relay_response(
+                502,
+                "Bad Gateway",
+                [["content-type", "text/plain; charset=utf-8"], ["access-control-allow-origin", "*"]],
+                f"googlevideo relay error: {exc}".encode("utf-8", "ignore"),
+            )
+
+    if host == "youtube.com" and method == "GET":
         return _pack_relay_response(
-            204,
-            "No Content",
-            [["access-control-allow-origin", "*"]],
+            301,
+            "Moved Permanently",
+            [["location", urlunparse(("https", "www.youtube.com", parsed.path or "/", "", parsed.query, ""))]],
             b"",
         )
 
@@ -3993,20 +4364,21 @@ async def youtube_http_relay(request: Request):
         parsed = parsed._replace(query=clean_q)
         url = parsed.geturl()
 
-    # Start stream resolution, moov head pre-warming, watch_next fetch, or home feed fetch in parallel with upstream request
+    # Start stream resolution, moov head pre-warming, watch_next fetch, or home feed fetch in parallel when unauthenticated
     req_vid = _extract_request_video_id(parsed, req_body) if is_yt_host else ""
     if is_yt_host and method == "GET" and parsed.path in ("", "/") and "sh_watch=" in (parsed.query or "") and req_vid:
         url = f"https://www.youtube.com/watch?v={req_vid}"
         parsed = urlparse(url)
-    if req_vid:
+    if req_vid and not has_user_auth_cookie:
         _PREWARM_REQUESTED_VIDS.add(req_vid)
         _ensure_stream_head_prewarm(
             req_vid,
             f"https://invid-api.poketube.fun/companion/latest_version?id={req_vid}&itag=18&local=true",
         )
 
-    # Sanitize Origin & Referer for YouTube requests without creating duplicate case-variant headers
+    # Sanitize Origin & Referer without clobbering legitimate virtual origins (critical for SAPISIDHASH)
     orig_ref = ""
+    orig_origin = ""
     has_origin = False
     for hk in list(header_dict.keys()):
         hkl = hk.lower()
@@ -4014,50 +4386,63 @@ async def youtube_http_relay(request: Request):
             orig_ref = header_dict.pop(hk)
         elif hkl == "origin":
             has_origin = True
-            header_dict.pop(hk)
+            orig_origin = header_dict.pop(hk)
+
+    def _is_leaked_proxy_url(u_val: str) -> bool:
+        if not u_val:
+            return True
+        ul = u_val.lower()
+        return (
+            "/~/sj/" in ul
+            or ".onrender.com" in ul
+            or ".ai.studio" in ul
+            or "localhost" in ul
+            or "127.0.0.1" in ul
+        )
+
+    default_yt_origin = (
+        f"https://{host}"
+        if host in ("studio.youtube.com", "music.youtube.com", "accounts.youtube.com")
+        else "https://www.youtube.com"
+    )
 
     if is_yt_host or host.endswith(".youtube.com") or host == "youtube.com":
         if has_origin or method == "POST":
-            header_dict["Origin"] = "https://www.youtube.com"
-        if not orig_ref or "/youtube/~/sj/" in orig_ref or ".onrender.com" in orig_ref or ".ai.studio" in orig_ref or "localhost" in orig_ref or "127.0.0.1" in orig_ref:
-            if req_vid:
+            header_dict["Origin"] = orig_origin if not _is_leaked_proxy_url(orig_origin) else default_yt_origin
+        if _is_leaked_proxy_url(orig_ref):
+            if req_vid and host == "www.youtube.com":
                 header_dict["Referer"] = f"https://www.youtube.com/watch?v={req_vid}"
             elif "/playables" in (parsed.path or ""):
                 header_dict["Referer"] = "https://www.youtube.com/playables"
             else:
-                header_dict["Referer"] = "https://www.youtube.com/"
+                header_dict["Referer"] = f"{default_yt_origin}/"
         else:
             header_dict["Referer"] = orig_ref
     elif host in AUTH_HOSTS or host.endswith(".google.com") or host == "google.com":
         if has_origin or method == "POST":
-            header_dict["Origin"] = f"https://{host}"
-        if (
-            not orig_ref
-            or "/~/sj/" in orig_ref
-            or ".onrender.com" in orig_ref
-            or ".ai.studio" in orig_ref
-            or "localhost" in orig_ref
-            or "127.0.0.1" in orig_ref
-            or "youtube.com" in orig_ref
-        ):
+            header_dict["Origin"] = orig_origin if not _is_leaked_proxy_url(orig_origin) else f"https://{host}"
+        if _is_leaked_proxy_url(orig_ref):
             header_dict["Referer"] = f"https://{host}/"
         else:
             header_dict["Referer"] = orig_ref
     elif host.endswith((".usercontent.goog", ".playables.usercontent.goog")):
         if has_origin or method == "POST":
-            header_dict["Origin"] = "https://www.youtube.com"
-        header_dict["Referer"] = "https://www.youtube.com/"
+            header_dict["Origin"] = orig_origin if not _is_leaked_proxy_url(orig_origin) else "https://www.youtube.com"
+        header_dict["Referer"] = orig_ref if not _is_leaked_proxy_url(orig_ref) else "https://www.youtube.com/"
     else:
-        if orig_ref and "/~/sj/" not in orig_ref:
+        if not _is_leaked_proxy_url(orig_ref):
             header_dict["Referer"] = orig_ref
         if has_origin:
-            header_dict["Origin"] = f"https://{host}"
+            header_dict["Origin"] = orig_origin if not _is_leaked_proxy_url(orig_origin) else f"https://{host}"
 
     stream_task = (
-        asyncio.create_task(_resolve_stream_info(req_vid)) if req_vid else None
+        asyncio.create_task(_resolve_stream_info(req_vid))
+        if (req_vid and not has_user_auth_cookie)
+        else None
     )
     is_get_watch = (
         is_yt_host
+        and not has_user_auth_cookie
         and method == "POST"
         and (
             parsed.path.startswith("/youtubei/v1/get_watch")
@@ -4070,6 +4455,7 @@ async def youtube_http_relay(request: Request):
     )
     is_home_req = (
         is_yt_host
+        and not has_user_auth_cookie
         and "sh_watch=" not in (parsed.query or "")
         and (
             (method == "GET" and parsed.path in ("", "/"))
@@ -4202,9 +4588,6 @@ async def youtube_http_relay(request: Request):
             merged_anon.update(found_anon)
             _ANON_VISITOR_CACHE = (time.time(), merged_anon)
 
-    # If a direct navigation to /watch or /shorts still hit 302 /sorry/ on a datacenter IP,
-    # redirect to / with a hash or query that triggers client-side watch navigation inside
-    # the YouTube SPA (where POST /youtubei/v1/get_watch is used and never hits /sorry/).
     if (
         is_yt_host
         and method == "GET"
@@ -4226,7 +4609,13 @@ async def youtube_http_relay(request: Request):
             b"",
         )
 
+    is_logout_req = (
+        (is_yt_host and (parsed.path or "").lower().startswith("/logout"))
+        or (host in AUTH_HOSTS and "/logout" in (parsed.path or "").lower())
+    )
     out_headers: list[list[str]] = []
+    if is_logout_req:
+        out_headers.append(["x-sh-clear-auth", "1"])
     has_set_cookie = False
     for k, v in raw_multi:
         kl = k.lower()
@@ -4234,8 +4623,14 @@ async def youtube_http_relay(request: Request):
             continue
         if kl == "set-cookie":
             has_set_cookie = True
+            v_norm = re.sub(r";\s*partitioned\b", "", v, flags=re.IGNORECASE)
+            v_norm = re.sub(r";\s*priority=[^;]*", "", v_norm, flags=re.IGNORECASE)
+            if not v_norm.lstrip().startswith("__Host-"):
+                v_norm = re.sub(r";\s*domain=google\.com\b", "; Domain=.google.com", v_norm, flags=re.IGNORECASE)
+                v_norm = re.sub(r";\s*domain=youtube\.com\b", "; Domain=.youtube.com", v_norm, flags=re.IGNORECASE)
+            v = v_norm
         out_headers.append([k, v])
-    if injected_pref and not cacheable:
+    if injected_pref and not cacheable and not is_logout_req:
         out_headers.append(
             [
                 "set-cookie",
@@ -4245,7 +4640,14 @@ async def youtube_http_relay(request: Request):
 
     if is_yt_host and status == 200 and resp_body:
         resp_body = await _maybe_patch_youtube_payload(
-            parsed, req_vid, out_headers, resp_body, stream_task, home_task, next_task
+            parsed,
+            req_vid,
+            out_headers,
+            resp_body,
+            stream_task,
+            home_task,
+            next_task,
+            has_user_auth_cookie=has_user_auth_cookie,
         )
     else:
         for t in (stream_task, home_task, next_task):
@@ -4671,36 +5073,40 @@ def _shell_html(initial_target: str) -> str:
 <meta name="theme-color" content="#0f0f0f">
 <title>Google</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="stylesheet" href="/design-system/m3.css">
-<script src="/design-system/m3.js"></script>
+<link rel="preload" href="/youtube/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/youtube/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/youtube/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin>
+<script>
+if ("serviceWorker" in navigator) {{
+  window.__shSwRegP = navigator.serviceWorker.register("/youtube/sw.js?v={RUNTIME_REV}", {{
+    scope: "/youtube/",
+    updateViaCache: "none",
+    type: "classic",
+  }}).catch(() => null);
+}}
+</script>
 <style>
-:root{{--bg:var(--md-sys-color-surface,#0f0f0f);--text:var(--md-sys-color-on-surface,#f2f2f2);--muted:var(--md-sys-color-on-surface-variant,#aaa)}}
 *{{box-sizing:border-box;touch-action:manipulation}}
-html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--md-sys-typescale-font-plain,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif);touch-action:manipulation}}
-.stage{{position:fixed;inset:0;width:100%;height:100%;background:var(--md-sys-color-surface-dim,#000);touch-action:manipulation}}
-#frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#000;touch-action:manipulation}}
-#status{{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 14px;border:1px solid var(--md-sys-color-outline-variant,rgba(255,255,255,.16));border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,rgba(17,17,17,.92));color:var(--md-sys-color-on-surface,#e8e8e8);font:11px/1.45 var(--md-sys-typescale-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);white-space:pre-wrap;pointer-events:none;box-shadow:var(--md-sys-elevation-level2,0 6px 20px rgba(0,0,0,.18))}}
-.hidden{{display:none}}
-.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#0f0f0f);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;color:#f1f1f1;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;touch-action:manipulation}}
+.stage{{position:fixed;inset:0;width:100%;height:100%;background:#0f0f0f;touch-action:manipulation}}
+#frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#0f0f0f;touch-action:manipulation}}
+.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:#0f0f0f;color:#aaa;font-size:14px;font-weight:500;text-align:center}}
 .cover.hidden{{display:none}}
-.help{{position:fixed;z-index:80;left:10px;right:10px;bottom:10px;display:none;padding:12px 16px;border:1px solid var(--md-sys-color-outline-variant,#444);border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,#171717);color:var(--md-sys-color-on-surface,#ddd);font-size:12px;box-shadow:var(--md-sys-elevation-level3,0 12px 34px rgba(0,0,0,.4))}}
-.help.show{{display:block}}
 </style>
 </head>
 <body>
-<div id="status">[YOUTUBE-DIAG] boot page executing</div>
 <main class="stage">
-  <div class="cover" id="cover">YouTubeを読み込んでいます…</div>
+  <div class="cover" id="cover">読み込み中…</div>
   <iframe id="frame" title="YouTube"
     allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture; gamepad; microphone; camera; display-capture; web-share; accelerometer; gyroscope"
     referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </main>
-<div class="help" id="help"></div>
 
 <script src="/youtube/runtime/scramjet.js?v={RUNTIME_REV}"></script>
 <script src="/youtube/runtime/controller.api.js?v={RUNTIME_REV}"></script>
 <script src="/scramjet/scramjet-utils.js?v={UTILS_VERSION}"></script>
-<script src="/openchat/chat.js" defer></script>
 <script>
 (() => {{
   "use strict";
@@ -4715,10 +5121,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   const WISP_PATH = "/wisp-youtube/";
   const RELAY_ENDPOINT = "/youtube/runtime/http-relay";
   const IMAGE_RELAY_ENDPOINT = "/youtube/runtime/image-relay";
+  const GV_STREAM_ENDPOINT = "/youtube/runtime/gv-stream";
   const STATIC_CACHE_NAME = "sh-yt-static-{RUNTIME_REV}";
   const MEDIA_CACHE_NAME = "sh-yt-media-{RUNTIME_REV}";
-  const YOUTUBE_HOSTS = new Set(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","youtu.be"]);
-  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.youtube.com"]);
+  const YOUTUBE_HOSTS = new Set(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","studio.youtube.com","upload.youtube.com","youtu.be"]);
+  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.youtube.com","myaccount.google.com","gds.google.com","ogs.google.com"]);
   const YT_IMAGE_SUFFIXES = [
     "i.ytimg.com","s.ytimg.com","img.youtube.com","ytimg.com",
     "yt3.ggpht.com","yt4.ggpht.com","ggpht.com",
@@ -4726,8 +5133,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     "ytimg.l.google.com","fonts.gstatic.com","www.gstatic.com","fonts.googleapis.com",
     "usercontent.goog","playables.usercontent.goog"
   ];
-  const SESSION_KEY = "schoolhub.youtube.target.v8";
-  const SW_GUARD = "schoolhub.youtube.sw-reload.v8";
+  const SESSION_KEY = "schoolhub.youtube.target.v9";
+  const SW_GUARD = "schoolhub.youtube.sw-reload.v9";
   const MAX_RECOVERY = 3;
   const CONTROL_WAIT = 12000;
   const HEALTH_DELAY = 22000;
@@ -4755,9 +5162,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   const $ = (id) => document.getElementById(id);
   const cover = $("cover");
-  const status = $("status");
-  const help = $("help");
-  const input = $("address");
+  const status = null;
+  const help = null;
+  const input = null;
   const frameEl = $("frame");
 
   function textOf(value) {{
@@ -4766,18 +5173,12 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   }}
 
   function log(...args) {{
-    console.log.apply(console, ["[YOUTUBE-DIAG]", ...args]);
-    if (status && !status.classList.contains("hidden")) {{
-      const line = "[YOUTUBE-DIAG] " + args.map(textOf).join(" ");
-      status.textContent += "\\n" + line;
-      status.scrollTop = status.scrollHeight;
-    }}
+    console.debug.apply(console, ["[SchoolHub YouTube]", ...args]);
   }}
 
   function fail(msg, error) {{
     const detail = error && (error.stack || error.message) ? (error.stack || error.message) : textOf(error || "");
-    log("FATAL:", msg, detail);
-    if (status) status.classList.remove("hidden");
+    console.error("[SchoolHub YouTube] FATAL:", msg, detail);
   }}
 
   async function withTimeout(promise, ms, label) {{
@@ -4798,16 +5199,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     log("STATUS:", String(text));
   }}
 
-  function escapeHtml(text) {{
-    return text.replace(/[&<>"']/g, (c) => c === "&" ? "&amp;" : c === "<" ? "&lt;" : c === ">" ? "&gt;" : c === String.fromCharCode(34) ? "&quot;" : "&#39;");
-  }}
-
-  function notify(text, ms=8500) {{
-    if (!help) return;
-    help.textContent = String(text);
-    help.classList.add("show");
-    clearTimeout(notify.timer);
-    notify.timer = setTimeout(() => help.classList.remove("show"), ms);
+  function notify(text) {{
+    log("NOTICE:", String(text));
   }}
 
   function wispUrl() {{
@@ -4822,24 +5215,50 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + WISP_PATH;
   }}
 
+  function syncOuterHistoryUrl(targetUrl) {{
+    try {{
+      const u = new URL(targetUrl);
+      const h = u.hostname.toLowerCase().replace(/\\.$/, "");
+      if (h !== "www.youtube.com" && h !== "youtube.com" && h !== "m.youtube.com") return;
+      if (u.searchParams.has("sh_watch")) return;
+      const subPath = u.pathname === "/" ? "/youtube/" : ("/youtube" + u.pathname);
+      if (
+        subPath.startsWith("/youtube/runtime/") ||
+        subPath.startsWith("/youtube/~/sj/") ||
+        subPath === "/youtube/sw.js" ||
+        subPath === "/youtube/health" ||
+        subPath.startsWith("/youtube/wisp")
+      ) {{
+        return;
+      }}
+      const nextOuter = subPath + (u.search || "") + (u.hash || "");
+      const curOuter = location.pathname + location.search + location.hash;
+      if (nextOuter !== curOuter) {{
+        history.replaceState({{ shYtTarget: u.href }}, "", nextOuter);
+      }}
+    }} catch (_) {{}}
+  }}
+
   function remember(url) {{
     if (!url) return;
     const s = String(url);
     lastUrl = s;
     if (isGoogleAuthTarget(s)) return;
-    try {{ sessionStorage.setItem(SESSION_KEY, s); }} catch (error) {{ console.debug("[SchoolHub YouTube] sessionStorage write", error); }}
-    try {{ localStorage.setItem(SESSION_KEY, s); }} catch (error) {{ console.debug("[SchoolHub YouTube] localStorage write", error); }}
+    try {{ sessionStorage.setItem(SESSION_KEY, s); }} catch (_) {{}}
+    try {{ localStorage.setItem(SESSION_KEY, s); }} catch (_) {{}}
+    syncOuterHistoryUrl(s);
   }}
 
   function restore() {{
     try {{
       const params = new URLSearchParams(location.search);
-      if (location.pathname !== "/youtube/" || params.get("q") || params.get("v") || params.get("url") || params.get("search_query")) return INITIAL;
+      if (location.pathname !== "/youtube/" || location.search.length > 1 || params.get("q") || params.get("v") || params.get("url") || params.get("search_query")) {{
+        return INITIAL;
+      }}
       const saved = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
       if (saved && !isGoogleAuthTarget(saved)) return saved;
       return INITIAL;
-    }} catch (error) {{
-      console.debug("[SchoolHub YouTube] storage read", error);
+    }} catch (_) {{
       return INITIAL;
     }}
   }}
@@ -4857,7 +5276,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       details,
     }};
     try {{
-      const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+      const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.debug;
       fn.call(console, "[SchoolHub YouTube]", event, details);
     }} catch (_) {{}}
     try {{
@@ -4927,7 +5346,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     }}
 
     let candidate = value;
-    const bareOfficial = /^(?:youtube\\.com|www\\.youtube\\.com|m\\.youtube\\.com|music\\.youtube\\.com|youtu\\.be)\\//i;
+    const bareOfficial = /^(?:youtube\\.com|www\\.youtube\\.com|m\\.youtube\\.com|music\\.youtube\\.com|studio\\.youtube\\.com|youtu\\.be)\\//i;
     if (bareOfficial.test(candidate)) candidate = "https://" + candidate;
 
     try {{
@@ -4980,16 +5399,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return "";
   }}
 
-  function setAddress(url) {{
-    if (!input) return;
-    try {{
-      const cleaned = cleanTargetUrl(url) || url;
-      const u = new URL(cleaned);
-      if (document.activeElement !== input) {{
-        input.value = u.href;
-      }}
-    }} catch (_) {{}}
-  }}
+  function setAddress() {{}}
 
   function observeUrl(url) {{
     const cleaned = cleanTargetUrl(url);
@@ -4997,7 +5407,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     if (cleaned !== lastUrl) {{
       lastUrl = cleaned;
       remember(cleaned);
-      setAddress(cleaned);
       ensureWatchPlayer(cleaned);
     }}
   }}
@@ -5049,15 +5458,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      if (
-        (h === "youtube.com" && (p === "" || p === "/")) ||
-        h.endsWith(".googlevideo.com") ||
-        h.endsWith(".c.youtube.com")
-      ) {{
-        return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
+      if (h.endsWith(".googlevideo.com") || h.endsWith(".c.youtube.com")) {{
+        const exp = u.searchParams.get("expire") || "";
+        if (p.includes(" ") || exp === "9421968081" || exp === "1685394838") {{
+          return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
+        }}
       }}
       if (
-        (p.includes("generate_204") && h !== "accounts.google.com") || p.includes("error_204") || p.includes("csi_204") ||
+        (p.includes("generate_204") && !isGoogleAuthTarget(urlStr)) || p.includes("error_204") || p.includes("csi_204") ||
         p.startsWith("/pagead/") || p.startsWith("/api/stats/") || p.startsWith("/ptracking") ||
         p.startsWith("/s/search/audio/") ||
         h.endsWith("doubleclick.net") || h.endsWith("googlesyndication.com") ||
@@ -5067,7 +5475,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       }}
       if (
         p.startsWith("/youtubei/v1/log_event") ||
-        p.startsWith("/youtubei/v1/att/") ||
         p.startsWith("/youtubei/v1/ads/") ||
         p.startsWith("/youtubei/v1/player/ad_break") ||
         p.includes("/get_midroll_info")
@@ -5197,6 +5604,47 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const sc = checkTransportShortCircuit(urlStr);
       if (sc) return sc;
 
+      // Fast path for googlevideo.com / .c.youtube.com MSE & media segments
+      try {{
+        const gvU = new URL(urlStr);
+        const gvH = gvU.hostname.toLowerCase().replace(/\\.$/, "");
+        if (gvH.endsWith(".googlevideo.com") || gvH.endsWith(".c.youtube.com")) {{
+          const gvRelayUrl = GV_STREAM_ENDPOINT + "?k=" + encodeMediaKey(gvU.href);
+          const gvHeaders = {{}};
+          if (Array.isArray(headers)) {{
+            for (const [hk, hv] of headers) {{
+              const kl = String(hk || "").toLowerCase();
+              if (kl === "range" || kl === "accept" || kl === "content-type" || kl === "x-client-data") {{
+                gvHeaders[hk] = String(hv);
+              }}
+            }}
+          }} else if (headers && typeof headers === "object") {{
+            for (const [hk, hv] of Object.entries(headers)) {{
+              const kl = String(hk || "").toLowerCase();
+              if (kl === "range" || kl === "accept" || kl === "content-type" || kl === "x-client-data") {{
+                gvHeaders[hk] = String(hv);
+              }}
+            }}
+          }}
+          const gvBody = (m !== "GET" && m !== "HEAD" && m !== "OPTIONS")
+            ? await serializeRequestBody(body)
+            : null;
+          const r = await fetch(gvRelayUrl, {{
+            method: m,
+            headers: gvHeaders,
+            body: (gvBody && gvBody.byteLength > 0) ? gvBody : undefined,
+            credentials: "omit",
+            signal,
+          }});
+          return {{
+            body: (m === "HEAD" || r.status === 204 || r.status === 304) ? new ArrayBuffer(0) : await r.arrayBuffer(),
+            headers: [...r.headers.entries()],
+            status: r.status,
+            statusText: r.statusText || "OK",
+          }};
+        }}
+      }} catch (_) {{}}
+
       // Fast path for GET/HEAD to image/icon/font hosts (ytimg, ggpht, gstatic)
       if (m === "GET" || m === "HEAD") {{
         try {{
@@ -5296,19 +5744,36 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
         if (controller) {{
           try {{
+            let clearAuth = false;
             const setCookieEntries = [];
             for (const [k, v] of respHeaders) {{
-              if (String(k || "").toLowerCase() === "set-cookie" && v) {{
+              const kl = String(k || "").toLowerCase();
+              if (kl === "x-sh-clear-auth" && v === "1") {{
+                clearAuth = true;
+              }} else if (kl === "set-cookie" && v) {{
                 let scStr = String(v);
-                scStr = scStr.replace(/;\\s*domain=google\\.com\\b/gi, "; Domain=.google.com");
-                scStr = scStr.replace(/;\\s*domain=youtube\\.com\\b/gi, "; Domain=.youtube.com");
+                scStr = scStr.replace(/;\\s*partitioned\\b/gi, "");
+                scStr = scStr.replace(/;\\s*priority=[^;]*/gi, "");
+                if (!scStr.trim().startsWith("__Host-")) {{
+                  scStr = scStr.replace(/;\\s*domain=google\\.com\\b/gi, "; Domain=.google.com");
+                  scStr = scStr.replace(/;\\s*domain=youtube\\.com\\b/gi, "; Domain=.youtube.com");
+                }}
                 setCookieEntries.push({{ url: urlStr, cookie: scStr }});
               }}
             }}
-            if (setCookieEntries.length > 0) {{
-              controller.applyCookieSyncEntries?.(setCookieEntries);
-              await controller.persistCookies?.();
-              await controller.propagateCookieSync?.(setCookieEntries, {{}});
+            if (clearAuth || setCookieEntries.length > 0) {{
+              if (clearAuth) globalThis.__shExplicitClear = true;
+              try {{
+                if (setCookieEntries.length > 0) {{
+                  controller.applyCookieSyncEntries?.(setCookieEntries);
+                }}
+                await controller.persistCookies?.();
+                if (setCookieEntries.length > 0) {{
+                  await controller.propagateCookieSync?.(setCookieEntries, {{}});
+                }}
+              }} finally {{
+                if (clearAuth) globalThis.__shExplicitClear = false;
+              }}
             }}
           }} catch (_) {{}}
         }}
@@ -5565,8 +6030,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           #player-cinematics,
           ytd-player #cinematics,
           #movie_player.playing-mode .ytp-cued-thumbnail-overlay,
-          ytd-watch-flexy yt-playability-error-supported-renderers,
-          #error-screen {{
+          #movie_player.playing-mode #error-screen {{
             display: none !important;
             pointer-events: none !important;
           }}
@@ -5610,9 +6074,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           yt-mealbar-promo-renderer,
           ytd-action-companion-ad-renderer,
           ytd-ad-hover-text-button-renderer,
-          ytd-shorts player-interstitial-renderer,
-          ytd-shorts yt-playability-error-supported-renderers,
-          #shorts-player .ytp-error {{
+          ytd-shorts player-interstitial-renderer {{
             display: none !important;
           }}
         `;
@@ -5623,33 +6085,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const rawGetAttr = window.Element.prototype.getAttribute;
       const rawRemoveAttr = window.Element.prototype.removeAttribute;
 
-      // Pre-warm video stream moov atom on pointerdown/touchstart and intercept watch clicks for instant SPA yt-navigate
       if (doc.documentElement && !doc.documentElement.dataset.shPrewarmBound) {{
         doc.documentElement.dataset.shPrewarmBound = "1";
-        const prewarmedVids = new Set();
-        const onPrewarmTrigger = (ev) => {{
-          try {{
-            const t = ev.target;
-            if (!t || typeof t.closest !== "function") return;
-            const a = t.closest("a[href*='watch?v='], a[href*='watch%3Fv%3D'], a[scramjet-attr-href*='watch?v='], a[href*='/shorts/'], a[scramjet-attr-href*='/shorts/']");
-            if (!a) return;
-            const h = rawGetAttr.call(a, "scramjet-attr-href") || rawGetAttr.call(a, "href") || a.href || "";
-            const m = h.match(/(?:[?&]|%3F|%26)v(?:=|%3D)([A-Za-z0-9_-]{{11}})/) || h.match(/\\/shorts\\/([A-Za-z0-9_-]{{11}})/);
-            if (!m) return;
-            const vid = m[1];
-            if (prewarmedVids.has(vid)) return;
-            prewarmedVids.add(vid);
-            fetch(location.origin + "/youtube/runtime/stream/" + vid + "?prewarm=1", {{
-              method: "HEAD",
-              credentials: "omit",
-              priority: "low"
-            }}).catch(() => {{}});
-          }} catch (_) {{}}
-        }};
-        doc.addEventListener("pointerdown", onPrewarmTrigger, {{ passive: true, capture: true }});
-        doc.addEventListener("touchstart", onPrewarmTrigger, {{ passive: true, capture: true }});
-
-    const onWatchClick = (ev) => {{
+        const onWatchClick = (ev) => {{
           try {{
             if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
             const t = ev.target;
@@ -5664,29 +6102,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             const targetWatchUrl = mShorts
               ? ("https://www.youtube.com/shorts/" + vid)
               : ("https://www.youtube.com/watch?v=" + vid);
-            if (!prewarmedVids.has(vid)) {{
-              prewarmedVids.add(vid);
-              fetch(location.origin + "/youtube/runtime/stream/" + vid + "?prewarm=1", {{
-                method: "HEAD",
-                credentials: "omit",
-                priority: "low"
-              }}).catch(() => {{}});
-            }}
             lastShWatchTriggered = vid;
             lastShWatchTime = Date.now();
             setTimeout(() => {{
-              try {{
-                const cur = readFrameTarget() || "";
-                const curVid = extractVideoId(cur);
-                const flexy = frameEl.contentDocument?.querySelector("ytd-watch-flexy");
-                const flexyVid = flexy ? (rawGetAttr.call(flexy, "video-id") || "") : "";
-                if (curVid !== vid && flexyVid !== vid) {{
-                  navigate(targetWatchUrl, "watch-click");
-                }} else {{
-                  observeUrl(targetWatchUrl);
-                }}
-              }} catch (_) {{}}
-            }}, 350);
+              try {{ observeUrl(readFrameTarget() || targetWatchUrl); }} catch (_) {{}}
+            }}, 400);
           }} catch (_) {{}}
         }};
         doc.addEventListener("click", onWatchClick, {{ passive: true, capture: true }});
@@ -5875,6 +6295,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         if (videoId) {{
           const curSrcAttr = rawGetAttr.call(mainVid, "src") || mainVid.src || "";
           const directStreamUrl = location.origin + "/youtube/runtime/stream/" + videoId;
+          let isYtAuthed = false;
+          try {{
+            const cDump = String(controller?.cookieJar?.dump?.() || localStorage.getItem("__sh_cookie_vault_yt") || "");
+            isYtAuthed = /(?:^|[\\s;"])(?:SAPISID|__Secure-3PAPISID)=([^;\\s"]+)/.test(cDump);
+          }} catch (_) {{}}
           if (mainVid.dataset.shActiveVid !== videoId) {{
             mainVid.dataset.shActiveVid = videoId;
             mainVid.dataset.shActiveSince = String(Date.now());
@@ -5883,13 +6308,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           const activeElapsed = Date.now() - Number(mainVid.dataset.shActiveSince || Date.now());
           const retryCount = Number(mainVid.dataset.shDirectRetryCount || 0);
           const hasValidDirectSrc = curSrcAttr.includes("/youtube/runtime/stream/" + videoId) || curSrcAttr.includes("/yts/stream/" + videoId);
+          const hasBlobMseSrc = curSrcAttr.startsWith("blob:");
+          const noSrcWaitMs = isYtAuthed ? 8000 : 2500;
+          const blobWaitMs = isYtAuthed ? 15000 : 8500;
           if (
             mainVid.readyState < 2 &&
             Number(mainVid.currentTime || 0) === 0 &&
             retryCount < 3 &&
             (
               Boolean(mainVid.error) ||
-              (!hasValidDirectSrc && activeElapsed > 1200) ||
+              (!hasValidDirectSrc && !hasBlobMseSrc && activeElapsed > noSrcWaitMs) ||
+              (hasBlobMseSrc && mainVid.readyState === 0 && activeElapsed > blobWaitMs) ||
               (hasValidDirectSrc && activeElapsed > 4500)
             )
           ) {{
@@ -6328,10 +6757,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       clientLog("info", "service-worker-already-controlled", {{
         scriptURL: String(navigator.serviceWorker.controller?.scriptURL || ""),
       }});
-      navigator.serviceWorker.getRegistration(SW_SCOPE).then((r) => {{ if (r) registration = r; }}).catch(() => {{}});
+      (window.__shSwRegP || navigator.serviceWorker.getRegistration(SW_SCOPE)).then((r) => {{ if (r) registration = r; }}).catch(() => {{}});
     }} else {{
       registration = await withTimeout(
-        navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }}),
+        window.__shSwRegP || navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }}),
         4500,
         "SW register"
       ).catch(async () => await navigator.serviceWorker.getRegistration(SW_SCOPE));
@@ -6381,9 +6810,16 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     ready = true;
 
     const stored = restore();
-    if (input) input.value = stored;
     await navigate(stored, "YouTube起動");
   }}
+
+  window.addEventListener("popstate", (ev) => {{
+    if (!ready || !frame) return;
+    const stTarget = ev.state?.shYtTarget;
+    if (stTarget && stTarget !== lastUrl) {{
+      navigate(stTarget, "popstate").catch(() => {{}});
+    }}
+  }});
 
   window.addEventListener("online", () => {{
     if (!ready || !frame) return;
@@ -6404,7 +6840,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     console.error("[SchoolHub YouTube] boot failed", error);
     cover.classList.remove("hidden");
     cover.textContent = "YouTubeを起動できませんでした。ページを再読み込みしてください。";
-    notify("Service Worker / Scramjet / Wispの初期化に失敗しました。ページを再読み込みしてください。", 12000);
   }});
 
   document.addEventListener("visibilitychange", () => {{
@@ -6420,35 +6855,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 </html>"""
 
 
-@router.get("/youtube", include_in_schema=False)
-async def youtube_redirect():
-    return RedirectResponse("/youtube/", status_code=307)
-
-
-@router.get("/youtube/", response_class=HTMLResponse, include_in_schema=False)
-@router.get("/youtube/watch", response_class=HTMLResponse, include_in_schema=False)
-@router.get("/youtube/results", response_class=HTMLResponse, include_in_schema=False)
-@router.get("/youtube/shorts", response_class=HTMLResponse, include_in_schema=False)
-@router.get("/youtube/shorts/{video_id}", response_class=HTMLResponse, include_in_schema=False)
-async def youtube_home(
-    request: Request,
-    q: str = "",
-    v: str = "",
-    url: str = "",
-    search_query: str = "",
-    video_id: str = "",
-):
-    raw_in = q.strip() or url.strip()
-    if not raw_in:
-        if video_id.strip():
-            raw_in = f"https://www.youtube.com/shorts/{video_id.strip()}"
-        elif v.strip():
-            raw_in = f"https://www.youtube.com/watch?v={v.strip()}"
-        elif search_query.strip():
-            raw_in = search_query.strip()
-        elif request.url.path.rstrip("/") == "/youtube/shorts":
-            raw_in = "https://www.youtube.com/shorts"
-    target = _target_from_input(raw_in)
+def _build_youtube_shell_response(target: str) -> HTMLResponse:
     parsed_target = urlparse(target)
     init_vid = _extract_request_video_id(parsed_target, b"")
     if init_vid:
@@ -6457,12 +6864,9 @@ async def youtube_home(
             init_vid,
             f"https://invid-api.poketube.fun/companion/latest_version?id={init_vid}&itag=18&local=true",
         )
+        asyncio.create_task(_fetch_android_vr_player(init_vid))
         asyncio.create_task(_resolve_stream_info(init_vid))
         asyncio.create_task(_get_anon_visitor_cookie_header())
-    print(
-        f"[YOUTUBE] shell query_present={bool(raw_in)} target_host={(parsed_target.hostname or '').lower()} init_vid={init_vid}",
-        flush=True,
-    )
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
@@ -6484,6 +6888,54 @@ async def youtube_home(
     return response
 
 
+@router.get("/youtube-beta", include_in_schema=False)
+@router.get("/youtube-beta/", include_in_schema=False)
+@router.get("/youtube-beta/{subpath:path}", include_in_schema=False)
+async def youtube_beta_legacy_redirect(request: Request, subpath: str = ""):
+    dest = "/youtube/" + subpath.lstrip("/") if subpath else "/youtube/"
+    if request.url.query:
+        dest += "?" + request.url.query
+    return RedirectResponse(dest, status_code=307)
+
+
+@router.get("/youtube", include_in_schema=False)
+async def youtube_redirect(request: Request):
+    dest = "/youtube/" + ("?" + request.url.query if request.url.query else "")
+    return RedirectResponse(dest, status_code=307)
+
+
+@router.get("/youtube/", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/watch", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/results", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/shorts", response_class=HTMLResponse, include_in_schema=False)
+@router.get("/youtube/shorts/{video_id}", response_class=HTMLResponse, include_in_schema=False)
+async def youtube_home(
+    request: Request,
+    q: str = "",
+    v: str = "",
+    url: str = "",
+    search_query: str = "",
+    video_id: str = "",
+):
+    raw_in = q.strip() or url.strip()
+    if not raw_in:
+        if video_id.strip():
+            raw_in = f"https://www.youtube.com/shorts/{video_id.strip()}"
+        elif v.strip():
+            qs_extra = "&".join(
+                f"{quote(k)}={quote(val)}"
+                for k, val in request.query_params.multi_items()
+                if k not in ("v", "q", "url")
+            )
+            raw_in = f"https://www.youtube.com/watch?v={v.strip()}" + (f"&{qs_extra}" if qs_extra else "")
+        elif search_query.strip():
+            raw_in = "https://www.youtube.com/results?" + request.url.query
+        elif request.url.path.rstrip("/") == "/youtube/shorts":
+            raw_in = "https://www.youtube.com/shorts"
+    target = _target_from_input(raw_in)
+    return _build_youtube_shell_response(target)
+
+
 @router.get("/youtube/health", include_in_schema=False)
 async def youtube_health():
     return {
@@ -6503,22 +6955,36 @@ async def youtube_health():
         "virtual_prefix": "/youtube/~/sj/",
         "transports": ["hybrid", "libcurl", "epoxy"],
         "features": [
+            "official-ui-only",
             "search",
             "direct-video-navigation",
+            "deep-link-routing",
             "google-login",
-            "back",
-            "forward",
-            "reload",
-            "spa-url-watch",
-            "escaped-link-capture",
+            "hd-mse-streaming",
+            "shorts",
+            "comments-likes-subscriptions",
+            "studio-uploads",
             "cookie-persistence",
             "bounded-auto-recovery",
-            "visibility-recovery",
             "wisp-stream-packet-buffer",
             "webkit-stream-transfer-compat",
             "webkit-sw-post-body-compat",
             "http2-chrome-tls-relay",
-            "native-movie-player-stream-patch",
-            "home-feed-native-population",
         ],
     }
+
+
+@router.get("/youtube/{subpath:path}", response_class=HTMLResponse, include_in_schema=False)
+async def youtube_subpath(request: Request, subpath: str):
+    clean_sub = (subpath or "").lstrip("/")
+    if (
+        clean_sub.startswith(("runtime/", "~/sj/", "wisp"))
+        or clean_sub in ("sw.js", "health", "google-login")
+    ):
+        return Response("Not Found", status_code=404)
+    upstream_url = "https://www.youtube.com/" + clean_sub
+    if request.url.query:
+        upstream_url += "?" + request.url.query
+    target = _target_from_input(upstream_url)
+    return _build_youtube_shell_response(target)
+

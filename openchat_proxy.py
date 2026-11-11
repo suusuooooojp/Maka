@@ -3164,7 +3164,6 @@ _CLIENT_JS = r"""
     if (p.startsWith('/play') || p.startsWith('/bloxd') || p.startsWith('/proxy_subdomain/bloxd') || p.startsWith('/index/') || h.includes('bloxd')) return 'Bloxd.io(安定)';
     if (p.startsWith('/deep') || p.startsWith('/diep') || p.startsWith('/deeeep') || h.includes('diep') || h.includes('deeeep')) return 'Diep.io';
     if (p.startsWith('/taiko') || p.startsWith('/songs/') || p.startsWith('/src/') || h.includes('taiko')) return '太鼓の達人(pc推奨)';
-    if (p.startsWith('/youtube-beta')) return 'youtube(beta)';
     if (p.startsWith('/youtube') || h.includes('youtube')) return 'YouTube';
     if (p.startsWith('/wakame') || p.startsWith('/watch') || p.startsWith('/search') || p.startsWith('/channel') || p.startsWith('/hashtag') || p.startsWith('/playlist')) return 'わかめ\u3000ぷらす';
     if (p.startsWith('/twitch') || h.includes('twitch')) return 'Twitch(安定)';
@@ -7673,7 +7672,7 @@ _CLIENT_JS = r"""
     }
   })();
 
-  const isHeavyBootPage = /^\/(tver|cloudmoon)(\/|$)/i.test(window.location.pathname || '');
+  const isHeavyBootPage = /^\/(tver|cloudmoon|youtube|instagram)(\/|$)/i.test(window.location.pathname || '');
   let networkStarted = false;
   function startOpenChatNetwork() {
     if (networkStarted) return;

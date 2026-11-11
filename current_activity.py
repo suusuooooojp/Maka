@@ -49,7 +49,6 @@ _CANONICAL_SERVICES = frozenset({
     "School Hub",
     "マインクラフト(日本語版)",
     "YouTube",
-    "youtube(beta)",
     "わかめ\u3000ぷらす",
     "太鼓の達人(pc推奨)",
     "Interstellar",
@@ -272,8 +271,6 @@ def _detect_service_from_path(path: str) -> str:
         return "School Hub"
     if p.startswith("/minecraft") or p.startswith("/eagler"):
         return "マインクラフト(日本語版)"
-    if p.startswith("/youtube-beta"):
-        return "youtube(beta)"
     if p.startswith("/youtube"):
         return "YouTube"
     if p.startswith("/tiktok"):
@@ -369,8 +366,6 @@ def _normalize_service_name(service: str, path: str = "") -> str:
         return "LINE"
     if sl in ("florr.io", "florr") or "florr" in sl:
         return "Florr.io"
-    if "youtube(beta)" in sl or "youtube-beta" in sl or ("youtube" in sl and "beta" in sl):
-        return "youtube(beta)"
     if sl == "youtube" or "youtube" in sl:
         return "YouTube"
     if sl == "instagram" or "instagram" in sl:

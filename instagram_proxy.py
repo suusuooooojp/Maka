@@ -125,7 +125,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261110-ig-v10"
+RUNTIME_REV = "20261112-ig-v20"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -139,9 +139,16 @@ IG_HOSTS = {
     "www.instagram.com",
     "i.instagram.com",
     "graph.instagram.com",
+    "edge-chat.instagram.com",
+    "upload.instagram.com",
+    "accountscenter.instagram.com",
+    "auth.instagram.com",
     "about.instagram.com",
     "help.instagram.com",
     "l.instagram.com",
+    "rupload.facebook.com",
+    "chat-e2ee-ig.facebook.com",
+    "web-chat-e2ee.facebook.com",
     "facebook.com",
     "www.facebook.com",
     "m.facebook.com",
@@ -157,6 +164,9 @@ AUTH_HOSTS = {
     "www.facebook.com",
     "m.facebook.com",
     "facebook.com",
+    "accountscenter.facebook.com",
+    "accountscenter.instagram.com",
+    "auth.instagram.com",
     "accounts.google.com",
     "appleid.apple.com",
 }
@@ -183,9 +193,9 @@ def _patch_controller_api(source: bytes) -> bytes:
         'try{indexedDB.deleteDatabase("__scramjet_controller")}catch(_){}'
         'const _shVaultKey="__sh_cookie_vault_instagram";'
         "function g(){return Promise.resolve(null)}"
-        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){try{let ca=JSON.parse(a.cookies||'{}'),cb=JSON.parse(b.cookies||'{}'),m=a.updatedAt>=b.updatedAt?{...cb,...ca}:{...ca,...cb};res={updatedAt:Math.max(a.updatedAt||0,b.updatedAt||0),cookies:JSON.stringify(m)}}catch(_){res=a.updatedAt>=b.updatedAt?a:b}}else{res=a||b||null}return res}"
+        "function _readVaultRaw(){let a=null,b=null;try{let s=localStorage.getItem(_shVaultKey);if(s)a=u(JSON.parse(s))}catch(_){}try{let s=sessionStorage.getItem(_shVaultKey);if(s)b=u(JSON.parse(s))}catch(_){}let res=null;if(a&&b){res=a.updatedAt>=b.updatedAt?a:b}else{res=a||b||null}return res}"
         "async function w(){return _readVaultRaw()}"
-        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0){merged=s.cookies}else{merged=JSON.stringify({...prev,...curr})}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
+        "async function k(e,t){try{let s=_readVaultRaw(),i=Math.max(Date.now(),t+1,(s?.updatedAt??0)+1),merged=e;try{let prev=JSON.parse(s?.cookies||'{}'),curr=JSON.parse(e||'{}');if(Object.keys(curr).length===0&&Object.keys(prev).length>0&&!globalThis.__shExplicitClear){merged=s.cookies}}catch(_){}let payload=JSON.stringify({updatedAt:i,cookies:merged});try{localStorage.setItem(_shVaultKey,payload)}catch(_){}try{sessionStorage.setItem(_shVaultKey,payload)}catch(_){}return i}catch(e){return t}}"
     )
     text = text.replace(old_idb, new_idb, 1)
     text = text.replace(
@@ -1628,6 +1638,12 @@ async def ig_sj_direct_fallback(rest: str, request: Request):
             )
         if any(host == s or host.endswith("." + s) for s in IG_MEDIA_SUFFIXES):
             return await _serve_ig_media_url(virtual_url, request)
+        accept_hdr = (request.headers.get("accept") or "").lower()
+        if request.method == "GET" and "text/html" in accept_hdr and (host in IG_HOSTS or host in AUTH_HOSTS):
+            return RedirectResponse(
+                f"/instagram/?url={quote(virtual_url, safe='')}",
+                status_code=307,
+            )
     except Exception:
         return Response(b"bad virtual url", status_code=400)
     if request.method == "POST":
@@ -1641,23 +1657,36 @@ async def ig_sj_direct_fallback(rest: str, request: Request):
 
 
 def _normalize_ig_set_cookie(cookie_val: str, host: str) -> str:
-    """Ensure cookies set by instagram.com / www.instagram.com / i.instagram.com
-    share Domain=.instagram.com in Scramjet's CookieJar."""
-    if not cookie_val or not (host == "instagram.com" or host.endswith(".instagram.com")):
+    """Ensure cookies set by instagram.com / facebook.com subdomains share
+    Domain=.instagram.com / Domain=.facebook.com in Scramjet's CookieJar."""
+    if not cookie_val:
         return cookie_val
-    first_semi = cookie_val.find(";")
-    name_val = cookie_val if first_semi < 0 else cookie_val[:first_semi]
+    cleaned = re.sub(r";\s*partitioned\b", "", cookie_val, flags=re.I)
+    cleaned = re.sub(r";\s*priority=[^;]*", "", cleaned, flags=re.I)
+    first_semi = cleaned.find(";")
+    name_val = cleaned if first_semi < 0 else cleaned[:first_semi]
     cookie_name = name_val.split("=", 1)[0].strip()
     if cookie_name.startswith("__Host-"):
-        return cookie_val
-    if re.search(r";\s*domain\s*=", cookie_val, re.I):
-        return re.sub(
-            r"(;\s*domain\s*=\s*)(?:www\.)?instagram\.com\b",
-            r"\1.instagram.com",
-            cookie_val,
-            flags=re.I,
-        )
-    return cookie_val.rstrip("; ") + "; Domain=.instagram.com"
+        return cleaned
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        if re.search(r";\s*domain\s*=", cleaned, re.I):
+            return re.sub(
+                r"(;\s*domain\s*=\s*)(?:www\.|i\.|accountscenter\.|auth\.)?instagram\.com\b",
+                r"\1.instagram.com",
+                cleaned,
+                flags=re.I,
+            )
+        return cleaned.rstrip("; ") + "; Domain=.instagram.com"
+    if host == "facebook.com" or host.endswith(".facebook.com"):
+        if re.search(r";\s*domain\s*=", cleaned, re.I):
+            return re.sub(
+                r"(;\s*domain\s*=\s*)(?:www\.|m\.|web\.)?facebook\.com\b",
+                r"\1.facebook.com",
+                cleaned,
+                flags=re.I,
+            )
+        return cleaned.rstrip("; ") + "; Domain=.facebook.com"
+    return cleaned
 
 
 def _select_curl_impersonate(ua: str) -> str:
@@ -1729,18 +1758,17 @@ async def _ig_raw_single_request(
     fresh_curl: bool,
     impersonate_profile: str,
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
-    global _CURL_DISABLED_UNTIL
     if not use_httpx and StatelessCurlSession is not None and time.time() >= _CURL_DISABLED_UNTIL:
         ephemeral: StatelessCurlSession | None = None
         session = None
         try:
-            curl_timeout = min(float(timeout), 4.5)
+            curl_timeout = max(5.0, float(timeout))
             if fresh_curl:
                 ephemeral = StatelessCurlSession(
                     impersonate=impersonate_profile,
                     default_headers=False,
                     allow_redirects=False,
-                    timeout=5,
+                    timeout=int(max(15.0, curl_timeout)),
                     max_clients=4,
                 )
                 session = ephemeral
@@ -1761,7 +1789,6 @@ async def _ig_raw_single_request(
             raw_multi = list(upstream.headers.multi_items())
             return status, status_text, resp_body, raw_multi
         except Exception:
-            _CURL_DISABLED_UNTIL = time.time() + 600.0
             if not fresh_curl and session is not None:
                 try:
                     asyncio.create_task(_reset_curl_session(session))
@@ -1797,7 +1824,7 @@ async def _ig_upstream_request(
     body: bytes | None = None,
     *,
     timeout: float = 22.0,
-    prefer_httpx: bool = True,
+    prefer_httpx: bool = False,
     fresh_curl: bool = False,
     impersonate_profile: str = "chrome131",
 ) -> tuple[int, str, bytes, list[tuple[str, str]]]:
@@ -2419,6 +2446,21 @@ async def ig_http_relay(request: Request):
             b"{}",
         )
 
+    if method == "OPTIONS":
+        return _pack_relay_response(
+            204,
+            "No Content",
+            [
+                ["access-control-allow-origin", "https://www.instagram.com"],
+                ["access-control-allow-credentials", "true"],
+                ["access-control-allow-methods", "GET, HEAD, POST, PUT, DELETE, PATCH, OPTIONS"],
+                ["access-control-allow-headers", "*"],
+                ["access-control-expose-headers", "*"],
+                ["access-control-max-age", "86400"],
+            ],
+            b"",
+        )
+
     req_headers: list[tuple[str, str]] = []
     seen_ua = False
     seen_al = False
@@ -2466,7 +2508,35 @@ async def ig_http_relay(request: Request):
     if cookie_str:
         header_dict["Cookie"] = cookie_str
 
+    if host in IG_HOSTS or host in AUTH_HOSTS:
+        if not any(hk.lower() == "sec-ch-ua" for hk in header_dict):
+            header_dict["Sec-CH-UA"] = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"'
+        if not any(hk.lower() == "sec-ch-ua-mobile" for hk in header_dict):
+            header_dict["Sec-CH-UA-Mobile"] = "?0"
+        if not any(hk.lower() == "sec-ch-ua-platform" for hk in header_dict):
+            header_dict["Sec-CH-UA-Platform"] = '"Windows"'
+
     impersonate_profile = _select_curl_impersonate(client_ua)
+
+    # Sanitize leaked proxy Origin/Referer headers so Instagram CSRF & CORS checks always pass
+    def _is_leaked_proxy_hdr(u_val: str) -> bool:
+        if not u_val:
+            return True
+        ul = u_val.lower()
+        return (
+            "/~/sj/" in ul
+            or ".onrender.com" in ul
+            or ".ai.studio" in ul
+            or "localhost" in ul
+            or "127.0.0.1" in ul
+        )
+
+    for hk in list(header_dict.keys()):
+        hkl = hk.lower()
+        if hkl == "origin" and _is_leaked_proxy_hdr(header_dict[hk]):
+            header_dict[hk] = "https://www.instagram.com" if ("instagram.com" in host or host == "rupload.facebook.com") else f"https://{host}"
+        elif hkl == "referer" and _is_leaked_proxy_hdr(header_dict[hk]):
+            header_dict[hk] = "https://www.instagram.com/" if ("instagram.com" in host or host == "rupload.facebook.com") else f"https://{host}/"
 
     # Inject standard Sec-Fetch-* headers when missing so Instagram's SSR and GraphQL endpoints
     # treat requests identically to direct browser navigation/XHR.
@@ -2481,7 +2551,7 @@ async def ig_http_relay(request: Request):
             is_doc_nav = (
                 method == "GET"
                 and ("text/html" in accept_val or not accept_val)
-                and not req_path.startswith(("/api/", "/ajax/", "/graphql"))
+                and not req_path.startswith(("/api/", "/ajax/", "/graphql", "/rupload_"))
                 and not req_path.endswith((".js", ".css", ".json", ".png", ".jpg", ".webp", ".woff2"))
             )
             if is_doc_nav:
@@ -2494,11 +2564,11 @@ async def ig_http_relay(request: Request):
             else:
                 header_dict["Sec-Fetch-Dest"] = "empty"
                 header_dict["Sec-Fetch-Mode"] = "cors"
-                header_dict["Sec-Fetch-Site"] = "same-origin"
-                if not any(hk.lower() == "origin" for hk in header_dict) and method == "POST":
-                    header_dict["Origin"] = f"https://{host}"
+                header_dict["Sec-Fetch-Site"] = "same-origin" if host in ("www.instagram.com", "instagram.com") else "same-site"
+                if not any(hk.lower() == "origin" for hk in header_dict) and method in ("POST", "PUT", "DELETE", "OPTIONS"):
+                    header_dict["Origin"] = "https://www.instagram.com" if ("instagram.com" in host or host == "rupload.facebook.com") else f"https://{host}"
                 if not any(hk.lower() == "referer" for hk in header_dict):
-                    header_dict["Referer"] = f"https://{host}/"
+                    header_dict["Referer"] = "https://www.instagram.com/" if ("instagram.com" in host or host == "rupload.facebook.com") else f"https://{host}/"
 
     req_path_clean = req_path.rstrip("/")
     if (
@@ -2529,11 +2599,11 @@ async def ig_http_relay(request: Request):
                 return bridged_ar
 
     if (
-        method == "POST"
-        and host in ("www.instagram.com", "instagram.com")
+        (host in ("www.instagram.com", "instagram.com", "i.instagram.com", "upload.instagram.com") or host == "rupload.facebook.com")
         and (
-            req_path.startswith("/api/v1/web/accounts/")
+            req_path.startswith(("/api/", "/ajax/", "/rupload_"))
             or req_path_clean in ("/api/graphql", "/graphql/query", "/graphql")
+            or host == "rupload.facebook.com"
         )
     ):
         m_csrf = re.search(r"(?:^|[;\s])csrftoken=([^;\s]+)", cookie_str)
@@ -2543,17 +2613,18 @@ async def ig_http_relay(request: Request):
                 if hk.lower() == "x-csrftoken" and hv.strip():
                     csrf_val = hv.strip()
                     break
-        if not csrf_val:
+        if not csrf_val and method in ("POST", "PUT", "DELETE"):
             csrf_val = "igcsrf" + str(int(time.time()))
-        header_dict["X-CSRFToken"] = csrf_val
-        if "csrftoken=" not in cookie_str:
+        if csrf_val and not any(hk.lower() == "x-csrftoken" for hk in header_dict):
+            header_dict["X-CSRFToken"] = csrf_val
+        if csrf_val and "csrftoken=" not in cookie_str:
             cookie_str = f"{cookie_str}; csrftoken={csrf_val}" if cookie_str else f"csrftoken={csrf_val}"
             header_dict["Cookie"] = cookie_str
         if not any(hk.lower() == "x-ig-app-id" for hk in header_dict):
             header_dict["X-IG-App-ID"] = "936619743392459"
         if not any(hk.lower() == "x-requested-with" for hk in header_dict) and req_path.startswith("/api/v1/"):
             header_dict["X-Requested-With"] = "XMLHttpRequest"
-        if not any(hk.lower() == "origin" for hk in header_dict):
+        if not any(hk.lower() == "origin" for hk in header_dict) and method in ("POST", "PUT", "DELETE", "OPTIONS"):
             header_dict["Origin"] = "https://www.instagram.com"
         if not any(hk.lower() == "referer" for hk in header_dict):
             header_dict["Referer"] = "https://www.instagram.com/"
@@ -2608,8 +2679,8 @@ async def ig_http_relay(request: Request):
             url=url,
             headers=header_dict,
             body=req_body if req_body else None,
-            timeout=22.0,
-            prefer_httpx=True,
+            timeout=25.0,
+            prefer_httpx=False,
             fresh_curl=is_credential_login,
             impersonate_profile=impersonate_profile,
         )
@@ -2646,7 +2717,23 @@ async def ig_http_relay(request: Request):
             b'for (;;);{"__type":"error_response"}',
         )
 
+    is_logout_req = (
+        host in ("www.instagram.com", "instagram.com")
+        and (
+            req_path.startswith("/accounts/logout")
+            or req_path.startswith("/api/v1/web/accounts/logout")
+        )
+    )
+    is_cross_sub_api = host in (
+        "i.instagram.com",
+        "graph.instagram.com",
+        "upload.instagram.com",
+        "rupload.facebook.com",
+        "edge-chat.instagram.com",
+    )
     out_headers: list[list[str]] = []
+    if is_logout_req:
+        out_headers.append(["x-sh-clear-auth", "1"])
     has_set_cookie = False
     is_html = False
     resp_media_type = "application/octet-stream"
@@ -2654,6 +2741,12 @@ async def ig_http_relay(request: Request):
     for k, v in raw_multi:
         kl = k.lower()
         if kl in _RELAY_STRIP_RESP_HEADERS or kl.startswith(":"):
+            continue
+        if is_cross_sub_api and kl in (
+            "access-control-allow-origin",
+            "access-control-allow-credentials",
+            "access-control-expose-headers",
+        ):
             continue
         if kl == "set-cookie":
             has_set_cookie = True
@@ -2666,6 +2759,11 @@ async def ig_http_relay(request: Request):
         elif kl == "cache-control":
             resp_cc = v
         out_headers.append([k, v])
+
+    if is_cross_sub_api:
+        out_headers.append(["access-control-allow-origin", "https://www.instagram.com"])
+        out_headers.append(["access-control-allow-credentials", "true"])
+        out_headers.append(["access-control-expose-headers", "*"])
 
     if is_html and status == 200 and resp_body:
         if b"modulepreload" in resp_body:
@@ -2726,11 +2824,208 @@ async def ig_http_relay(request: Request):
     return _pack_relay_response(status, status_text, out_headers, resp_body)
 
 
-@router.websocket("/instagram/wisp/")
-async def ig_wisp_route(websocket: WebSocket):
+async def _ig_buffered_wisp_endpoint(websocket: WebSocket) -> None:
+    """Race-free Wisp v1/v2 endpoint for Instagram Direct Messages (MQTT/WebSocket)
+    that buffers early 0x02 TLS ClientHello packets while TCP connects."""
     import app as host_app
 
-    await host_app.wisp_media_endpoint(websocket)
+    requested = list(websocket.scope.get("subprotocols", []) or [])
+    v2 = bool(requested)
+    try:
+        await websocket.accept(subprotocol=requested[0] if requested else None)
+    except Exception:
+        return
+
+    streams: dict[int, asyncio.StreamWriter] = {}
+    tasks: dict[int, asyncio.Task] = {}
+    pending_queues: dict[int, list[bytes]] = {}
+    extensions: set[int] = set()
+    alive = True
+
+    async def send_packet(data: bytes) -> bool:
+        nonlocal alive
+        if not alive:
+            return False
+        try:
+            await websocket.send_bytes(data)
+            return True
+        except Exception:
+            alive = False
+            return False
+
+    async def close_stream(stream_id: int, reason: int = 2, notify: bool = True):
+        pending_queues.pop(stream_id, None)
+        writer = streams.pop(stream_id, None)
+        task = tasks.pop(stream_id, None)
+        if task and task is not asyncio.current_task():
+            task.cancel()
+        if writer:
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+        if notify:
+            await send_packet(host_app.wisp_close(stream_id, reason))
+
+    async def pump(stream_id: int, reader: asyncio.StreamReader):
+        try:
+            while alive:
+                data = await asyncio.wait_for(
+                    reader.read(64 * 1024), host_app.WISP_IDLE_TIMEOUT
+                )
+                if not data:
+                    await send_packet(host_app.wisp_close(stream_id, 2))
+                    break
+                if not await send_packet(host_app.wisp_packet(0x02, stream_id, data)):
+                    break
+        except Exception:
+            await send_packet(host_app.wisp_close(stream_id, 0x03))
+        finally:
+            pending_queues.pop(stream_id, None)
+            writer = streams.pop(stream_id, None)
+            tasks.pop(stream_id, None)
+            if writer:
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+    try:
+        if v2:
+            await send_packet(host_app.wisp_info())
+            while True:
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    return
+                raw = msg.get("bytes") or b""
+                if len(raw) < 5:
+                    continue
+                kind = raw[0]
+                stream_id = struct.unpack_from("<I", raw, 1)[0]
+                payload = raw[5:]
+                if stream_id != 0:
+                    await send_packet(host_app.wisp_close(stream_id, 0x41))
+                    continue
+                if kind == 0x05:
+                    if len(payload) < 2 or payload[0] != 2:
+                        await send_packet(host_app.wisp_close(0, 0x04))
+                        return
+                    extensions = host_app.wisp_extensions(payload)
+                    break
+                if kind == 0x03:
+                    v2 = False
+                    break
+                if kind == 0x04:
+                    return
+                await send_packet(host_app.wisp_close(0, 0x04))
+                return
+
+        await send_packet(host_app.wisp_continue(0, host_app.WISP_BUFFER))
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            raw = msg.get("bytes")
+            if not raw or len(raw) < 5:
+                continue
+            kind = raw[0]
+            stream_id = struct.unpack_from("<I", raw, 1)[0]
+            payload = raw[5:]
+            if kind == 0x01:
+                if (
+                    stream_id == 0
+                    or stream_id in streams
+                    or stream_id in pending_queues
+                    or len(streams) + len(pending_queues) >= host_app.WISP_MAX_STREAMS
+                    or len(payload) < 3
+                ):
+                    await send_packet(host_app.wisp_close(stream_id, 0x41))
+                    continue
+                stream_type = payload[0]
+                port = struct.unpack_from("<H", payload, 1)[0]
+                try:
+                    host_w = payload[3:].decode("utf-8", "strict").strip().rstrip(".").lower()
+                except UnicodeDecodeError:
+                    await send_packet(host_app.wisp_close(stream_id, 0x41))
+                    continue
+                if (
+                    stream_type != 1
+                    or not host_w
+                    or len(host_w) > 253
+                    or not (1 <= port <= 65535)
+                    or any(c.isspace() for c in host_w)
+                ):
+                    await send_packet(host_app.wisp_close(stream_id, 0x41))
+                    continue
+
+                pending_queues[stream_id] = []
+
+                async def open_one(sid=stream_id, hostname=host_w, dst_port=port):
+                    try:
+                        reader, writer = await host_app.public_tcp(hostname, dst_port)
+                        buf = pending_queues.pop(sid, None)
+                        if buf is None:
+                            writer.close()
+                            try:
+                                await writer.wait_closed()
+                            except Exception:
+                                pass
+                            return
+                        streams[sid] = writer
+                        if v2 and 0x05 in extensions:
+                            await send_packet(host_app.wisp_continue(sid, host_app.WISP_BUFFER))
+                        if buf:
+                            for chunk in buf:
+                                writer.write(chunk)
+                            await writer.drain()
+                            await send_packet(host_app.wisp_continue(sid, host_app.WISP_REPLENISH))
+                        tasks[sid] = asyncio.create_task(pump(sid, reader))
+                    except Exception:
+                        pending_queues.pop(sid, None)
+                        await send_packet(host_app.wisp_close(sid, 0x03))
+
+                tasks[stream_id] = asyncio.create_task(open_one())
+            elif kind == 0x02:
+                writer = streams.get(stream_id)
+                if writer is not None:
+                    try:
+                        if payload:
+                            writer.write(payload)
+                            await writer.drain()
+                            await send_packet(host_app.wisp_continue(stream_id, host_app.WISP_REPLENISH))
+                    except Exception:
+                        await close_stream(stream_id, 0x03)
+                elif stream_id in pending_queues:
+                    if payload:
+                        pending_queues[stream_id].append(payload)
+            elif kind == 0x04:
+                await close_stream(stream_id, 0x02)
+    except (WebSocketDisconnect, asyncio.CancelledError):
+        pass
+    finally:
+        pending_queues.clear()
+        for task in list(tasks.values()):
+            if task is not asyncio.current_task():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
+        for writer in list(streams.values()):
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except Exception:
+                pass
+        try:
+            await websocket.close()
+        except Exception:
+            pass
+
+
+@router.websocket("/instagram/wisp/")
+async def ig_wisp_route(websocket: WebSocket):
+    await _ig_buffered_wisp_endpoint(websocket)
 
 
 def _install_ig_routes() -> None:
@@ -2749,6 +3044,7 @@ def _install_ig_routes() -> None:
         if not any(
             isinstance(r, WebSocketRoute)
             and r.path == "/instagram/wisp/"
+            and r.endpoint is ig_wisp_route
             for r in host_app.app.router.routes
         ):
             host_app.app.router.routes.insert(
@@ -2770,8 +3066,10 @@ def _target_from_input(raw: str) -> str:
         return IG_REELS
     if low in ("explore", "/explore", "/explore/"):
         return IG_EXPLORE
-    if low in ("login", "/login", "/accounts/login", "/accounts/login/"):
+    if low in ("login", "/login"):
         return IG_LOGIN
+    if value.startswith("/") and len(value) > 1:
+        return "https://www.instagram.com" + value
     if value.startswith(("http://", "https://")):
         try:
             u = urlparse(value)
@@ -2802,8 +3100,6 @@ def _js_literal(value: str) -> str:
 
 def _shell_html(initial_target: str) -> str:
     home_js = _js_literal(IG_HOME)
-    reels_js = _js_literal(IG_REELS)
-    explore_js = _js_literal(IG_EXPLORE)
     login_js = _js_literal(IG_LOGIN)
     initial_js = _js_literal(initial_target)
     wisp_override_js = _js_literal(SCRAMJET_WISP_URL)
@@ -2813,45 +3109,35 @@ def _shell_html(initial_target: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#000000">
-<title>Google</title>
+<title>Instagram</title>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
-<link rel="stylesheet" href="/design-system/m3.css">
-<script src="/design-system/m3.js"></script>
+<link rel="preload" href="/instagram/runtime/scramjet.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/instagram/runtime/controller.api.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/instagram/runtime/controller.inject.js?v={RUNTIME_REV}" as="script">
+<link rel="preload" href="/scramjet/scramjet-utils.js?v={UTILS_VERSION}" as="script">
+<link rel="preload" href="/scramjet/scramjet.wasm" as="fetch" crossorigin="anonymous">
+<script>
+if ("serviceWorker" in navigator) {{
+  window.__shSwRegP = navigator.serviceWorker.register(
+    "/instagram/sw.js?v={RUNTIME_REV}",
+    {{ scope: "/instagram/", updateViaCache: "none", type: "classic" }}
+  ).catch(() => null);
+}}
+</script>
 <style>
-:root{{--bg:var(--md-sys-color-surface,#000000);--text:var(--md-sys-color-on-surface,#f5f5f5);--muted:var(--md-sys-color-on-surface-variant,#a8a8a8);--nav-h:40px}}
 *{{box-sizing:border-box}}
-html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:var(--md-sys-typescale-font-plain,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif)}}
-.ig-topbar{{position:fixed;top:0;left:0;right:0;height:var(--nav-h);z-index:20;display:flex;align-items:center;gap:6px;padding:0 10px;background:rgba(12,12,14,0.96);border-bottom:1px solid rgba(255,255,255,0.12);overflow-x:auto;scrollbar-width:none}}
-.ig-topbar::-webkit-scrollbar{{display:none}}
-.ig-brand{{display:inline-flex;align-items:center;gap:5px;font-size:13px;font-weight:700;color:#fff;white-space:nowrap;margin-right:4px}}
-.ig-nav-btn{{appearance:none;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.06);color:#e5e7eb;font-size:12px;font-weight:600;padding:4px 10px;border-radius:999px;cursor:pointer;white-space:nowrap;transition:background .15s,border-color .15s,color .15s}}
-.ig-nav-btn:hover{{background:rgba(255,255,255,0.14);color:#fff}}
-.ig-nav-btn.active{{background:linear-gradient(135deg,#f58529,#dd2a7b,#8134af);border-color:transparent;color:#fff}}
-.ig-jump-form{{display:flex;align-items:center;gap:4px;margin-left:auto;min-width:140px;max-width:260px;flex:1}}
-.ig-jump-input{{width:100%;height:26px;padding:0 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.18);background:rgba(255,255,255,0.07);color:#fff;font-size:12px;outline:none}}
-.ig-jump-input:focus{{border-color:#dd2a7b;background:rgba(255,255,255,0.11)}}
-.stage{{position:fixed;top:var(--nav-h);left:0;right:0;bottom:0;width:100%;height:calc(100% - var(--nav-h));background:var(--md-sys-color-surface-dim,#000)}}
-#frame{{position:absolute;inset:0;display:block;width:100%;height:100%;border:0;background:#000}}
-.cover{{position:absolute;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:var(--md-sys-color-surface,#000);color:var(--muted);font-size:14px;font-weight:500;text-align:center}}
+html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#000;color:#f5f5f5;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}}
+.stage{{position:fixed;inset:0;width:100vw;height:100vh;background:#000}}
+#frame{{position:fixed;inset:0;display:block;width:100%;height:100%;border:0;background:#000}}
+.cover{{position:fixed;inset:0;z-index:5;display:grid;place-items:center;padding:32px;background:#000;color:#a8a8a8;font-size:14px;font-weight:500;text-align:center}}
 .cover.hidden{{display:none}}
 </style>
 </head>
 <body>
-<header class="ig-topbar" role="navigation" aria-label="Instagram ナビゲーション">
-  <span class="ig-brand">📸 Instagram</span>
-  <button type="button" class="ig-nav-btn" data-ig-nav="home" id="btnNavHome">🏠 ホーム / ログイン</button>
-  <button type="button" class="ig-nav-btn" data-ig-nav="reels" id="btnNavReels">🎬 リール</button>
-  <button type="button" class="ig-nav-btn" data-ig-nav="explore" id="btnNavExplore">🧭 発見</button>
-  <form class="ig-jump-form" id="igJumpForm">
-    <input type="text" class="ig-jump-input" id="igJumpInput" placeholder="@ユーザー名 / #タグ / URL" autocomplete="off">
-    <button type="submit" class="ig-nav-btn">移動</button>
-  </form>
-  <button type="button" class="ig-nav-btn" id="btnNavReload" title="再読み込み">↻</button>
-</header>
 <main class="stage">
-  <div class="cover" id="cover">Instagram を読み込んでいます…</div>
+  <div class="cover" id="cover">読み込み中…</div>
   <iframe id="frame" title="Instagram"
-    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture; microphone; camera; display-capture; web-share"
     referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </main>
 
@@ -2863,8 +3149,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
   "use strict";
 
   const HOME = {home_js};
-  const REELS_URL = {reels_js};
-  const EXPLORE_URL = {explore_js};
   const LOGIN_URL = {login_js};
   const AUTH_HOME = "https://www.instagram.com/";
   const INITIAL = {initial_js};
@@ -2901,50 +3185,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
-  const btnNavHome = document.getElementById("btnNavHome");
-  const btnNavReels = document.getElementById("btnNavReels");
-  const btnNavExplore = document.getElementById("btnNavExplore");
-  const btnNavReload = document.getElementById("btnNavReload");
-  const igJumpForm = document.getElementById("igJumpForm");
-  const igJumpInput = document.getElementById("igJumpInput");
-
-  function updateNavHighlight(urlStr) {{
-    try {{
-      const u = String(urlStr || "");
-      const isReels = u.includes("/reels") || u.includes("/reel/");
-      const isExplore = u.includes("/explore");
-      btnNavReels?.classList.toggle("active", isReels);
-      btnNavExplore?.classList.toggle("active", !isReels && isExplore);
-      btnNavHome?.classList.toggle("active", !isReels && !isExplore);
-    }} catch (_) {{}}
-  }}
-
-  function resolveUserTarget(raw) {{
-    const val = String(raw || "").trim();
-    if (!val) return HOME;
-    const low = val.toLowerCase();
-    if (low === "reels" || low === "reel" || low === "/reels" || low === "/reels/") return REELS_URL;
-    if (low === "explore" || low === "/explore" || low === "/explore/") return EXPLORE_URL;
-    if (low === "login" || low === "/login" || low === "/accounts/login" || low === "/accounts/login/") return LOGIN_URL;
-    if (val.startsWith("http://") || val.startsWith("https://")) {{
-      try {{
-        const u = new URL(val);
-        let h = u.hostname.toLowerCase().replace(/\\.$/, "");
-        if (h === "instagram.com") h = "www.instagram.com";
-        if (h.endsWith("instagram.com")) return "https://" + h + (u.pathname || "/") + (u.search || "");
-      }} catch (_) {{}}
-    }}
-    if (val.startsWith("@") && val.length > 1) {{
-      return "https://www.instagram.com/" + encodeURIComponent(val.slice(1).replace(/^\\/+|\\/+$/g, "")) + "/";
-    }}
-    if (val.startsWith("#") && val.length > 1) {{
-      return "https://www.instagram.com/explore/tags/" + encodeURIComponent(val.slice(1).replace(/^\\/+|\\/+$/g, "")) + "/";
-    }}
-    if (/^[a-zA-Z0-9._]{{1,30}}$/.test(val)) {{
-      return "https://www.instagram.com/" + encodeURIComponent(val) + "/";
-    }}
-    return "https://www.instagram.com/explore/tags/" + encodeURIComponent(val.replace(/^\\/+|\\/+$/g, "")) + "/";
-  }}
 
   async function withTimeout(promise, ms, label) {{
     let timer = 0;
@@ -2970,22 +3210,50 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return (location.protocol === "https:" ? "wss://" : "ws://") + location.host + WISP_PATH;
   }}
 
+  function hasValidSessionIdInDump(raw) {{
+    if (!raw) return false;
+    try {{
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {{
+        return parsed.some((c) => c && c.name === "sessionid" && c.value && c.value !== '""' && c.value !== "deleted");
+      }}
+    }} catch (_) {{}}
+    const m = String(raw).match(/(?:^|[\\s;"])sessionid=([^;\\s"]+)/);
+    return Boolean(m && m[1] && m[1] !== '""' && m[1] !== "deleted");
+  }}
+
   function hasAuthCookie() {{
     try {{
       const dump = String(controller?.cookieJar?.dump?.() || "");
-      if (/(?:^|[\\s;])sessionid=|"sessionid"/.test(dump)) return true;
+      if (hasValidSessionIdInDump(dump)) return true;
       const vault = localStorage.getItem("__sh_cookie_vault_instagram") || sessionStorage.getItem("__sh_cookie_vault_instagram") || "";
-      return /(?:^|[\\s;])sessionid=|"sessionid"/.test(vault);
+      return hasValidSessionIdInDump(vault);
     }} catch (_) {{
       return false;
     }}
+  }}
+
+  function syncOuterHistoryUrl(cleanedUrl) {{
+    try {{
+      const u = new URL(cleanedUrl);
+      const h = u.hostname.toLowerCase().replace(/\\.$/, "");
+      if (h === "www.instagram.com" || h === "instagram.com") {{
+        const p = u.pathname || "/";
+        if (/^\\/(runtime\\/|~\\/sj\\/|wisp(\\/|$)|sw\\.js$|health$)/i.test(p)) return;
+        const desired = "/instagram" + (p.startsWith("/") ? p : "/" + p) + (u.search || "");
+        const current = location.pathname + location.search;
+        if (desired !== current) {{
+          history.replaceState({{ shIgTarget: cleanedUrl }}, "", desired);
+        }}
+      }}
+    }} catch (_) {{}}
   }}
 
   function remember(url) {{
     if (!url) return;
     const s = String(url);
     lastUrl = s;
-    updateNavHighlight(s);
+    syncOuterHistoryUrl(s);
     if (!hasAuthCookie() && (s.includes("/accounts/password/") || s.includes("/accounts/emailsignup") || s.includes("facebook.com/"))) {{
       return;
     }}
@@ -2995,16 +3263,16 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
 
   function restore() {{
     try {{
-      const params = new URLSearchParams(location.search);
-      const hasExplicitQuery = Boolean(params.get("q") || params.get("url") || params.get("tab"));
-      if (hasExplicitQuery) return INITIAL;
+      if (location.pathname !== "/instagram/" || location.search.length > 1) {{
+        return INITIAL;
+      }}
       if (!hasAuthCookie()) {{
         try {{ sessionStorage.removeItem(SESSION_KEY); }} catch (_) {{}}
         try {{ localStorage.removeItem(SESSION_KEY); }} catch (_) {{}}
         return INITIAL;
       }}
       const saved = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
-      if (saved) return saved;
+      if (saved && !saved.includes("/accounts/login")) return saved;
       return AUTH_HOME;
     }} catch (_) {{
       return INITIAL;
@@ -3059,6 +3327,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     if (cleaned !== lastUrl) {{
       lastUrl = cleaned;
       remember(cleaned);
+    }} else {{
+      syncOuterHistoryUrl(cleaned);
     }}
   }}
 
@@ -3377,11 +3647,31 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           ? new ArrayBuffer(0)
           : payloadBytes.buffer.slice(payloadBytes.byteOffset, payloadBytes.byteOffset + payloadBytes.byteLength);
         const respHeaders = Array.isArray(meta.headers) ? meta.headers : [];
+        let explicitClearAuth = false;
         const setCookieEntries = [];
         for (const [k, v] of respHeaders) {{
-          if (k && k.toLowerCase() === "set-cookie" && v) {{
-            setCookieEntries.push({{ url: urlStr, cookie: String(v) }});
+          if (!k) continue;
+          const kl = k.toLowerCase();
+          if (kl === "x-sh-clear-auth" && String(v).trim() === "1") {{
+            explicitClearAuth = true;
+          }} else if (kl === "set-cookie" && v) {{
+            const scStr = String(v);
+            if (/^sessionid=(?:""|deleted|;|$)/i.test(scStr.trim()) || (/^sessionid=/i.test(scStr.trim()) && /max-age=0|1970/i.test(scStr))) {{
+              explicitClearAuth = true;
+            }}
+            setCookieEntries.push({{ url: urlStr, cookie: scStr }});
           }}
+        }}
+        if (explicitClearAuth) {{
+          globalThis.__shExplicitClear = true;
+          try {{
+            sessionStorage.removeItem(SESSION_KEY);
+            localStorage.removeItem(SESSION_KEY);
+            sessionStorage.removeItem("__sh_cookie_vault_instagram");
+            localStorage.removeItem("__sh_cookie_vault_instagram");
+            if (controller?.cookieJar?.load) controller.cookieJar.load("[]");
+          }} catch (_) {{}}
+          setTimeout(() => {{ globalThis.__shExplicitClear = false; }}, 4000);
         }}
         if (setCookieEntries.length > 0 && controller?.cookieJar) {{
           try {{
@@ -3389,6 +3679,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
             await controller.persistCookies();
             await controller.propagateCookieSync(setCookieEntries, {{}});
           }} catch (_) {{}}
+        }} else if (explicitClearAuth && controller?.persistCookies) {{
+          try {{ await controller.persistCookies(); }} catch (_) {{}}
         }}
         if (canClientCache && statusNum === 200 && respBody.byteLength > 0 && typeof caches !== "undefined") {{
           try {{
@@ -3456,6 +3748,25 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return result;
   }}
 
+  function decodeProxiedTail(rawTail) {{
+    if (!rawTail) return "";
+    let candidate = rawTail;
+    const outerScramIdx = candidate.indexOf("?$");
+    if (outerScramIdx >= 0) candidate = candidate.slice(0, outerScramIdx);
+    for (let k = 0; k < 3; k++) {{
+      const cleaned = cleanTargetUrl(candidate);
+      if (cleaned) return cleaned;
+      try {{
+        const next = decodeURIComponent(candidate);
+        if (next === candidate) break;
+        candidate = next;
+      }} catch (_) {{
+        break;
+      }}
+    }}
+    return cleanTargetUrl(candidate);
+  }}
+
   function readFrameTarget() {{
     try {{
       const href = frameEl.contentWindow?.location?.href || "";
@@ -3464,19 +3775,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       if (fPrefix) {{
         const idx = href.indexOf(fPrefix);
         if (idx >= 0) {{
-          const rawTail = href.slice(idx + fPrefix.length);
-          const qIdx = rawTail.indexOf("?");
-          const encodedPart = qIdx >= 0 ? rawTail.slice(0, qIdx) : rawTail;
-          const decoded = decodeURIComponent(encodedPart);
-          const cleaned = cleanTargetUrl(decoded);
+          const cleaned = decodeProxiedTail(href.slice(idx + fPrefix.length));
           if (cleaned) return cleaned;
         }}
       }}
       const m = href.match(/\\/instagram\\/~\\/sj\\/(?:[^/]+\\/[^/]+\\/)?(https?(?:%3A|:).*)$/i);
       if (m && m[1]) {{
-        const rawPart = m[1].split("?")[0];
-        const decoded = decodeURIComponent(rawPart);
-        const cleaned = cleanTargetUrl(decoded);
+        const cleaned = decodeProxiedTail(m[1]);
         if (cleaned) return cleaned;
       }}
       return "";
@@ -3524,17 +3829,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     return null;
   }}
 
-  function syncInputReactState(el) {{
-    try {{
-      if (el._valueTracker && typeof el._valueTracker.setValue === "function") {{
-        el._valueTracker.setValue("");
-      }}
-      const Evt = frameEl.contentWindow?.Event || Event;
-      el.dispatchEvent(new Evt("input", {{ bubbles: true, composed: true }}));
-      el.dispatchEvent(new Evt("change", {{ bubbles: true, composed: true }}));
-    }} catch (_) {{}}
-  }}
-
   function ensureInstagramMedia() {{
     try {{
       const doc = frameEl.contentDocument;
@@ -3543,87 +3837,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       const rawGetAttr = window.Element.prototype.getAttribute;
       const rawRemoveAttr = window.Element.prototype.removeAttribute;
 
-      const loginInputs = doc.querySelectorAll("input[name='email'], input[name='pass'], input[name='username'], input[name='password'], input[type='text'], input[type='password']");
-      for (let i = 0; i < loginInputs.length; i++) {{
-        const inp = loginInputs[i];
-        if (!inp.dataset.shInputBound) {{
-          inp.dataset.shInputBound = "1";
-          const recordNativeVal = () => {{
-            inp.dataset.shSyncedVal = String(inp.value || "");
-          }};
-          inp.addEventListener("input", recordNativeVal);
-          inp.addEventListener("change", recordNativeVal);
-          inp.addEventListener("keydown", (e) => {{
-            if (e.key === "Enter") {{
-              const cur = String(inp.value || "");
-              if (cur !== (inp.dataset.shSyncedVal || "")) {{
-                inp.dataset.shSyncedVal = cur;
-                syncInputReactState(inp);
-              }}
-              const form = inp.closest("form");
-              const submitBtn = (form || doc).querySelector("[data-testid='royal-login-button'], button[type='submit'], div[role='button'][aria-label='ログイン'], button[aria-label='ログイン']");
-              if (submitBtn && submitBtn.getAttribute("aria-disabled") !== "true") {{
-                e.preventDefault();
-                try {{
-                  const MEvt = frameEl.contentWindow?.MouseEvent || MouseEvent;
-                  submitBtn.dispatchEvent(new MEvt("mousedown", {{ bubbles: true, cancelable: true }}));
-                  submitBtn.dispatchEvent(new MEvt("mouseup", {{ bubbles: true, cancelable: true }}));
-                }} catch (_) {{}}
-                submitBtn.click();
-              }}
-            }}
-          }});
-        }}
-        const curVal = String(inp.value || "");
-        if (curVal !== (inp.dataset.shSyncedVal || "")) {{
-          inp.dataset.shSyncedVal = curVal;
-          syncInputReactState(inp);
-        }}
-      }}
-
-      const frameTargetNow = readFrameTarget() || lastUrl || "";
-      const isAuthSubpage = frameTargetNow.includes("/accounts/password/") || frameTargetNow.includes("/accounts/emailsignup");
-      const allLinks = doc.querySelectorAll("a, div[role='button'], button");
-      for (let i = 0; i < allLinks.length; i++) {{
-        const a = allLinks[i];
-        const txt = String(a.textContent || "").trim();
-        const ariaLbl = String(rawGetAttr.call(a, "aria-label") || "").trim();
-        const hrefAttr = String(rawGetAttr.call(a, "href") || "");
-        const sjHrefAttr = String(rawGetAttr.call(a, "scramjet-attr-href") || "");
-        const combinedHref = hrefAttr + " " + sjHrefAttr;
-        if ((txt.includes("すでにアカウントを持っている") || txt.includes("ログインに戻る") || (isAuthSubpage && (ariaLbl === "戻る" || ariaLbl === "Back"))) && !a.dataset.shAlreadyAccBound) {{
-          a.dataset.shAlreadyAccBound = "1";
-          a.addEventListener("click", (e) => {{
-            e.preventDefault();
-            e.stopPropagation();
-            navigateTo(LOGIN_URL);
-          }}, true);
-        }} else if ((txt === "Instagramを開く" || txt === "アプリを開く") && !a.dataset.shOpenAppBound) {{
-          a.dataset.shOpenAppBound = "1";
-          a.addEventListener("click", (e) => {{
-            e.preventDefault();
-            e.stopPropagation();
-            const loginSwitchBtn = [...doc.querySelectorAll("button, a, div[role='button']")].find((el) => String(el.textContent || "").trim() === "ログイン");
-            if (loginSwitchBtn && loginSwitchBtn !== a) {{
-              loginSwitchBtn.click();
-            }} else {{
-              navigateTo(LOGIN_URL);
-            }}
-          }}, true);
-        }} else if ((combinedHref.includes("/accounts/login") || combinedHref.includes("%2Faccounts%2Flogin")) && !a.dataset.shLoginBound) {{
-          a.dataset.shLoginBound = "1";
-          a.addEventListener("click", (e) => {{
-            if (!hasAuthCookie()) {{
-              const existingInput = doc.querySelector("input[name='email'], input[name='username']");
-              if (existingInput) {{
-                e.preventDefault();
-                e.stopPropagation();
-                try {{ existingInput.focus(); }} catch (_) {{}}
-              }}
-            }}
-          }}, true);
-        }}
-      }}
       const imgs = doc.querySelectorAll("img");
       for (let i = 0; i < imgs.length; i++) {{
         try {{
@@ -3654,14 +3867,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
         }} catch (_) {{}}
       }}
       const videos = doc.querySelectorAll("video");
-      let anyPlaying = false;
-      for (const v of videos) {{
-        if (!v.paused && v.readyState >= 2) {{
-          anyPlaying = true;
-          break;
-        }}
-      }}
-      const vh = frameEl.contentWindow?.innerHeight || window.innerHeight || 800;
       for (const v of videos) {{
         try {{
           const actualPoster = rawGetAttr.call(v, "poster") || "";
@@ -3676,22 +3881,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
           }}
           const vSrc = rawGetAttr.call(v, "src") || "";
           const vOrigSrc = rawGetAttr.call(v, "scramjet-attr-src") || "";
-          if (vSrc && !vSrc.startsWith("blob:") && !vSrc.includes("/instagram/runtime/media-relay?k=")) {{
+          if (vSrc && !vSrc.startsWith("blob:") && !vSrc.startsWith("data:") && !vSrc.includes("/instagram/runtime/media-relay?k=")) {{
             const target = extractVirtualMediaFromAttr(vSrc) || extractVirtualMediaFromAttr(vOrigSrc);
             if (target) {{
               rawSetAttr.call(v, "src", location.origin + "/instagram/runtime/media-relay?k=" + encodeMediaKey(target.href));
-            }}
-          }}
-          if (!anyPlaying && v.paused && v.readyState >= 2 && !v.dataset.shAutoPlayed) {{
-            const rect = v.getBoundingClientRect();
-            const visibleH = Math.min(rect.bottom, vh) - Math.max(rect.top, 0);
-            if (rect.height > 0 && visibleH >= rect.height * 0.5) {{
-              v.dataset.shAutoPlayed = "1";
-              anyPlaying = true;
-              v.muted = true;
-              v.playsInline = true;
-              const p = v.play();
-              if (p && typeof p.catch === "function") p.catch(() => {{}});
             }}
           }}
         }} catch (_) {{}}
@@ -3946,18 +4139,19 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
     armHealthCheck(navigationToken, HEALTH_DELAY);
   }}
 
-  btnNavHome?.addEventListener("click", () => navigateTo(HOME));
-  btnNavReels?.addEventListener("click", () => navigateTo(REELS_URL));
-  btnNavExplore?.addEventListener("click", () => navigateTo(EXPLORE_URL));
-  btnNavReload?.addEventListener("click", () => {{
-    const t = readFrameTarget() || lastUrl || HOME;
-    navigateTo(t);
-  }});
-  igJumpForm?.addEventListener("submit", (e) => {{
-    e.preventDefault();
-    const raw = igJumpInput?.value || "";
-    const target = resolveUserTarget(raw);
-    if (target) navigateTo(target);
+  window.addEventListener("popstate", (ev) => {{
+    try {{
+      const stUrl = ev?.state?.shIgTarget;
+      if (stUrl && frame) {{
+        navigateTo(stUrl);
+        return;
+      }}
+      const sub = location.pathname.startsWith("/instagram/") ? location.pathname.slice("/instagram/".length) : "";
+      const target = sub ? ("https://www.instagram.com/" + sub + (location.search || "")) : (hasAuthCookie() ? AUTH_HOME : HOME);
+      if (frame && target !== (readFrameTarget() || lastUrl)) {{
+        navigateTo(target);
+      }}
+    }} catch (_) {{}}
   }});
 
   async function boot() {{
@@ -3985,17 +4179,18 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);
       clientLog("info", "service-worker-already-controlled", {{
         scriptURL: String(navigator.serviceWorker.controller?.scriptURL || ""),
       }});
-      setTimeout(() => {{
-        navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }})
-          .then((r) => {{ registration = r; }})
-          .catch(() => {{}});
-      }}, 0);
+      Promise.resolve(window.__shSwRegP || navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }}))
+        .then((r) => {{ if (r) registration = r; }})
+        .catch(() => {{}});
     }} else {{
       registration = await withTimeout(
-        navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }}),
+        Promise.resolve(window.__shSwRegP || navigator.serviceWorker.register(SW, {{ scope: SW_SCOPE, updateViaCache: "none", type: "classic" }})),
         4500,
         "SW register"
       ).catch(async () => await navigator.serviceWorker.getRegistration(SW_SCOPE));
+      if (!registration) {{
+        registration = await navigator.serviceWorker.getRegistration(SW_SCOPE);
+      }}
       clientLog("info", "service-worker-registered", {{ scope: registration?.scope || "", active: Boolean(registration?.active) }});
       await waitForWorkerControl(registration);
     }}
@@ -4075,3 +4270,20 @@ async def ig_health():
         "service_worker": "/instagram/sw.js",
         "virtual_prefix": "/instagram/~/sj/",
     }
+
+
+@router.get("/instagram/{subpath:path}", response_class=HTMLResponse, include_in_schema=False)
+async def ig_deeplink(subpath: str, request: Request):
+    clean = (subpath or "").lstrip("/")
+    low = clean.lower()
+    if low.startswith(("runtime/", "~/sj/", "wisp")) or low in ("sw.js", "health"):
+        return Response("Not found", status_code=404, media_type="text/plain; charset=utf-8")
+    qs = request.url.query
+    target = f"https://www.instagram.com/{clean}" + (f"?{qs}" if qs else "")
+    response = HTMLResponse(_shell_html(target))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+

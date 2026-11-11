@@ -593,6 +593,10 @@ MEDIA_SERVICES = {
 
 @app.get("/{service}/sw.js", include_in_schema=False)
 async def isolated_service_worker(service: str, request: Request):
+  if service == "youtube":
+    yt_mod = sys.modules.get("youtube_scramjet_proxy")
+    if yt_mod and hasattr(yt_mod, "_youtube_sw_override"):
+      return await yt_mod._youtube_sw_override(request)
   if service == "instagram":
     ig_mod = sys.modules.get("instagram_proxy")
     if ig_mod and hasattr(ig_mod, "_ig_sw_override"):
