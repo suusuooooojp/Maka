@@ -149,7 +149,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-yt-v43"
+RUNTIME_REV = "20261112-yt-v44"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -190,10 +190,17 @@ YOUTUBE_IMAGE_SUFFIXES = (
 )
 AUTH_HOSTS = {
     "accounts.google.com",
+    "accounts.google.co.jp",
     "accounts.youtube.com",
     "myaccount.google.com",
     "gds.google.com",
     "ogs.google.com",
+    "apis.google.com",
+    "ssl.gstatic.com",
+    "www.gstatic.com",
+    "play.google.com",
+    "oauth2.googleapis.com",
+    "youtube.googleapis.com",
 }
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
@@ -462,6 +469,21 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
+    inject_preamble = (
+        'try{if(typeof navigator!=="undefined"){'
+        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
+        'if(_np){try{Object.defineProperty(_np,"onLine",{get:()=>true,configurable:true});}catch(_){}}'
+        'try{Object.defineProperty(navigator,"onLine",{get:()=>true,configurable:true});}catch(_){}'
+        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_cn,configurable:true});}Object.defineProperty(navigator,"connection",{get:()=>_cn,configurable:true});}catch(_){}'
+        '}}catch(_){}\n'
+        'try{if(typeof window!=="undefined"){'
+        'if(window.addEventListener){const _oa=window.addEventListener;window.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}'
+        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
+        'try{Object.defineProperty(window,"ononline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
+        '}}catch(_){}\n'
+    )
+    if not text.startswith("try{if(typeof navigator"):
+        text = inject_preamble + text
     return text.encode("utf-8")
 
 
@@ -527,16 +549,18 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '(()=>{try{'
         'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
         'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
-        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
+        'try{if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}}catch(_){}'
         'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
         'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
+        '}'
         'try{const _od=Object.getOwnPropertyDescriptor(_np,"onLine");const _og=new Proxy(_od&&_od.get?_od.get:()=>!0,{apply:()=>!0});e.box.unproxy.set(_og,_od?.get||(()=>!0));Object.defineProperty(_np,"onLine",{get:_og,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
-        '}}'
+        'try{Object.defineProperty(t.navigator,"onLine",{get:()=>!0,enumerable:!0,configurable:!0});}catch(_){}'
+        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});Object.defineProperty(t.navigator,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
         'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
         'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
+        'try{Object.defineProperty(t,"ononline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
         '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
@@ -2555,8 +2579,14 @@ async def youtube_sj_direct_fallback(rest: str, request: Request):
                     nested, request.method, request.headers.get("accept") or ""
                 )
         host = (parsed.hostname or "").lower().rstrip(".")
+        path_str = parsed.path or ""
+        q_str = parsed.query or ""
+        if path_str in ("/generate_204", "/csi_204", "/error_204") and not (host in AUTH_HOSTS or host.endswith(".google.com")):
+            return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"})
         if host.endswith((".googlevideo.com", ".c.youtube.com")):
-            return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
+            if " " in path_str or "expire=9421968081" in q_str or "expire=1685394838" in q_str or path_str in ("/generate_204", "/gen_204"):
+                return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
+            return await youtube_runtime_gv_stream(request)
         if any(host == s or host.endswith("." + s) for s in YOUTUBE_IMAGE_SUFFIXES):
             path_l = (parsed.path or "").lower()
             if host.endswith(("gstatic.com", "googleapis.com")):
@@ -2787,12 +2817,9 @@ def _replace_js_var_json(html_text: str, marker: str, mutator) -> tuple[str, boo
         return html_text, False
 
 
-async def _get_home_rich_items() -> list[dict]:
+async def _refresh_home_rich_items() -> list[dict]:
     global _HOME_RICH_ITEMS_CACHE
     now = time.time()
-    if _HOME_RICH_ITEMS_CACHE[1] and (now - _HOME_RICH_ITEMS_CACHE[0]) < _HOME_RICH_ITEMS_TTL:
-        return _HOME_RICH_ITEMS_CACHE[1]
-
     session = await _get_curl_session()
     anon_cookie = await _get_anon_visitor_cookie_header()
 
@@ -2818,6 +2845,8 @@ async def _get_home_rich_items() -> list[dict]:
             }
         },
     }).encode("utf-8")
+
+
     try:
         if session is not None:
             r = await session.post(api_url, headers=api_headers, data=api_body, timeout=8)
@@ -2892,6 +2921,20 @@ async def _get_home_rich_items() -> list[dict]:
     except Exception:
         pass
     return _HOME_RICH_ITEMS_CACHE[1]
+
+
+async def _get_home_rich_items() -> list[dict]:
+    global _HOME_RICH_ITEMS_CACHE
+    now = time.time()
+    if _HOME_RICH_ITEMS_CACHE[1]:
+        if (now - _HOME_RICH_ITEMS_CACHE[0]) >= _HOME_RICH_ITEMS_TTL:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(_refresh_home_rich_items())
+            except Exception:
+                pass
+        return _HOME_RICH_ITEMS_CACHE[1]
+    return await _refresh_home_rich_items()
 
 
 def _video_renderer_to_compact(vr: dict) -> dict | None:
@@ -4145,6 +4188,18 @@ async def _execute_relay_core(
             return (
                 204, "No Content", [["access-control-allow-origin", "*"]], b""
             )
+    path_str = parsed.path or ""
+    if path_str in ("/generate_204", "/csi_204", "/error_204") and not (host in AUTH_HOSTS or host.endswith(".google.com")):
+        return (
+            204,
+            "No Content",
+            [
+                ["content-type", "text/plain"],
+                ["access-control-allow-origin", "*"],
+                ["access-control-allow-credentials", "true"],
+            ],
+            b"",
+        )
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
         return 403, "Forbidden", [["content-type", "text/plain"]], b"unsupported port"
@@ -5029,6 +5084,27 @@ async def _youtube_google_login_override(request: Request):
         return Response("invalid google auth target", status_code=400)
 
 
+async def _youtube_204_probe(request: Request) -> Response:
+    origin = request.headers.get("origin") or "*"
+    headers = {
+        "access-control-allow-origin": origin,
+        "access-control-allow-credentials": "true",
+        "access-control-allow-methods": "GET, HEAD, POST, OPTIONS",
+        "access-control-allow-headers": "*",
+        "cache-control": "no-cache, no-store, must-revalidate",
+        "content-length": "0",
+    }
+    return Response(b"", status_code=204, headers=headers)
+
+
+@router.api_route("/generate_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/gen_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/csi_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
+@router.api_route("/error_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
+async def route_youtube_204_probe(request: Request):
+    return await _youtube_204_probe(request)
+
+
 def _install_wisp_fix() -> None:
     """Install the race-free Wisp handler, SW override, and google-login redirect fix in the host app."""
     try:
@@ -5062,6 +5138,14 @@ def _install_wisp_fix() -> None:
             host_app.app.router.routes.insert(
                 0, Route("/youtube/google-login", _youtube_google_login_override, methods=["GET"])
             )
+        for p204 in ("/generate_204", "/gen_204", "/csi_204", "/error_204"):
+            if not any(
+                isinstance(r, Route) and r.path == p204
+                for r in host_app.app.router.routes
+            ):
+                host_app.app.router.routes.insert(
+                    0, Route(p204, _youtube_204_probe, methods=["GET", "HEAD", "POST", "OPTIONS"])
+                )
     except Exception as exc:
         print(f"[YOUTUBE] Wisp route install warning: {exc}", flush=True)
 
@@ -5095,12 +5179,13 @@ def _is_google_auth_url(value: str) -> bool:
         parsed = urlparse(value)
     except Exception:
         return False
+    h = _hostname(value)
     return (
         parsed.scheme == "https"
         and parsed.port in (None, 443)
         and not parsed.username
         and not parsed.password
-        and _hostname(value) in AUTH_HOSTS
+        and (h in AUTH_HOSTS or h.endswith(".google.com") or h.endswith(".google.co.jp"))
     )
 
 
@@ -5235,7 +5320,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
   const STATIC_CACHE_NAME = "sh-yt-static-{RUNTIME_REV}";
   const MEDIA_CACHE_NAME = "sh-yt-media-{RUNTIME_REV}";
   const YOUTUBE_HOSTS = new Set(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","studio.youtube.com","upload.youtube.com","youtu.be"]);
-  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.youtube.com","myaccount.google.com","gds.google.com","ogs.google.com"]);
+  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.google.co.jp","accounts.youtube.com","myaccount.google.com","gds.google.com","ogs.google.com","apis.google.com","ssl.gstatic.com","www.gstatic.com","play.google.com","oauth2.googleapis.com","youtube.googleapis.com"]);
   const YT_IMAGE_SUFFIXES = [
     "i.ytimg.com","s.ytimg.com","img.youtube.com","ytimg.com",
     "yt3.ggpht.com","yt4.ggpht.com","ggpht.com",
@@ -5464,7 +5549,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
     try {{
       const u = new URL(candidate);
       const host = (u.hostname || "").toLowerCase().replace(/\\.$/, "");
-      const allowed = YOUTUBE_HOSTS.has(host) || AUTH_HOSTS.has(host);
+      const allowed = YOUTUBE_HOSTS.has(host) || AUTH_HOSTS.has(host) || host.endsWith(".google.com") || host.endsWith(".google.co.jp");
       if (allowed && (u.protocol === "http:" || u.protocol === "https:")) {{
         if (u.username || u.password || (u.port && u.port !== "443")) throw new Error("unsafe URL authority");
         u.protocol = "https:";

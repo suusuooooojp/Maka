@@ -105,7 +105,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-tver16"
+RUNTIME_REV = "20261112-tver17"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -122,6 +122,8 @@ AUTH_HOSTS = {
     "tverid.tver.jp",
     "auth.tver.jp",
     "user.tver.jp",
+    "user-api.tver.jp",
+    "s.tver.jp",
     "payments.id.tver.jp",
     "payments.tverid.tver.jp",
     "accounts.google.com",
@@ -372,6 +374,21 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
+    inject_preamble = (
+        'try{if(typeof navigator!=="undefined"){'
+        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
+        'if(_np){try{Object.defineProperty(_np,"onLine",{get:()=>true,configurable:true});}catch(_){}}'
+        'try{Object.defineProperty(navigator,"onLine",{get:()=>true,configurable:true});}catch(_){}'
+        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_cn,configurable:true});}Object.defineProperty(navigator,"connection",{get:()=>_cn,configurable:true});}catch(_){}'
+        '}}catch(_){}\n'
+        'try{if(typeof window!=="undefined"){'
+        'if(window.addEventListener){const _oa=window.addEventListener;window.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}'
+        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
+        'try{Object.defineProperty(window,"ononline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
+        '}}catch(_){}\n'
+    )
+    if not text.startswith("try{if(typeof navigator"):
+        text = inject_preamble + text
     return text.encode("utf-8")
 
 
@@ -434,12 +451,18 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '(()=>{try{'
         'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
         'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
-        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
+        'try{if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}}catch(_){}'
         'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
         'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
-        '}}'
+        '}'
+        'try{const _od=Object.getOwnPropertyDescriptor(_np,"onLine");const _og=new Proxy(_od&&_od.get?_od.get:()=>!0,{apply:()=>!0});e.box.unproxy.set(_og,_od?.get||(()=>!0));Object.defineProperty(_np,"onLine",{get:_og,enumerable:!0,configurable:!0});}catch(_){}'
+        'try{Object.defineProperty(t.navigator,"onLine",{get:()=>!0,enumerable:!0,configurable:!0});}catch(_){}'
+        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});Object.defineProperty(t.navigator,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
+        'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
+        'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
+        'try{Object.defineProperty(t,"ononline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
         '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
@@ -541,7 +564,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'if(A.pathname==="/tver/runtime/media-relay"&&(A.searchParams.has("k")||A.searchParams.has("url")))return t.prefix.origin+A.pathname+A.search;'
         'const _mh=A.hostname.toLowerCase().replace(/\\.$/,""),_mp=String(A.pathname||"");'
         'const _isImg=(_mh==="image-cdn.tver.jp"||(_mh==="statics.tver.jp"&&/\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(_mp)));'
-        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(_mp)||((_mh.endsWith(".tver.jp")||_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp")||_mh.endsWith(".uliza.jp")||_mh.endsWith(".stream.ne.jp")||_mh.endsWith(".jstream.jp"))&&/\\.(mp4|m4a|m4v)(\\?|$)/i.test(_mp))));'
+        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(_mp)||/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(_mp)||((_mh.endsWith(".tver.jp")||_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp")||_mh.endsWith(".uliza.jp")||_mh.endsWith(".stream.ne.jp")||_mh.endsWith(".jstream.jp"))&&/\\.(mp4|m4a|m4v)(\\?|$)/i.test(_mp))));'
         'if((_isImg||_isHls)&&!o?.isModule&&o?.destination!=="script"&&o?.destination!=="worker"&&o?.destination!=="sharedworker"&&o?.destination!=="document"){'
         'return t.prefix.origin+"/tver/runtime/media-relay?k="+btoa(encodeURIComponent(A.href).split("").reverse().join("")).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"")'
         '}'
@@ -2487,7 +2510,18 @@ def _normalize_tver_set_cookie(cookie_val: str, host: str) -> str:
                 cookie_val,
                 flags=re.I,
             )
-        if host in ("tver.jp", "www.tver.jp", "platform-api.tver.jp", "service-api.tver.jp", "member-api.tver.jp"):
+        if host in (
+            "tver.jp",
+            "www.tver.jp",
+            "s.tver.jp",
+            "id.tver.jp",
+            "auth.tver.jp",
+            "user.tver.jp",
+            "user-api.tver.jp",
+            "platform-api.tver.jp",
+            "service-api.tver.jp",
+            "member-api.tver.jp",
+        ):
             return cookie_val.rstrip("; ") + "; Domain=.tver.jp"
     if host == "google.com" or host.endswith(".google.com"):
         if re.search(r";\s*domain\s*=", cookie_val, re.I):
@@ -2865,6 +2899,8 @@ async def _execute_tver_relay_core(
         if kl == "set-cookie":
             has_set_cookie = True
             v = _normalize_tver_set_cookie(v, host)
+        elif kl == "location":
+            v = urljoin(url, v)
         if kl == "content-type":
             resp_media_type = v
             vl = v.lower()
@@ -3074,6 +3110,25 @@ async def tver_sj_direct_fallback(rest: str, request: Request):
     status, status_text, out_headers, resp_body, _, _ = await _execute_tver_relay_core(
         virtual_url, request.method, raw_headers, req_body, proxy_origin=proxy_origin
     )
+    if status in (301, 302, 303, 307, 308):
+        loc_header = next((hv for hk, hv in out_headers if hk.lower() == "location"), None)
+        if loc_header:
+            abs_loc = urljoin(virtual_url, loc_header)
+            loc_headers = [
+                ("Location", f"/tver/~/sj/{quote(abs_loc, safe='')}"),
+                ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ]
+            for hk, hv in out_headers:
+                if hk.lower() == "set-cookie":
+                    loc_headers.append((hk, hv))
+            resp = Response(content=b"", status_code=status)
+            for hk, hv in loc_headers:
+                if hk.lower() == "set-cookie":
+                    resp.raw_headers.append((hk.encode("latin-1"), hv.encode("latin-1")))
+                else:
+                    resp.headers[hk] = hv
+            return resp
     resp = Response(
         content=b"" if request.method == "HEAD" else resp_body,
         status_code=status,
@@ -3129,19 +3184,169 @@ async def tver_wisp_route(websocket: WebSocket):
     await host_app.wisp_media_endpoint(websocket)
 
 
+async def _serve_tver_upstream_static(target_url: str, request: Request, default_media_type: str = "") -> Response:
+    cached = _STATIC_ASSET_CACHE.get(target_url)
+    if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
+        _, c_status, c_text, c_headers, c_body = cached
+        headers_dict = {h[0]: h[1] for h in c_headers}
+        headers_dict["Access-Control-Allow-Origin"] = "*"
+        headers_dict["Access-Control-Allow-Credentials"] = "true"
+        headers_dict["Cache-Control"] = "public, max-age=31536000, immutable"
+        ct = headers_dict.get("content-type") or default_media_type or "application/javascript"
+        return Response(b"" if request.method == "HEAD" else c_body, status_code=c_status, headers=headers_dict, media_type=ct)
+
+    try:
+        client = await _get_relay_http_client()
+        upstream = await client.get(
+            target_url,
+            headers={
+                "User-Agent": _DESKTOP_CHROME_UA,
+                "Accept": "*/*",
+                "Referer": "https://tver.jp/",
+            },
+            follow_redirects=True,
+            timeout=10,
+        )
+        body = bytes(upstream.content or b"")
+        ct = upstream.headers.get("content-type") or default_media_type or "application/javascript"
+        if upstream.status_code == 200 and body:
+            _STATIC_ASSET_CACHE[target_url] = (
+                time.time(),
+                200,
+                "OK",
+                [["content-type", ct]],
+                body,
+            )
+        return Response(
+            b"" if request.method == "HEAD" else body,
+            status_code=upstream.status_code,
+            media_type=ct,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Credentials": "true",
+                "Cache-Control": "public, max-age=31536000, immutable" if upstream.status_code == 200 else "no-store",
+            },
+        )
+    except Exception as exc:
+        return Response(f"upstream static error: {exc}".encode("utf-8"), status_code=502)
+
+
+async def _tver_next_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://tver.jp/_next/{clean}"
+    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
+    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
+
+
+async def _tver_streaksplayer_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://player.tver.jp/streaksplayer/{clean}"
+    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
+    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
+
+
+async def _tver_player_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://player.tver.jp/player/{clean}"
+    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
+    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
+
+
+async def _tver_config_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://player.tver.jp/config/{clean}"
+    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
+
+
+async def _tver_app_config_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://statics.tver.jp/app/config/{clean}"
+    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
+
+
+async def _tver_setting_js_asset(request: Request):
+    return await _serve_tver_upstream_static("https://s.tver.jp/setting.js", request, default_media_type="application/javascript")
+
+
+async def _tver_setting_json_asset(request: Request):
+    return await _serve_tver_upstream_static("https://s.tver.jp/setting.json", request, default_media_type="application/json")
+
+
+async def _tver_data_string_asset(request: Request, rest: str = ""):
+    param = rest or request.path_params.get("rest", "")
+    clean = param.lstrip("/")
+    target_url = f"https://s.tver.jp/data/string/{clean}"
+    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
+
+
+@router.api_route("/_next/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_next(request: Request, rest: str = ""):
+    return await _tver_next_asset(request, rest)
+
+
+@router.api_route("/streaksplayer/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_streaksplayer(request: Request, rest: str = ""):
+    return await _tver_streaksplayer_asset(request, rest)
+
+
+@router.api_route("/player/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_player(request: Request, rest: str = ""):
+    return await _tver_player_asset(request, rest)
+
+
+@router.api_route("/config/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_config(request: Request, rest: str = ""):
+    return await _tver_config_asset(request, rest)
+
+
+@router.api_route("/app/config/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_app_config(request: Request, rest: str = ""):
+    return await _tver_app_config_asset(request, rest)
+
+
+@router.api_route("/setting.js", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_setting_js(request: Request):
+    return await _tver_setting_js_asset(request)
+
+
+@router.api_route("/setting.json", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_setting_json(request: Request):
+    return await _tver_setting_json_asset(request)
+
+
+@router.api_route("/data/string/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
+async def route_tver_data_string(request: Request, rest: str = ""):
+    return await _tver_data_string_asset(request, rest)
+
+
 def _install_tver_routes() -> None:
     try:
         import app as host_app
 
-        if not any(
-            isinstance(r, Route)
-            and r.path == "/tver/sw.js"
-            and r.endpoint is _tver_sw_override
-            for r in host_app.app.router.routes
-        ):
-            host_app.app.router.routes.insert(
-                0, Route("/tver/sw.js", _tver_sw_override, methods=["GET", "HEAD"])
-            )
+        root_routes = [
+            ("/_next/{rest:path}", _tver_next_asset, ["GET", "HEAD"]),
+            ("/streaksplayer/{rest:path}", _tver_streaksplayer_asset, ["GET", "HEAD"]),
+            ("/player/{rest:path}", _tver_player_asset, ["GET", "HEAD"]),
+            ("/config/{rest:path}", _tver_config_asset, ["GET", "HEAD"]),
+            ("/app/config/{rest:path}", _tver_app_config_asset, ["GET", "HEAD"]),
+            ("/setting.js", _tver_setting_js_asset, ["GET", "HEAD"]),
+            ("/setting.json", _tver_setting_json_asset, ["GET", "HEAD"]),
+            ("/data/string/{rest:path}", _tver_data_string_asset, ["GET", "HEAD"]),
+            ("/tver/sw.js", _tver_sw_override, ["GET", "HEAD"]),
+        ]
+        for path_pattern, endpoint, methods in root_routes:
+            if not any(
+                isinstance(r, Route) and r.path == path_pattern
+                for r in host_app.app.router.routes
+            ):
+                host_app.app.router.routes.insert(
+                    0, Route(path_pattern, endpoint, methods=methods)
+                )
         if not any(
             isinstance(r, WebSocketRoute)
             and r.path == "/tver/wisp/"
@@ -3349,7 +3554,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       return h === "id.tver.jp" || h === "tverid.tver.jp" || h === "auth.tver.jp" || h === "user.tver.jp" ||
+             h === "user-api.tver.jp" ||
              h === "payments.id.tver.jp" || h === "payments.tverid.tver.jp" ||
+             (h === "s.tver.jp" && (u.pathname.includes("login") || u.pathname.includes("signup"))) ||
              h === "accounts.google.com" || h.endsWith(".google.com") || h === "appleid.apple.com" ||
              h.endsWith(".apple.com");
     }} catch (_) {{
@@ -4306,9 +4513,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     if (!reloaded) {{
       try {{ sessionStorage.setItem(SW_GUARD, "1"); }} catch (_) {{}}
       location.reload();
-      throw new Error("Service Worker control reload scheduled");
+      return;
     }}
-    throw new Error("TVer Service Worker did not take control");
+    console.warn("[SchoolHub TVer] SW controller not active, proceeding with direct transport fallback");
   }}
 
   async function recover(reason) {{
@@ -4460,7 +4667,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         clientLog("info", "safety-reveal-fallback", {{ target: stored }});
         showHealthy(stored);
       }}
-    }}, 3500);
+    }}, 1800);
   }}
 
   window.addEventListener("beforeunload", () => {{
@@ -4472,8 +4679,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   boot().catch((error) => {{
     clientLog("error", "boot-failed", {{ error: safeError(error) }});
     console.error("[SchoolHub TVer] boot failed", error);
-    cover.classList.remove("hidden");
-    cover.textContent = "ページを読み込めませんでした。再読み込みしてください。";
+    showHealthy();
   }});
 }})();
 </script>
@@ -4545,10 +4751,12 @@ async def tver_deep_link(subpath: str, request: Request):
     q = f"?{request.url.query}" if request.url.query else ""
     if clean.startswith(("http://", "https://")):
         target = _target_from_input(clean + q)
-    elif clean.startswith(("id.tver.jp", "tverid.tver.jp", "auth.tver.jp", "user.tver.jp")):
+    elif clean.startswith(("id.tver.jp", "tverid.tver.jp", "auth.tver.jp", "user.tver.jp", "s.tver.jp")):
         target = _target_from_input("https://" + clean + q)
     elif clean == "login" or clean.startswith("login/"):
         target = f"https://id.tver.jp/{clean}{q}"
+    elif clean == "login.html" or clean.startswith("login.html"):
+        target = f"https://s.tver.jp/{clean}{q}"
     elif clean == "signup" or clean.startswith("signup/"):
         target = f"https://id.tver.jp/{clean}{q}"
     else:
