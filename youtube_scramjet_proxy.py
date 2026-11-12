@@ -522,7 +522,11 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
+        'try{const _od=Object.getOwnPropertyDescriptor(_np,"onLine");const _og=new Proxy(_od&&_od.get?_od.get:()=>!0,{apply:()=>!0});e.box.unproxy.set(_og,_od?.get||(()=>!0));Object.defineProperty(_np,"onLine",{get:_og,enumerable:!0,configurable:!0});}catch(_){}'
+        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
         '}}'
+        'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
+        'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
         '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
@@ -684,6 +688,8 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'try{if(typeof window!=="undefined"){'
         'try{delete window.IdentityCredential;delete Window.prototype.IdentityCredential;}catch(_){}'
         'try{delete window.FederatedCredential;delete Window.prototype.FederatedCredential;}catch(_){}'
+        'try{if(window.addEventListener){const _origAdd=window.addEventListener;window.addEventListener=function(type,fn,opt){if(type==="offline")return;_origAdd.call(this,type,fn,opt);};}}catch(_){}'
+        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
         '}'
         'if(typeof navigator!=="undefined"){'
         'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
@@ -692,7 +698,11 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _ua=navigator.userAgent.replace(/HeadlessChrome\\//g,"Chrome/");'
         'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
         'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
-        '}}'
+        '}'
+        'try{if(_np){Object.defineProperty(_np,"onLine",{get:()=>true,enumerable:true,configurable:true});}}catch(_){}'
+        'try{if(!navigator.onLine){Object.defineProperty(navigator,"onLine",{get:()=>true,enumerable:true,configurable:true});}}catch(_){}'
+        'try{const _conn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_conn,enumerable:true,configurable:true});}}catch(_){}'
+        '}'
         'if(typeof document!=="undefined"&&typeof location!=="undefined"&&location.pathname.includes("/youtube/~/sj/")&&location.pathname.includes("youtube.com")&&!String(document.cookie||"").includes("PREF=")){'
         'document.cookie="PREF=f6=400&hl=ja&gl=JP; path=/; max-age=31536000";'
         '}}catch(_){}\n'
@@ -880,30 +890,34 @@ function isImmutableYtStaticBundle(target) {{
   if (h.endsWith('.ytimg.com') && p.startsWith('/yts/')) return true;
   return false;
 }}
-function checkShortCircuit(target) {{
+function checkShortCircuit(target, reqOrigin) {{
   if (!target) return null;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
+  const corsHeaders = {{
+    'Access-Control-Allow-Origin': reqOrigin || '*',
+    'Access-Control-Allow-Credentials': 'true',
+  }};
   if (h === 'fonts.googleapis.com' && (p === '/css' || p === '/css2')) {{
     return new Response('/* sh-fast-fonts */', {{
       status: 200,
-      headers: {{'Content-Type': 'text/css; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400'}},
+      headers: {{'Content-Type': 'text/css; charset=utf-8', ...corsHeaders, 'Cache-Control': 'public, max-age=86400'}},
     }});
   }}
   if (h.endsWith('.googlevideo.com') || h.endsWith('.c.youtube.com')) {{
     const exp = target.searchParams.get('expire') || '';
     if (p.includes(' ') || exp === '9421968081' || exp === '1685394838') {{
-      return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
+      return new Response(null, {{status: 204, headers: corsHeaders}});
     }}
   }}
   if (
-    (p.includes('generate_204') && h !== 'accounts.google.com') || p.includes('error_204') || p.includes('csi_204') ||
+    (p.includes('generate_204') && h !== 'accounts.google.com' && h !== 'accounts.youtube.com') || p.includes('error_204') || p.includes('csi_204') ||
     p.startsWith('/pagead/') || p.startsWith('/api/stats/') || p.startsWith('/ptracking') ||
     h.endsWith('doubleclick.net') || h.endsWith('googlesyndication.com') ||
     h.endsWith('googleadservices.com') || h.includes('adservice.google') ||
     h.endsWith('google-analytics.com') || ((h === 'play.google.com' || h.endsWith('.play.google.com')) && p.includes('log'))
   ) {{
-    return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
+    return new Response(null, {{status: 204, headers: corsHeaders}});
   }}
   if (
     p.startsWith('/youtubei/v1/log_event') ||
@@ -913,7 +927,7 @@ function checkShortCircuit(target) {{
   ) {{
     return new Response('{{}}', {{
       status: 200,
-      headers: {{'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'}},
+      headers: {{'Content-Type': 'application/json', ...corsHeaders}},
     }});
   }}
   return null;
@@ -937,7 +951,8 @@ self.addEventListener('fetch', event => {{
     }}
     const anyTarget = extractAnyVirtualUrl(event.request.url);
     if (anyTarget) {{
-      const sc = checkShortCircuit(anyTarget);
+      const reqOrigin = event.request.headers.get('Origin') || '';
+      const sc = checkShortCircuit(anyTarget, reqOrigin);
       if (sc) {{
         event.respondWith(sc);
         return;
@@ -2399,8 +2414,24 @@ def _decode_repeated_str(val: str) -> str:
 
 def _extract_sj_virtual_url(raw_rest: str, query_str: str) -> str:
     from urllib.parse import unquote
+    import base64
     decoded_rest = _decode_repeated_str(raw_rest)
     m = re.search(r"(https?://.*)$", decoded_rest, re.I)
+    if not m:
+        for part in raw_rest.split("/"):
+            if not part:
+                continue
+            try:
+                padded = part + "=" * ((4 - len(part) % 4) % 4)
+                dec = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", "ignore")
+                if dec.startswith("http://") or dec.startswith("https://"):
+                    m_b64 = re.search(r"(https?://.*)$", dec, re.I)
+                    if m_b64:
+                        decoded_rest = m_b64.group(1)
+                        m = m_b64
+                        break
+            except Exception:
+                pass
     if not m:
         return ""
     base = m.group(1)
@@ -2448,41 +2479,12 @@ async def youtube_sj_direct_fallback(rest: str, request: Request):
     """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
     fetches bypass the Service Worker and request /youtube/~/sj/... directly."""
     if request.method == "OPTIONS":
+        req_orig = request.headers.get("origin") or "*"
         return Response(
             status_code=204,
             headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-            },
-        )
-    if request.method == "POST":
-        virtual_post_url = _extract_sj_virtual_url(rest, request.url.query)
-        if virtual_post_url:
-            try:
-                p_post = urlparse(virtual_post_url)
-                h_post = (p_post.hostname or "").lower().rstrip(".")
-                if h_post == "play.google.com" or h_post in AUTH_HOSTS:
-                    post_body = await request.body()
-                    session = await _get_curl_session()
-                    if session is not None:
-                        await session.request(
-                            method="POST",
-                            url=virtual_post_url,
-                            headers={
-                                "User-Agent": request.headers.get("user-agent") or _DESKTOP_CHROME_UA,
-                                "Content-Type": request.headers.get("content-type") or "application/x-www-form-urlencoded;charset=UTF-8",
-                            },
-                            data=post_body if post_body else None,
-                            allow_redirects=False,
-                            timeout=6,
-                        )
-            except Exception:
-                pass
-        return Response(
-            status_code=204,
-            headers={
-                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Origin": req_orig,
+                "Access-Control-Allow-Credentials": "true",
                 "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
             },
@@ -2524,16 +2526,38 @@ async def youtube_sj_direct_fallback(rest: str, request: Request):
         if any(host == s or host.endswith("." + s) for s in YOUTUBE_IMAGE_SUFFIXES):
             path_l = (parsed.path or "").lower()
             if host.endswith(("gstatic.com", "googleapis.com")):
-                if not path_l.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif", ".bmp", ".woff2", ".woff", ".ttf", ".otf")):
-                    return Response(b"Service Worker route required", status_code=404)
-            elif path_l.endswith((".js", ".mjs", ".cjs", ".json", ".css", ".html", ".wasm")):
-                return Response(b"Service Worker route required", status_code=404)
-            return await _serve_youtube_image_url(
-                virtual_url, request.method, request.headers.get("accept") or ""
-            )
+                if path_l.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif", ".bmp", ".woff2", ".woff", ".ttf", ".otf")):
+                    return await _serve_youtube_image_url(
+                        virtual_url, request.method, request.headers.get("accept") or ""
+                    )
+            elif not path_l.endswith((".js", ".mjs", ".cjs", ".json", ".css", ".html", ".wasm")):
+                return await _serve_youtube_image_url(
+                    virtual_url, request.method, request.headers.get("accept") or ""
+                )
     except Exception:
-        return Response(b"bad virtual url", status_code=400)
-    return Response(b"Service Worker route required", status_code=404)
+        pass
+
+    req_body = await request.body()
+    raw_headers = list(request.headers.items())
+    status, status_text, out_headers, resp_body = await _execute_relay_core(
+        virtual_url, request.method, raw_headers, req_body
+    )
+    resp = Response(
+        content=b"" if request.method == "HEAD" else resp_body,
+        status_code=status,
+    )
+    raw_out = []
+    for k, v in out_headers:
+        kl = str(k).lower()
+        if kl in ("transfer-encoding", "content-length", "connection", "access-control-allow-origin", "access-control-allow-credentials"):
+            continue
+        raw_out.append((kl.encode("latin-1", "replace"), str(v).encode("latin-1", "replace")))
+    req_orig = request.headers.get("origin") or "*"
+    raw_out.append((b"access-control-allow-origin", req_orig.encode("latin-1")))
+    raw_out.append((b"access-control-allow-credentials", b"true"))
+    raw_out.append((b"access-control-expose-headers", b"*"))
+    resp.raw_headers = raw_out
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -4053,37 +4077,25 @@ async def youtube_runtime_gv_stream(request: Request):
     return StreamingResponse(_iter_gv(), status_code=upstream.status_code, headers=out_hdrs)
 
 
-@router.post("/youtube/runtime/http-relay", include_in_schema=False)
-async def youtube_http_relay(request: Request):
-    raw = await request.body()
-    if len(raw) < 4:
-        return Response(b"invalid frame", status_code=400)
-    meta_len = struct.unpack(">I", raw[:4])[0]
-    if len(raw) < 4 + meta_len:
-        return Response(b"truncated frame", status_code=400)
-    try:
-        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
-    except Exception:
-        return Response(b"bad json", status_code=400)
-
-    req_body = raw[4 + meta_len :]
-    url = str(meta.get("url") or "").strip()
-    method = str(meta.get("method") or "GET").upper().strip()
-    raw_headers = meta.get("headers") or []
-
+async def _execute_relay_core(
+    url: str,
+    method: str,
+    raw_headers: list | dict,
+    req_body: bytes,
+) -> tuple[int, str, list[list[str]], bytes]:
     try:
         parsed = urlparse(url)
     except Exception:
-        return Response(b"bad url", status_code=400)
+        return 400, "Bad Request", [["content-type", "text/plain"]], b"bad url"
 
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return Response(b"unsupported scheme", status_code=400)
+        return 400, "Bad Request", [["content-type", "text/plain"]], b"unsupported scheme"
 
     url = _strip_dollar_query(url)
     parsed = urlparse(url)
     host = parsed.hostname.lower().rstrip(".")
     if host == "fonts.googleapis.com" and (parsed.path or "") in ("/css", "/css2"):
-        return _pack_relay_response(
+        return (
             200,
             "OK",
             [
@@ -4096,17 +4108,17 @@ async def youtube_http_relay(request: Request):
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
         q_str = parsed.query or ""
         if " " in (parsed.path or "") or "expire=9421968081" in q_str or "expire=1685394838" in q_str:
-            return _pack_relay_response(
+            return (
                 204, "No Content", [["access-control-allow-origin", "*"]], b""
             )
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
-        return Response(b"unsupported port", status_code=403)
+        return 403, "Forbidden", [["content-type", "text/plain"]], b"unsupported port"
 
     try:
         await _ensure_public_host(host, port)
     except Exception:
-        return Response(b"blocked host", status_code=403)
+        return 403, "Forbidden", [["content-type", "text/plain"]], b"blocked host"
 
     if host in YOUTUBE_HOSTS and not req_body and "pbj=1" in (parsed.query or "") and (parsed.path or "").rstrip("/") == "/shorts":
         method = "GET"
@@ -4116,7 +4128,7 @@ async def youtube_http_relay(request: Request):
         cached = _STATIC_ASSET_CACHE.get(url)
         if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
             _, c_status, c_text, c_headers, c_body = cached
-            return _pack_relay_response(c_status, c_text, c_headers, c_body)
+            return c_status, c_text, c_headers, c_body
 
     req_headers: list[tuple[str, str]] = []
     seen_ua = False
@@ -4253,7 +4265,7 @@ async def youtube_http_relay(request: Request):
     # (dummy bandwidth probes were already filtered above by expire=9421968081 / 1685394838)
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
         if method == "OPTIONS":
-            return _pack_relay_response(
+            return (
                 204,
                 "No Content",
                 [
@@ -4334,9 +4346,9 @@ async def youtube_http_relay(request: Request):
                 if rkl in _RELAY_STRIP_RESP_HEADERS or rkl.startswith(":") or rkl.startswith("access-control-"):
                     continue
                 gv_out.append([rk, rv])
-            return _pack_relay_response(status, status_text, gv_out, resp_body)
+            return status, status_text, gv_out, resp_body
         except Exception as exc:
-            return _pack_relay_response(
+            return (
                 502,
                 "Bad Gateway",
                 [["content-type", "text/plain; charset=utf-8"], ["access-control-allow-origin", "*"]],
@@ -4344,7 +4356,7 @@ async def youtube_http_relay(request: Request):
             )
 
     if host == "youtube.com" and method == "GET":
-        return _pack_relay_response(
+        return (
             301,
             "Moved Permanently",
             [["location", urlunparse(("https", "www.youtube.com", parsed.path or "/", "", parsed.query, ""))]],
@@ -4356,7 +4368,7 @@ async def youtube_http_relay(request: Request):
         m_vstream = re.match(r"^/yts/stream/([A-Za-z0-9_-]{11})\.mp4$", parsed.path or "")
         if m_vstream:
             vid_s = m_vstream.group(1)
-            return _pack_relay_response(
+            return (
                 302,
                 "Found",
                 [
@@ -4605,7 +4617,7 @@ async def youtube_http_relay(request: Request):
             if t and not t.done():
                 t.cancel()
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
-        return _pack_relay_response(
+        return (
             502,
             "Bad Gateway",
             [["content-type", "text/plain; charset=utf-8"]],
@@ -4637,7 +4649,7 @@ async def youtube_http_relay(request: Request):
         for t in (home_task, next_task):
             if t and not t.done():
                 t.cancel()
-        return _pack_relay_response(
+        return (
             302,
             "Found",
             [
@@ -4711,6 +4723,30 @@ async def youtube_http_relay(request: Request):
             resp_body,
         )
 
+    return status, status_text, out_headers, resp_body
+
+
+@router.post("/youtube/runtime/http-relay", include_in_schema=False)
+async def youtube_http_relay(request: Request):
+    raw = await request.body()
+    if len(raw) < 4:
+        return Response(b"invalid frame", status_code=400)
+    meta_len = struct.unpack(">I", raw[:4])[0]
+    if len(raw) < 4 + meta_len:
+        return Response(b"truncated frame", status_code=400)
+    try:
+        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
+    except Exception:
+        return Response(b"bad json", status_code=400)
+
+    req_body = raw[4 + meta_len :]
+    url = str(meta.get("url") or "").strip()
+    method = str(meta.get("method") or "GET").upper().strip()
+    raw_headers = meta.get("headers") or []
+
+    status, status_text, out_headers, resp_body = await _execute_relay_core(
+        url, method, raw_headers, req_body
+    )
     return _pack_relay_response(status, status_text, out_headers, resp_body)
 
 
@@ -5500,11 +5536,16 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
+      const corsOrigin = (typeof location !== "undefined" && location.origin) ? location.origin : "*";
+      const corsHeaders = [
+        ["access-control-allow-origin", corsOrigin],
+        ["access-control-allow-credentials", "true"],
+      ];
       if (h === "fonts.googleapis.com" && (p === "/css" || p === "/css2")) {{
         const b = new TextEncoder().encode("/* sh-fast-fonts */").buffer;
         return {{
           body: b,
-          headers: [["content-type", "text/css; charset=utf-8"], ["access-control-allow-origin", "*"], ["cache-control", "public, max-age=86400"]],
+          headers: [["content-type", "text/css; charset=utf-8"], ...corsHeaders, ["cache-control", "public, max-age=86400"]],
           status: 200,
           statusText: "OK",
         }};
@@ -5512,7 +5553,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       if (h.endsWith(".googlevideo.com") || h.endsWith(".c.youtube.com")) {{
         const exp = u.searchParams.get("expire") || "";
         if (p.includes(" ") || exp === "9421968081" || exp === "1685394838") {{
-          return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
+          return {{ body: new ArrayBuffer(0), headers: [...corsHeaders], status: 204, statusText: "No Content" }};
         }}
       }}
       if (
@@ -5522,7 +5563,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
         h.endsWith("doubleclick.net") || h.endsWith("googlesyndication.com") ||
         h.endsWith("googleadservices.com") || h.includes("adservice.google")
       ) {{
-        return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
+        return {{ body: new ArrayBuffer(0), headers: [...corsHeaders], status: 204, statusText: "No Content" }};
       }}
       if (
         p.startsWith("/youtubei/v1/log_event") ||
@@ -5533,7 +5574,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
         const b = new TextEncoder().encode("{{}}").buffer;
         return {{
           body: b,
-          headers: [["content-type", "application/json"], ["access-control-allow-origin", "*"]],
+          headers: [["content-type", "application/json"], ...corsHeaders],
           status: 200,
           statusText: "OK",
         }};
@@ -5906,7 +5947,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       }} catch (e) {{ console.debug("UrlWatcherPlugin", e); }}
     }}
     if (typeof U.CatchEscapedLinksPlugin === "function") {{
-      try {{ result.push(new U.CatchEscapedLinksPlugin(() => new URL(location.href))); }} catch (e) {{ console.debug("CatchEscapedLinksPlugin", e); }}
+      try {{
+        result.push(new U.CatchEscapedLinksPlugin((escapedUrl) => {{
+          try {{
+            const u = escapedUrl instanceof URL ? escapedUrl.href : String(escapedUrl || "");
+            if (u && (u.startsWith("http://") || u.startsWith("https://"))) {{
+              return new URL("/youtube/?q=" + encodeURIComponent(u), location.origin);
+            }}
+          }} catch (_) {{}}
+          return new URL(location.href);
+        }}));
+      }} catch (e) {{ console.debug("CatchEscapedLinksPlugin", e); }}
     }}
     return result;
   }}
