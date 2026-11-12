@@ -107,7 +107,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-wasm-uaf-fix-v64"
+FLORR_SW_REVISION = "2026-11-12-cf-bot-fix-v65"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1428,6 +1428,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
     isDiscordOrOAuthHost(hostname) {
       const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
       return (
+        h === 'florr.io' || h.endsWith('.florr.io') ||
+        h === 'm28.io' || h.endsWith('.m28.io') ||
         h === 'discord.com' || h.endsWith('.discord.com') ||
         h === 'discordapp.com' || h.endsWith('.discordapp.com') ||
         h === 'discord.gg' || h.endsWith('.discord.gg') ||
@@ -2133,7 +2135,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         15000,
         'transport preflight ' + target
       );
-      const ok = response && Number(response.status) >= 200 && Number(response.status) < 500;
+      const ok = response && Number(response.status) >= 200 && Number(response.status) < 400;
       log('TRANSPORT PREFLIGHT:', wisp, target, 'status=' + String(response?.status), 'ok=' + String(ok));
       if (!ok) throw new Error('preflight returned status ' + String(response?.status));
     }
@@ -2489,9 +2491,18 @@ self.addEventListener('fetch', event => {
       if (
         targetRaw.includes('sentry.io/api/') ||
         targetRaw.includes('/api/v9/science') ||
-        targetRaw.includes('/api/v9/track')
+        targetRaw.includes('/api/v9/track') ||
+        targetRaw.includes('/cdn-cgi/challenge-platform/') ||
+        targetRaw.includes('challenges.cloudflare.com')
       ) {
-        event.respondWith(new Response(null, { status: 204, headers: { 'access-control-allow-origin': '*' } }));
+        event.respondWith(new Response('/* cf-challenge-disabled */', {
+          status: 200,
+          headers: {
+            'content-type': 'application/javascript',
+            'access-control-allow-origin': '*',
+            'cache-control': 'no-store'
+          }
+        }));
         return;
       }
       if (
@@ -2738,7 +2749,7 @@ def _get_http_relay_curl_session() -> StatelessCurlSession | None:
         return None
     if _HTTP_RELAY_CURL_SESSION is None:
         _HTTP_RELAY_CURL_SESSION = StatelessCurlSession(
-            impersonate="chrome",
+            impersonate="chrome131",
             allow_redirects=False,
             timeout=25,
             max_clients=64,
@@ -2789,14 +2800,19 @@ def _is_cf_rate_limited_or_blocked(status_code: int, body: bytes, is_discord_hos
     if status_code == 403:
         return True
     if body and len(body) < 65536:
-        low = body[:8192]
+        low = body[:16384].lower()
         if (
-            b"Error 1015" in low
-            or b"You are being rate limited" in low
+            b"error 1015" in low
+            or b"you are being rate limited" in low
             or b"cf-error-details" in low
-            or b"Attention Required! | Cloudflare" in low
-            or b"Just a moment..." in low
+            or b"attention required! | cloudflare" in low
+            or b"just a moment..." in low
             or b"cf-chl-" in low
+            or b"performing security verification" in low
+            or b"security service to protect against malicious bots" in low
+            or b"verifies you are not a bot" in low
+            or b"cf-mitigated" in low
+            or b"enable javascript and cookies to continue" in low
         ):
             return True
     return False
@@ -2883,6 +2899,20 @@ async def florr_http_relay(request: Request):
     if not target_url.startswith(("http://", "https://")):
         return Response("Unsupported URL scheme", status_code=400)
 
+    if "/cdn-cgi/challenge-platform/" in target_url or "challenges.cloudflare.com" in target_url:
+        dummy_body = b"/* cf-challenge-disabled */"
+        meta_bytes = json.dumps({
+            "status": 204,
+            "statusText": "No Content",
+            "headers": {"content-type": "application/javascript"},
+        }, separators=(",", ":")).encode("utf-8")
+        framed = struct.pack(">I", len(meta_bytes)) + meta_bytes + dummy_body
+        return Response(
+            content=framed,
+            media_type="application/octet-stream",
+            headers={"Cache-Control": "no-store"},
+        )
+
     body_bytes = None
     if body_b64:
         try:
@@ -2926,6 +2956,12 @@ async def florr_http_relay(request: Request):
         or target_host.endswith(".discord.com")
         or target_host == "discordapp.com"
         or target_host.endswith(".discordapp.com")
+    )
+    is_florr_host = (
+        target_host == "florr.io"
+        or target_host.endswith(".florr.io")
+        or target_host == "m28.io"
+        or target_host.endswith(".m28.io")
     )
     is_hcaptcha_host = target_host == "hcaptcha.com" or target_host.endswith(".hcaptcha.com")
     is_hcaptcha_api = target_host == "api.hcaptcha.com" or target_host == "api2.hcaptcha.com" or target_host.endswith(".w.hcaptcha.com")
@@ -3058,9 +3094,9 @@ async def florr_http_relay(request: Request):
         _INFLIGHT_STATIC_ASSETS[target_url] = inflight_fut
 
     try:
-        # Build ordered candidate egress list: None = direct Render egress, or Wisp URL
+        # Build ordered candidate egress list: Wisp pool prioritized for Cloudflare hosts (Florr & Discord)
         now_mono = time.monotonic()
-        direct_rate_limited = is_discord_host and (now_mono < _DISCORD_DIRECT_RATE_LIMITED_UNTIL)
+        direct_rate_limited = (is_discord_host or is_florr_host) and (now_mono < _DISCORD_DIRECT_RATE_LIMITED_UNTIL)
         wisp_candidates: list[str] = []
         if _LAST_GOOD_HTTP_WISP and _LAST_GOOD_HTTP_WISP in WISP_SERVERS:
             wisp_candidates.append(_LAST_GOOD_HTTP_WISP)
@@ -3068,8 +3104,8 @@ async def florr_http_relay(request: Request):
             if w not in wisp_candidates:
                 wisp_candidates.append(w)
 
-        if is_discord_host or direct_rate_limited:
-            # Prioritize Wisp proxy pool for all Discord requests to prevent Cloudflare Error 1015
+        if is_discord_host or is_florr_host or direct_rate_limited:
+            # Prioritize Wisp proxy pool for all Discord and Florr requests to prevent Cloudflare bot challenge / 403
             candidates: list[str | None] = list(wisp_candidates) + [None]
         else:
             candidates = [None] + list(wisp_candidates)
@@ -3087,14 +3123,14 @@ async def florr_http_relay(request: Request):
                     skip_resp_headers,
                     proxy_url=proxy_url,
                 )
-                status_code, status_text, resp_headers, resp_body = sc, st, rh, rb
-                if _is_cf_rate_limited_or_blocked(sc, rb, is_discord_host):
-                    if wisp_url is None and is_discord_host:
+                if _is_cf_rate_limited_or_blocked(sc, rb, is_discord_host or is_florr_host):
+                    if wisp_url is None:
                         _DISCORD_DIRECT_RATE_LIMITED_UNTIL = time.monotonic() + 600.0
                         _log(f"HTTP RELAY DIRECT RATE-LIMITED ({sc}) {target_url} -> switching to Wisp pool for 600s")
                     else:
                         _log(f"HTTP RELAY WISP RATE-LIMITED ({sc}) wisp={wisp_url} {target_url} -> trying next")
                     continue
+                status_code, status_text, resp_headers, resp_body = sc, st, rh, rb
                 if wisp_url is not None:
                     _LAST_GOOD_HTTP_WISP = wisp_url
                     if idx > 0 or direct_rate_limited:
@@ -3110,7 +3146,7 @@ async def florr_http_relay(request: Request):
                     resp_headers = {"content-type": "text/plain; charset=utf-8"}
 
         ct = str(resp_headers.get("content-type", "")).lower()
-        if "text/html" in ct and is_discord_host and resp_body:
+        if "text/html" in ct and (is_discord_host or is_florr_host) and resp_body:
             try:
                 html_str = resp_body.decode("utf-8", errors="replace")
                 html_str = re.sub(
@@ -3120,7 +3156,13 @@ async def florr_http_relay(request: Request):
                     flags=re.IGNORECASE,
                 )
                 html_str = re.sub(
-                    r"<script\b[^>]*>[^<]*?/cdn-cgi/challenge-platform/[^<]*?</script>",
+                    r"<script\b[^>]*>(?:(?!</script>).)*?(?:/cdn-cgi/challenge-platform/|challenges\.cloudflare\.com)(?:(?!</script>).)*?</script>",
+                    "",
+                    html_str,
+                    flags=re.IGNORECASE | re.DOTALL,
+                )
+                html_str = re.sub(
+                    r"<script\b[^>]*?src=[\"'][^\"']*?(?:/cdn-cgi/challenge-platform/|challenges\.cloudflare\.com)[^\"']*?[\"'][^>]*>.*?</script>",
                     "",
                     html_str,
                     flags=re.IGNORECASE | re.DOTALL,
@@ -3164,6 +3206,12 @@ async def florr_scramjet_virtual_fallback(request: Request, rest: str):
         import app as host_app
         return await host_app.scramjet_asset("scramjet.wasm.js")
     raw_target = unquote(rest)
+    if "/cdn-cgi/challenge-platform/" in raw_target or "challenges.cloudflare.com" in raw_target:
+        return Response(
+            b"/* cf-challenge-disabled */",
+            media_type="application/javascript",
+            headers={"Cache-Control": "no-store", "Access-Control-Allow-Origin": "*"}
+        )
     if raw_target.startswith("data:"):
         try:
             header, payload = raw_target[5:].split(",", 1)
