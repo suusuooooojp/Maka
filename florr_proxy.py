@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-ws-hybrid-v68"
+FLORR_SW_REVISION = "2026-11-12-ws-direct-v69"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -2166,18 +2166,24 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
       };
 
       const startHybridFlorrGameSocket = () => {
-        let winner = null; // 'direct' | 'relay'
+        let winner = null; // 'direct-epoxy' | 'direct-native' | 'server-bridge'
         let directWs = null;
         let relayWs = null;
-        let directTimer = null;
-        let relayDelayTimer = null;
-        let directFailed = false;
+        let epoxySend = null;
+        let epoxyClose = null;
+        let overallTimer = null;
+        let directNativeFailed = false;
+        let epoxyFailed = false;
         let relayFailed = false;
-        let relayInitiated = false;
         let flushingHybridQueue = false;
 
-        const flushHybridQueue = (ws) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN || flushingHybridQueue || !queued.length) return;
+        let targetHref = url.href;
+        if (location.protocol === 'https:' && targetHref.startsWith('ws://')) {
+          targetHref = 'wss://' + targetHref.slice(5);
+        }
+
+        const flushHybridQueue = (sendFn) => {
+          if (!sendFn || flushingHybridQueue || !queued.length) return;
           flushingHybridQueue = true;
           try {
             while (queued.length) {
@@ -2185,7 +2191,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
               queued = [];
               for (const item of pending) {
                 try {
-                  ws.send(item);
+                  sendFn(item);
                 } catch (sendErr) {
                   log('TRANSPORT WS HYBRID QUEUED SEND ERROR:', '#' + n, sendErr?.message || String(sendErr));
                   onerror(sendErr);
@@ -2198,93 +2204,153 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           }
         };
 
-        const chooseWinner = (choice, winningWs, protocol, extensions) => {
+        const chooseWinner = (choice, handles) => {
           if (winner !== null || localClosed) {
-            try { winningWs.close(1000, 'stale winner'); } catch (_) {}
+            try { handles?.close?.(1000, 'stale winner'); } catch (_) {}
             return;
           }
           winner = choice;
           opened = true;
-          if (directTimer !== null) { clearTimeout(directTimer); directTimer = null; }
-          if (relayDelayTimer !== null) { clearTimeout(relayDelayTimer); relayDelayTimer = null; }
+          if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
 
           const elapsed = Math.round(performance.now() - started);
-          log('TRANSPORT WS HYBRID WINNER:', '#' + n, 'winner=' + choice, url.href,
-              'protocol=' + String(protocol || ''),
+          log('TRANSPORT WS HYBRID WINNER:', '#' + n, 'winner=' + choice, targetHref,
+              'protocol=' + String(handles?.protocol || ''),
               'elapsed_ms=' + elapsed);
 
-          if (choice === 'direct') {
+          if (choice === 'direct-native' || choice === 'direct-epoxy') {
             window.__florr_direct_ws_works = true;
             window.__florr_direct_ws_failures = 0;
-            if (relayWs) {
-              try {
-                relayWs.onopen = relayWs.onmessage = relayWs.onerror = relayWs.onclose = null;
-                relayWs.close(1000, 'direct won');
-              } catch (_) {}
-              relayWs = null;
-            }
-            activeSend = (data) => {
-              const safeData = cloneFrameIfNeeded(data);
-              if (directWs && directWs.readyState === WebSocket.OPEN && !flushingHybridQueue) {
-                directWs.send(safeData);
-              } else {
-                queued.push(safeData);
-              }
-            };
-            activeClose = (code, reason) => {
-              try { directWs?.close(code || 1000, reason || ''); } catch (_) {}
-            };
-            flushHybridQueue(directWs);
-            onopen(protocol || directWs.protocol || '', extensions || directWs.extensions || '');
-            flushHybridQueue(directWs);
-          } else {
-            // choice === 'relay'
-            if (directWs) {
-              try {
-                directWs.onopen = directWs.onmessage = directWs.onerror = directWs.onclose = null;
-                directWs.close(1000, 'relay won');
-              } catch (_) {}
-              directWs = null;
-            }
-            activeSend = (data) => {
-              const safeData = cloneFrameIfNeeded(data);
-              if (relayWs && relayWs.readyState === WebSocket.OPEN && !flushingHybridQueue) {
-                relayWs.send(safeData);
-              } else {
-                queued.push(safeData);
-              }
-            };
-            activeClose = (code, reason) => {
-              try { relayWs?.close(code || 1000, reason || ''); } catch (_) {}
-            };
-            flushHybridQueue(relayWs);
-            onopen(protocol || relayWs.protocol || '', extensions || '');
-            flushHybridQueue(relayWs);
           }
+
+          // Cleanly cancel losers
+          if (choice !== 'direct-native' && directWs) {
+            try {
+              directWs.onopen = directWs.onmessage = directWs.onerror = directWs.onclose = null;
+              directWs.close(1000, 'loser');
+            } catch (_) {}
+            directWs = null;
+          }
+          if (choice !== 'direct-epoxy' && epoxyClose) {
+            try { epoxyClose(1000, 'loser'); } catch (_) {}
+            epoxyClose = null;
+          }
+          if (choice !== 'server-bridge' && relayWs) {
+            try {
+              relayWs.onopen = relayWs.onmessage = relayWs.onerror = relayWs.onclose = null;
+              relayWs.close(1000, 'loser');
+            } catch (_) {}
+            relayWs = null;
+          }
+
+          activeSend = (data) => {
+            const safeData = cloneFrameIfNeeded(data);
+            try {
+              handles.send(safeData);
+            } catch (err) {
+              queued.push(safeData);
+            }
+          };
+          activeClose = (code, reason) => {
+            try { handles.close(code || 1000, reason || ''); } catch (_) {}
+          };
+
+          flushHybridQueue(handles.send);
+          onopen(handles?.protocol || '', handles?.extensions || '');
+          flushHybridQueue(handles.send);
         };
 
-        const onBothFailed = (err) => {
+        const onAllFailed = (err) => {
           if (winner !== null || opened || localClosed) return;
-          log('TRANSPORT WS HYBRID BOTH FAILED:', '#' + n, url.href, err?.message || String(err));
-          onerror(err || new Error('both direct and relay failed'));
+          log('TRANSPORT WS HYBRID ALL FAILED:', '#' + n, targetHref, err?.message || String(err));
+          onerror(err || new Error('all hybrid websocket candidate paths failed'));
           onclose(1006, 'hybrid connection failed');
+        };
+
+        const checkAllFailed = () => {
+          if (winner !== null || opened || localClosed) return;
+          if (directNativeFailed && epoxyFailed && relayFailed) {
+            onAllFailed(new Error('all hybrid websocket paths failed (direct-epoxy, direct-native, server-bridge)'));
+          }
         };
 
         activeClose = (code, reason) => {
           localClosed = true;
-          if (directTimer !== null) { clearTimeout(directTimer); directTimer = null; }
-          if (relayDelayTimer !== null) { clearTimeout(relayDelayTimer); relayDelayTimer = null; }
+          if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
           try { directWs?.close(code || 1000, reason || ''); } catch (_) {}
+          try { epoxyClose?.(code || 1000, reason || ''); } catch (_) {}
           try { relayWs?.close(code || 1000, reason || ''); } catch (_) {}
         };
 
-        // --- PATH A: Direct Native WebSocket ---
-        const startDirectAttempt = () => {
-          let targetHref = url.href;
-          if (location.protocol === 'https:' && targetHref.startsWith('ws://')) {
-            targetHref = 'wss://' + targetHref.slice(5);
+        // --- PATH 1: Direct Client-Side Epoxy/Wisp (runs in WASM, sends Origin: https://florr.io directly) ---
+        const startDirectEpoxyAttempt = () => {
+          const transport = (Array.isArray(this.gameWsTransports) && this.gameWsTransports[0]) || this.wsTransport;
+          if (!transport || typeof transport.connect !== 'function') {
+            log('TRANSPORT WS HYBRID DIRECT EPOXY UNAVAILABLE');
+            epoxyFailed = true;
+            checkAllFailed();
+            return;
           }
-          log('TRANSPORT WS HYBRID DIRECT TRY:', '#' + n, targetHref,
+          log('TRANSPORT WS HYBRID DIRECT EPOXY TRY:', '#' + n, targetHref);
+          try {
+            const handles = transport.connect(
+              url,
+              protocols,
+              normalizedHeaders,
+              (protocol, extensions) => {
+                if (winner !== null || localClosed) {
+                  try { epoxyClose?.(1000, 'stale epoxy'); } catch (_) {}
+                  return;
+                }
+                chooseWinner('direct-epoxy', {
+                  send: epoxySend,
+                  close: epoxyClose,
+                  protocol: protocol || '',
+                  extensions: extensions || ''
+                });
+              },
+              (data) => {
+                if (winner !== 'direct-epoxy') return;
+                const bytes = sizeOf(data);
+                recvBytes += bytes;
+                if (recvBytes === bytes) {
+                  log('TRANSPORT WS FIRST DATA (DIRECT EPOXY):', '#' + n, targetHref, 'bytes=' + bytes);
+                }
+                onmessage(data);
+              },
+              (code, reason) => {
+                log('TRANSPORT WS HYBRID DIRECT EPOXY CLOSE:', '#' + n, 'code=' + code, 'reason=' + String(reason || ''));
+                if (winner === 'direct-epoxy') {
+                  onclose(code, reason || '');
+                } else if (winner === null) {
+                  epoxyFailed = true;
+                  checkAllFailed();
+                }
+              },
+              (error) => {
+                log('TRANSPORT WS HYBRID DIRECT EPOXY ERROR:', '#' + n, error?.message || String(error));
+                if (winner === 'direct-epoxy') {
+                  onerror(error);
+                } else if (winner === null) {
+                  epoxyFailed = true;
+                  checkAllFailed();
+                }
+              }
+            );
+            if (Array.isArray(handles) && handles.length >= 2) {
+              epoxySend = handles[0];
+              epoxyClose = handles[1];
+            }
+          } catch (err) {
+            log('TRANSPORT WS HYBRID DIRECT EPOXY CREATE ERROR:', '#' + n, err?.message || String(err));
+            epoxyFailed = true;
+            checkAllFailed();
+          }
+        };
+
+        // --- PATH 2: Direct Native WebSocket (Raw browser WebSocket attempt) ---
+        const startDirectNativeAttempt = () => {
+          log('TRANSPORT WS HYBRID DIRECT NATIVE TRY:', '#' + n, targetHref,
               'protocols=' + JSON.stringify(protocols || []));
           try {
             const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
@@ -2293,131 +2359,84 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
               : new WSConstructor(targetHref);
             directWs.binaryType = 'arraybuffer';
           } catch (err) {
-            log('TRANSPORT WS HYBRID DIRECT CREATE ERROR:', '#' + n, targetHref, err?.message || String(err));
-            directFailed = true;
-            triggerRelayImmediately('direct create failed');
+            log('TRANSPORT WS HYBRID DIRECT NATIVE CREATE ERROR:', '#' + n, err?.message || String(err));
+            directNativeFailed = true;
+            checkAllFailed();
             return;
           }
-
-          // Timeout for direct native WS: generous 7500ms (fixes premature timeout)
-          directTimer = setTimeout(() => {
-            if (winner !== null || directFailed || localClosed) return;
-            log('TRANSPORT WS HYBRID DIRECT TIMEOUT (7500ms):', '#' + n, targetHref);
-            directFailed = true;
-            try { directWs?.close(1000, 'direct attempt timeout'); } catch (_) {}
-            if (!relayInitiated) {
-              triggerRelayImmediately('direct timeout');
-            } else if (relayFailed) {
-              onBothFailed(new Error('direct native timeout (7500ms)'));
-            }
-          }, 7500);
 
           directWs.onopen = () => {
             if (winner !== null || localClosed) {
               try { directWs.close(1000, 'stale direct'); } catch (_) {}
               return;
             }
-            chooseWinner('direct', directWs, directWs.protocol, directWs.extensions);
+            chooseWinner('direct-native', {
+              send: (data) => directWs.send(data),
+              close: (code, reason) => { try { directWs.close(code || 1000, reason || ''); } catch (_) {} },
+              protocol: directWs.protocol || '',
+              extensions: directWs.extensions || ''
+            });
           };
 
           directWs.onmessage = (event) => {
-            if (winner !== 'direct') return;
+            if (winner !== 'direct-native') return;
             const data = event.data;
             const bytes = sizeOf(data);
             recvBytes += bytes;
             if (recvBytes === bytes) {
-              log('TRANSPORT WS FIRST DATA (DIRECT):', '#' + n, targetHref, 'bytes=' + bytes);
+              log('TRANSPORT WS FIRST DATA (DIRECT NATIVE):', '#' + n, targetHref, 'bytes=' + bytes);
             }
             onmessage(data);
           };
 
           directWs.onerror = (event) => {
-            const detail = event?.error || event?.message || 'direct native ws error';
-            log('TRANSPORT WS HYBRID DIRECT ERROR:', '#' + n, targetHref, String(detail));
-            if (winner === 'direct') {
+            const detail = event?.error || event?.message || 'direct native ws rejected';
+            log('TRANSPORT WS HYBRID DIRECT NATIVE NOTICE:', '#' + n, targetHref, String(detail));
+            if (winner === 'direct-native') {
               onerror(new Error(String(detail)));
             } else if (winner === null) {
-              directFailed = true;
+              directNativeFailed = true;
               window.__florr_direct_ws_failures = (window.__florr_direct_ws_failures || 0) + 1;
-              triggerRelayImmediately('direct error: ' + String(detail));
-              if (relayFailed) onBothFailed(new Error('direct error: ' + String(detail)));
+              checkAllFailed();
             }
           };
 
           directWs.onclose = (event) => {
-            log('TRANSPORT WS HYBRID DIRECT CLOSE:', '#' + n, targetHref,
+            log('TRANSPORT WS HYBRID DIRECT NATIVE CLOSE:', '#' + n, targetHref,
                 'code=' + String(event.code),
                 'reason=' + String(event.reason || ''),
                 'winner=' + String(winner));
-            if (winner === 'direct') {
+            if (winner === 'direct-native') {
               onclose(event.code, event.reason || '');
             } else if (winner === null) {
-              directFailed = true;
+              directNativeFailed = true;
               window.__florr_direct_ws_failures = (window.__florr_direct_ws_failures || 0) + 1;
-              triggerRelayImmediately('direct closed before open: ' + event.code);
-              if (relayFailed) onBothFailed(new Error('direct closed before open: ' + event.code));
+              checkAllFailed();
             }
           };
         };
 
-        // --- PATH B: Fast Server Relay ---
-        const triggerRelayImmediately = (cause) => {
-          if (relayInitiated || winner !== null || localClosed) return;
-          if (relayDelayTimer !== null) {
-            clearTimeout(relayDelayTimer);
-            relayDelayTimer = null;
-          }
-          startRelayAttempt(cause);
-        };
-
-        const startRelayAttempt = async (cause) => {
-          if (relayInitiated || winner !== null || localClosed) return;
-          relayInitiated = true;
-          log('TRANSPORT WS HYBRID RELAY START:', '#' + n, url.href, 'cause=' + String(cause));
-
-          let relayUrl;
+        // --- PATH 3: Ultra-Fast Direct Server Relay Bridge (no HTTP ticket delay) ---
+        const startServerBridgeAttempt = () => {
+          log('TRANSPORT WS HYBRID SERVER BRIDGE TRY:', '#' + n, targetHref);
           try {
-            const ticketHeaders = {};
-            for (const pair of normalizedHeaders) {
-              if (pair && pair.length >= 2) ticketHeaders[String(pair[0])] = String(pair[1]);
-            }
-            const ticketDiag = collectGameSessionDiag();
-            const ticketResponse = await fetch(new URL('/florr_ws_ticket', location.origin).href, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-              credentials: 'same-origin',
-              cache: 'no-store',
-              body: JSON.stringify({
-                target: url.href,
-                protocols: protocols || [],
-                headers: ticketHeaders,
-                diag: ticketDiag
-              })
-            });
-            if (winner !== null || localClosed) return;
-            if (!ticketResponse.ok) throw new Error('relay ticket HTTP ' + ticketResponse.status);
-            const ticketPayload = await ticketResponse.json();
-            if (!ticketPayload.ticket) throw new Error('relay ticket missing');
-            relayUrl = new URL('/florr_ws_bridge', location.origin);
-            relayUrl.searchParams.set('ticket', ticketPayload.ticket);
-          } catch (err) {
-            log('TRANSPORT WS HYBRID RELAY TICKET ERROR:', '#' + n, err?.message || String(err));
-            relayFailed = true;
-            if (directFailed) onBothFailed(err);
-            return;
-          }
+            const bridgeUrl = new URL('/florr_ws_bridge', location.origin);
+            bridgeUrl.searchParams.set('target', targetHref);
+            try {
+              const cookieStr = this.cookieProvider ? this.cookieProvider(url.href) : (document.cookie || '');
+              if (cookieStr) bridgeUrl.searchParams.set('cookie', cookieStr);
+            } catch (_) {}
+            bridgeUrl.searchParams.set('session_id', typeof __florr_diag_session !== 'undefined' ? __florr_diag_session : '');
 
-          if (winner !== null || localClosed) return;
-
-          try {
+            const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
             relayWs = protocols && protocols.length
-              ? new WebSocket(relayUrl.href, protocols)
-              : new WebSocket(relayUrl.href);
+              ? new WSConstructor(bridgeUrl.href, protocols)
+              : new WSConstructor(bridgeUrl.href);
             relayWs.binaryType = 'arraybuffer';
           } catch (err) {
-            log('TRANSPORT WS HYBRID RELAY CREATE ERROR:', '#' + n, err?.message || String(err));
+            log('TRANSPORT WS HYBRID SERVER BRIDGE CREATE ERROR:', '#' + n, err?.message || String(err));
             relayFailed = true;
-            if (directFailed) onBothFailed(err);
+            checkAllFailed();
             return;
           }
 
@@ -2426,57 +2445,61 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
               try { relayWs.close(1000, 'stale relay'); } catch (_) {}
               return;
             }
-            chooseWinner('relay', relayWs, relayWs.protocol, '');
+            chooseWinner('server-bridge', {
+              send: (data) => relayWs.send(data),
+              close: (code, reason) => { try { relayWs.close(code || 1000, reason || ''); } catch (_) {} },
+              protocol: relayWs.protocol || '',
+              extensions: relayWs.extensions || ''
+            });
           };
 
           relayWs.onmessage = (event) => {
-            if (winner !== 'relay') return;
+            if (winner !== 'server-bridge') return;
             const data = event.data;
             const bytes = sizeOf(data);
             recvBytes += bytes;
             if (recvBytes === bytes) {
-              log('TRANSPORT WS FIRST DATA (RELAY):', '#' + n, url.href, 'bytes=' + bytes);
+              log('TRANSPORT WS FIRST DATA (SERVER BRIDGE):', '#' + n, url.href, 'bytes=' + bytes);
             }
             onmessage(data);
           };
 
           relayWs.onerror = (event) => {
-            const detail = event?.error || event?.message || 'relay ws error';
-            log('TRANSPORT WS HYBRID RELAY ERROR:', '#' + n, String(detail));
-            if (winner === 'relay') {
+            const detail = event?.error || event?.message || 'server bridge ws error';
+            log('TRANSPORT WS HYBRID SERVER BRIDGE ERROR:', '#' + n, String(detail));
+            if (winner === 'server-bridge') {
               onerror(new Error(String(detail)));
             } else if (winner === null) {
               relayFailed = true;
-              if (directFailed) onBothFailed(new Error('relay ws error: ' + String(detail)));
+              checkAllFailed();
             }
           };
 
           relayWs.onclose = (event) => {
-            log('TRANSPORT WS HYBRID RELAY CLOSE:', '#' + n,
+            log('TRANSPORT WS HYBRID SERVER BRIDGE CLOSE:', '#' + n,
                 'code=' + String(event.code),
                 'reason=' + String(event.reason || ''),
                 'winner=' + String(winner));
-            if (winner === 'relay') {
+            if (winner === 'server-bridge') {
               onclose(event.code, event.reason || '');
             } else if (winner === null) {
               relayFailed = true;
-              if (directFailed) onBothFailed(new Error('relay ws closed before open: ' + event.code));
+              checkAllFailed();
             }
           };
         };
 
-        // Dual-path execution:
-        // Always attempt direct native WebSocket first
-        startDirectAttempt();
+        // Safety timeout across all paths (10000ms)
+        overallTimer = setTimeout(() => {
+          if (winner !== null || opened || localClosed) return;
+          log('TRANSPORT WS HYBRID OVERALL TIMEOUT (10000ms):', '#' + n, targetHref);
+          onAllFailed(new Error('hybrid websocket timeout (10000ms) across all candidate paths'));
+        }, 10000);
 
-        // Stagger relay by 500ms (or 200ms if direct had recent failures)
-        const relayDelayMs = (window.__florr_direct_ws_failures > 0 && !window.__florr_direct_ws_works) ? 200 : 500;
-        relayDelayTimer = setTimeout(() => {
-          if (winner === null && !relayInitiated && !localClosed) {
-            log('TRANSPORT WS HYBRID PARALLEL RELAY TRIGGER:', '#' + n, 'delay=' + relayDelayMs + 'ms');
-            startRelayAttempt('hybrid dual-path race');
-          }
-        }, relayDelayMs);
+        // Tri-path parallel racing: launch all 3 candidate paths simultaneously!
+        startDirectEpoxyAttempt();
+        startDirectNativeAttempt();
+        startServerBridgeAttempt();
       };
 
       (async () => {
@@ -3961,6 +3984,22 @@ async def florr_ws_bridge(websocket: WebSocket):
             expires_at, target, ticket_headers, ticket_diag = item
             if expires_at <= time.monotonic():
                 target = None
+    if not target:
+        qs = parse_qs(query)
+        direct_target = qs.get("target", [None])[0]
+        if direct_target:
+            target = direct_target
+            cookie_param = qs.get("cookie", [""])[0]
+            session_id = qs.get("session_id", [""])[0]
+            ticket_headers = {
+                "origin": UPSTREAM_ORIGIN,
+                "referer": UPSTREAM_ORIGIN + "/",
+                "user-agent": websocket.headers.get("user-agent", DEFAULT_UA),
+            }
+            client_cookie = cookie_param or websocket.headers.get("cookie", "")
+            if client_cookie:
+                ticket_headers["cookie"] = client_cookie
+            ticket_diag = {"session_id": session_id, "direct_param": True}
     if not target:
         _log("WS BRIDGE rejected: missing target")
         await websocket.close(code=1008, reason="missing target")
