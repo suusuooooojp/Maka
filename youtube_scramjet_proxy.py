@@ -80,6 +80,16 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
         fresh_connect = getattr(CurlOpt, "FRESH_CONNECT", None)
         if fresh_connect is not None:
             curl.setopt(fresh_connect, 1 if fresh else 0)
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
+            ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
+            if ipresolve is not None:
+                curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
+        if connect_timeout_ms is not None:
+            curl.setopt(connect_timeout_ms, 12000)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
     except Exception:
         pass
 
@@ -139,7 +149,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-yt-v42"
+RUNTIME_REV = "20261112-yt-v43"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -885,9 +895,10 @@ function isImmutableYtStaticBundle(target) {{
   if (!target) return false;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
-  if (!/\\.(js|mjs|css)(\\?|$)/i.test(p)) return false;
-  if ((h === 'www.youtube.com' || h === 'm.youtube.com' || h === 'music.youtube.com') && p.startsWith('/s/')) return true;
-  if (h.endsWith('.ytimg.com') && p.startsWith('/yts/')) return true;
+  if ((h === 'www.youtube.com' || h === 'm.youtube.com' || h === 'music.youtube.com') && (p.startsWith('/s/') || p.includes('/_/js/'))) return true;
+  if (h.endsWith('.ytimg.com') && (p.startsWith('/yts/') || /\\.(js|mjs|css|woff2?|svg)(\\?|$)/i.test(p))) return true;
+  if ((h === 'fonts.gstatic.com' || h === 'www.gstatic.com' || h === 'fonts.googleapis.com') && (/\\.(woff2?|ttf|svg|png|css|js)(\\?|$)/i.test(p) || p.startsWith('/s/i/') || p.startsWith('/css') || p.startsWith('/icon'))) return true;
+  if (/\\.(js|mjs|css)(\\?|$)/i.test(p) && (h.endsWith('.youtube.com') || h.endsWith('.ytimg.com') || h.endsWith('.google.com') || h.endsWith('.gstatic.com'))) return true;
   return false;
 }}
 function checkShortCircuit(target, reqOrigin) {{
@@ -1097,13 +1108,13 @@ _CURL_SESSION_LOCK = asyncio.Lock()
 _MEDIA_HTTP_CLIENT: httpx.AsyncClient | None = None
 _MEDIA_HTTP_CLIENT_LOCK = asyncio.Lock()
 _IMAGE_CACHE: dict[str, tuple[float, int, str, bytes, str]] = {}
-_IMAGE_CACHE_TTL = 3600.0
-_IMAGE_CACHE_MAX_ITEMS = 512
-_IMAGE_CACHE_MAX_BYTES = 512 * 1024
+_IMAGE_CACHE_TTL = 86400.0
+_IMAGE_CACHE_MAX_ITEMS = 2048
+_IMAGE_CACHE_MAX_BYTES = 1024 * 1024
 _STATIC_ASSET_CACHE: dict[str, tuple[float, int, str, list[list[str]], bytes]] = {}
-_STATIC_ASSET_TTL = 1800.0
-_STATIC_ASSET_MAX_ITEMS = 1024
-_STATIC_ASSET_MAX_BYTES = 4 * 1024 * 1024
+_STATIC_ASSET_TTL = 86400.0
+_STATIC_ASSET_MAX_ITEMS = 2048
+_STATIC_ASSET_MAX_BYTES = 8 * 1024 * 1024
 
 _RELAY_STRIP_REQ_HEADERS = {
     "host",
@@ -1148,6 +1159,7 @@ async def _get_curl_session():
         if _CURL_SESSION is None:
             _CURL_SESSION = StatelessCurlSession(
                 impersonate="chrome131",
+                default_headers=False,
                 allow_redirects=False,
                 timeout=25,
                 max_clients=64,
@@ -1274,7 +1286,6 @@ async def _serve_youtube_image_url(raw_url: str, method: str, accept_header: str
         "User-Agent": _DESKTOP_CHROME_UA,
         "Accept": accept_header
         or "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
-        "Accept-Encoding": "identity",
         "Referer": "https://www.youtube.com/",
     }
     try:
@@ -1412,15 +1423,21 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         path = parsed.path or ""
-        if host in ("www.youtube.com", "m.youtube.com", "music.youtube.com") and path.startswith("/s/"):
+        if host in ("www.youtube.com", "m.youtube.com", "music.youtube.com") and (
+            path.startswith("/s/") or "/_/js/" in path
+        ):
             return True
         if host.endswith(".ytimg.com") and (
-            path.startswith("/yts/") or path.endswith((".js", ".css", ".woff2", ".svg", ".png", ".jpg", ".webp"))
+            path.startswith("/yts/") or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf", ".svg", ".png", ".jpg", ".webp"))
         ):
             return True
         if host in ("fonts.gstatic.com", "www.gstatic.com", "fonts.googleapis.com") and (
             path.endswith((".woff2", ".woff", ".ttf", ".svg", ".png", ".css", ".js"))
             or path.startswith(("/s/i/", "/css", "/icon"))
+        ):
+            return True
+        if path.endswith((".js", ".css", ".woff2", ".woff", ".ttf")) and (
+            host.endswith(".youtube.com") or host.endswith(".ytimg.com") or host.endswith(".gstatic.com")
         ):
             return True
     except Exception:
@@ -1429,7 +1446,11 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
 
 
 def _pack_relay_response(
-    status: int, status_text: str, headers_list: list[list[str]], body: bytes
+    status: int,
+    status_text: str,
+    headers_list: list[list[str]],
+    body: bytes,
+    accept_encoding: str = "",
 ) -> Response:
     meta_bytes = json.dumps(
         {
@@ -1440,14 +1461,27 @@ def _pack_relay_response(
         ensure_ascii=False,
     ).encode("utf-8")
     payload = struct.pack(">I", len(meta_bytes)) + meta_bytes + body
+    headers = {
+        "Cache-Control": "private, no-store, no-cache, must-revalidate",
+        "Pragma": "no-cache",
+        "Vary": "Accept-Encoding",
+    }
+    if "gzip" in (accept_encoding or "").lower() and len(payload) >= 1024:
+        try:
+            gz_payload = gzip.compress(payload, compresslevel=4)
+            if len(gz_payload) < len(payload):
+                headers["Content-Encoding"] = "gzip"
+                return Response(
+                    gz_payload,
+                    media_type="application/octet-stream",
+                    headers=headers,
+                )
+        except Exception:
+            pass
     return Response(
         payload,
         media_type="application/octet-stream",
-        headers={
-            "Cache-Control": "private, no-store, no-cache, must-revalidate",
-            "Pragma": "no-cache",
-            "Vary": "*",
-        },
+        headers=headers,
     )
 
 
@@ -4258,7 +4292,7 @@ async def _execute_relay_core(
             cookie_parts.append(v)
         else:
             header_dict[k] = v
-    if cookie_parts:
+    if cookie_parts and not cacheable:
         header_dict["Cookie"] = "; ".join(cookie_parts)
 
     # Relay real googlevideo.com / .c.youtube.com MSE, SABR, and HLS requests
@@ -4388,9 +4422,11 @@ async def _execute_relay_core(
         or host.endswith(".google.com")
         or any(k.lower() in ("authorization", "x-goog-authuser") for k in header_dict)
     )
+    is_root_nav = (parsed.path or "") in ("", "/") and not (parsed.query or "")
     if (
         is_yt_host
         and not cacheable
+        and not is_root_nav
         and not has_user_auth_cookie
         and "__Secure-YNID=" not in existing_cookie_str
     ):
@@ -4707,7 +4743,6 @@ async def _execute_relay_core(
     if (
         cacheable
         and not has_set_cookie
-        and not cookie_parts
         and not has_sensitive_auth
         and status == 200
         and 0 < len(resp_body) <= _STATIC_ASSET_MAX_BYTES
@@ -4747,7 +4782,8 @@ async def youtube_http_relay(request: Request):
     status, status_text, out_headers, resp_body = await _execute_relay_core(
         url, method, raw_headers, req_body
     )
-    return _pack_relay_response(status, status_text, out_headers, resp_body)
+    accept_enc = request.headers.get("accept-encoding", "")
+    return _pack_relay_response(status, status_text, out_headers, resp_body, accept_encoding=accept_enc)
 
 
 # ---------------------------------------------------------------------------
@@ -5524,9 +5560,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      if ((h === "www.youtube.com" || h === "m.youtube.com" || h === "music.youtube.com") && p.startsWith("/s/")) return true;
-      if (h.endsWith(".ytimg.com") && (p.startsWith("/yts/") || /\\.(js|css|woff2|svg|png|jpg|webp)$/i.test(p))) return true;
+      if ((h === "www.youtube.com" || h === "m.youtube.com" || h === "music.youtube.com") && (p.startsWith("/s/") || p.includes("/_/js/"))) return true;
+      if (h.endsWith(".ytimg.com") && (p.startsWith("/yts/") || /\\.(js|css|woff2|woff|ttf|svg|png|jpg|webp)$/i.test(p))) return true;
       if ((h === "fonts.gstatic.com" || h === "www.gstatic.com" || h === "fonts.googleapis.com") && (p.startsWith("/s/i/") || p.startsWith("/css") || p.startsWith("/icon") || /\\.(woff2|woff|ttf|svg|png|css|js)$/i.test(p))) return true;
+      if (/\\.(js|mjs|css|woff2?)(\\?|$)/i.test(p) && (h.endsWith(".youtube.com") || h.endsWith(".ytimg.com") || h.endsWith(".gstatic.com"))) return true;
     }} catch (_) {{}}
     return false;
   }}
@@ -5784,8 +5821,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       }}
 
       const list = normalizeHeadersList(headers, urlStr);
-      const hasCookie = list.some(([k]) => k.toLowerCase() === "cookie");
-      const canClientCache = !hasCookie && isClientCacheableAsset(m, urlStr);
+      const canClientCache = isClientCacheableAsset(m, urlStr);
       if (canClientCache && typeof caches !== "undefined") {{
         try {{
           const cache = await caches.open(STATIC_CACHE_NAME);
