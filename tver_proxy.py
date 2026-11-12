@@ -105,7 +105,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-tver14"
+RUNTIME_REV = "20261112-tver15"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -121,6 +121,9 @@ AUTH_HOSTS = {
     "id.tver.jp",
     "tverid.tver.jp",
     "auth.tver.jp",
+    "user.tver.jp",
+    "payments.id.tver.jp",
+    "payments.tverid.tver.jp",
     "accounts.google.com",
     "appleid.apple.com",
 }
@@ -709,40 +712,45 @@ async def _serve_patched_runtime(asset_name: str, patcher, request: Request) -> 
 
         return await host_app.scramjet_asset(asset_name)
     patched, gz = pair
+    is_head = request.method == "HEAD"
     ae = (request.headers.get("accept-encoding") or "").lower()
     if "gzip" in ae:
         return Response(
-            gz,
+            b"" if is_head else gz,
             media_type="application/javascript",
             headers={
                 "Cache-Control": "public, max-age=86400, immutable",
                 "Content-Encoding": "gzip",
+                "Content-Length": str(len(gz)),
                 "Vary": "Accept-Encoding",
             },
         )
     return Response(
-        patched,
+        b"" if is_head else patched,
         media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=86400, immutable"},
+        headers={
+            "Cache-Control": "public, max-age=86400, immutable",
+            "Content-Length": str(len(patched)),
+        },
     )
 
 
-@router.get("/tver/runtime/scramjet.js", include_in_schema=False)
+@router.api_route("/tver/runtime/scramjet.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def tver_scramjet_js(request: Request):
     return await _serve_patched_runtime("scramjet.js", _patch_scramjet_js, request)
 
 
-@router.get("/tver/runtime/controller.api.js", include_in_schema=False)
+@router.api_route("/tver/runtime/controller.api.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def tver_controller_api(request: Request):
     return await _serve_patched_runtime("controller.api.js", _patch_controller_api, request)
 
 
-@router.get("/tver/runtime/controller.sw.js", include_in_schema=False)
+@router.api_route("/tver/runtime/controller.sw.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def tver_controller_sw(request: Request):
     return await _serve_patched_runtime("controller.sw.js", _patch_controller_sw, request)
 
 
-@router.get("/tver/runtime/controller.inject.js", include_in_schema=False)
+@router.api_route("/tver/runtime/controller.inject.js", methods=["GET", "HEAD"], include_in_schema=False)
 async def tver_controller_inject(request: Request):
     return await _serve_patched_runtime("controller.inject.js", _patch_controller_inject, request)
 
@@ -755,7 +763,17 @@ const TVER_REWRITTEN_CACHE = 'sh-tver-rewritten-{RUNTIME_REV}';
 const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
 const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
 const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
-const blockedDirectHosts = new Set();
+const directBlockedHosts = new Map();
+function isDirectBlocked(host) {{
+  const exp = directBlockedHosts.get(host);
+  if (!exp) return false;
+  if (Date.now() < exp) return true;
+  directBlockedHosts.delete(host);
+  return false;
+}}
+function blockDirectHost(host, ttlMs = 60000) {{
+  if (host) directBlockedHosts.set(host, Date.now() + ttlMs);
+}}
 function fetchWithFastTimeout(url, opts, ms) {{
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
@@ -811,6 +829,7 @@ function isStreamCdnTarget(target) {{
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   if (h.endsWith('.api.streaks.jp')) return false;
   if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
+  if (/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(p)) return true;
   if ((
       h.endsWith('.tver.jp') || h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') ||
       h.endsWith('.akamaihd.net') || h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') ||
@@ -1150,7 +1169,7 @@ self.addEventListener('fetch', event => {{
               if (hit) return asOut(hit, method);
             }} catch {{}}
           }}
-          if (!isTverDomain && !canCache && !blockedDirectHosts.has(targetHost)) {{
+          if (!isTverDomain && !canCache && !isDirectBlocked(targetHost)) {{
             try {{
               const cdnResp = await fetchWithFastTimeout(anyTarget.href, {{
                 method,
@@ -1161,11 +1180,11 @@ self.addEventListener('fetch', event => {{
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get('content-type') || '').toLowerCase();
                 if (ct.includes('text/html') || ct.includes('application/xhtml')) {{
-                  blockedDirectHosts.add(targetHost);
+                  blockDirectHost(targetHost);
                 }} else if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
                   const rawTxt = await cdnResp.text();
                   if (!rawTxt.trimStart().startsWith('#EXTM3U')) {{
-                    blockedDirectHosts.add(targetHost);
+                    blockDirectHost(targetHost);
                   }} else {{
                     const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, forNative);
                     return new Response(rewritten, {{
@@ -1189,10 +1208,10 @@ self.addEventListener('fetch', event => {{
                   }});
                 }}
               }} else {{
-                blockedDirectHosts.add(targetHost);
+                blockDirectHost(targetHost);
               }}
             }} catch {{
-              blockedDirectHosts.add(targetHost);
+              blockDirectHost(targetHost);
             }}
           }}
           const fetchRelayAsset = async () => {{
@@ -1703,7 +1722,7 @@ def _rewrite_hls_manifest(
             return f"{origin_prefix}/tver/runtime/media-relay?native=1&via=server&k={_encode_media_key(abs_url)}"
         if origin_prefix:
             return f"{origin_prefix}/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
-        return abs_url
+        return f"/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
 
     text = re.sub(
         r'URI="([^"]+)"',
@@ -3173,7 +3192,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 <main class="stage">
   <div class="cover" id="cover">読み込み中…</div>
   <iframe id="frame" title="TVer"
-    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture; identity-credentials-get; publickey-credentials-get; web-share"
     referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </main>
 
@@ -3251,8 +3270,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     try {{
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
-      return h === "id.tver.jp" || h === "tverid.tver.jp" || h === "auth.tver.jp" ||
-             h === "accounts.google.com" || h.endsWith(".google.com") || h === "appleid.apple.com";
+      return h === "id.tver.jp" || h === "tverid.tver.jp" || h === "auth.tver.jp" || h === "user.tver.jp" ||
+             h === "payments.id.tver.jp" || h === "payments.tverid.tver.jp" ||
+             h === "accounts.google.com" || h.endsWith(".google.com") || h === "appleid.apple.com" ||
+             h.endsWith(".apple.com");
     }} catch (_) {{
       return false;
     }}
@@ -3330,6 +3351,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
     if (h.endsWith(".api.streaks.jp")) return false;
     if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
+    if (/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(p)) return true;
     if ((
         h.endsWith(".tver.jp") || h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") ||
         h.endsWith(".akamaihd.net") || h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") ||
@@ -3433,7 +3455,17 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }}
 
   const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
-  const blockedDirectHosts = new Set();
+  const directBlockedHosts = new Map();
+  function isDirectBlocked(host) {{
+    const exp = directBlockedHosts.get(host);
+    if (!exp) return false;
+    if (Date.now() < exp) return true;
+    directBlockedHosts.delete(host);
+    return false;
+  }}
+  function blockDirectHost(host, ttlMs = 60000) {{
+    if (host) directBlockedHosts.set(host, Date.now() + ttlMs);
+  }}
 
   function fetchDirectWithTimeout(url, init, timeoutMs, outerSignal) {{
     const ac = new AbortController();
@@ -3660,7 +3692,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const canCache = m === "GET" && !rangeEntry && isCacheableImageTarget(unwrapped);
         const isM3u8Path = /\\.m3u8(\\?|$)/i.test(unwrapped.pathname || "");
         try {{
-          if (!isTverHost && !canCache && !blockedDirectHosts.has(uHost)) {{
+          if (!isTverHost && !canCache && !isDirectBlocked(uHost)) {{
             try {{
               const cdnHdrs = {{}};
               if (rangeEntry && rangeEntry[1] && !isM3u8Path) cdnHdrs["Range"] = rangeEntry[1];
@@ -3673,11 +3705,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
                 if (ct.includes("text/html") || ct.includes("application/xhtml")) {{
-                  blockedDirectHosts.add(uHost);
+                  blockDirectHost(uHost);
                 }} else if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
                   const rawTxt = await cdnResp.text();
                   if (!rawTxt.trimStart().startsWith("#EXTM3U")) {{
-                    blockedDirectHosts.add(uHost);
+                    blockDirectHost(uHost);
                   }} else {{
                     const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
                     return {{
@@ -3701,10 +3733,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                   }};
                 }}
               }} else {{
-                blockedDirectHosts.add(uHost);
+                blockDirectHost(uHost);
               }}
             }} catch (_) {{
-              if (!signal?.aborted) blockedDirectHosts.add(uHost);
+              if (!signal?.aborted) blockDirectHost(uHost);
             }}
           }}
           if (canCache && typeof caches !== "undefined") {{
@@ -3751,7 +3783,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const apiHost = (() => {{
           try {{ return new URL(urlStr).hostname.toLowerCase().replace(/\\.$/, ""); }} catch (_) {{ return ""; }}
         }})();
-        if (apiHost && !blockedDirectHosts.has(apiHost)) {{
+        if (apiHost && !isDirectBlocked(apiHost)) {{
           try {{
             const isSsai = apiHost === "ssai.api.streaks.jp";
             const corsHeaders = {{}};
@@ -3777,20 +3809,18 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
             }}, 3000, signal);
             const apiCt = String(apiResp?.headers?.get("content-type") || "").toLowerCase();
             if (apiCt.includes("text/html") || apiCt.includes("application/xhtml")) {{
-              blockedDirectHosts.add(apiHost);
+              blockDirectHost(apiHost);
             }} else if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
               let outBuf = m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer();
-              if (m === "GET" && outBuf.byteLength > 0) {{
-                const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
-                if (!parsedPb || typeof parsedPb !== "object") {{
-                  throw new Error("invalid streaks json");
+              if (apiHost === "playback.api.streaks.jp" && m === "GET" && outBuf.byteLength > 0) {{
+                try {{
+                  const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
+                  if (parsedPb && typeof parsedPb === "object" && "ads" in parsedPb) {{
+                    delete parsedPb.ads;
+                    outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
+                  }} catch (_) {{}}
                 }}
-                if (apiHost === "playback.api.streaks.jp" && "ads" in parsedPb) {{
-                  delete parsedPb.ads;
-                  outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
-                }}
-              }}
-              return {{
+                return {{
                 body: outBuf,
                 headers: [...apiResp.headers.entries()],
                 status: apiResp.status,
@@ -3798,7 +3828,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               }};
             }}
           }} catch (_) {{
-            if (!signal?.aborted) blockedDirectHosts.add(apiHost);
+            if (!signal?.aborted) blockDirectHost(apiHost);
           }}
         }}
       }}
@@ -4334,15 +4364,29 @@ async def _prewarm_tver_on_startup() -> None:
     _schedule_tver_prewarm(TVER_HOME)
 
 
-@router.get("/tver", include_in_schema=False)
-async def tver_redirect():
+@router.api_route("/tver", methods=["GET", "HEAD"], include_in_schema=False)
+async def tver_redirect(request: Request):
+    if request.method == "HEAD":
+        return Response(b"", status_code=307, headers={"Location": "/tver/"})
     return RedirectResponse("/tver/", status_code=307)
 
 
-@router.get("/tver/", response_class=HTMLResponse, include_in_schema=False)
-async def tver_home(q: str = "", url: str = ""):
+@router.api_route("/tver/", methods=["GET", "HEAD"], response_class=HTMLResponse, include_in_schema=False)
+async def tver_home(request: Request, q: str = "", url: str = ""):
     target = _target_from_input(url or q)
     _schedule_tver_prewarm(target)
+    if request.method == "HEAD":
+        return Response(
+            b"",
+            status_code=200,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "strict-origin-when-cross-origin",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
@@ -4351,8 +4395,10 @@ async def tver_home(q: str = "", url: str = ""):
     return response
 
 
-@router.get("/tver/health", include_in_schema=False)
-async def tver_health():
+@router.api_route("/tver/health", methods=["GET", "HEAD"], include_in_schema=False)
+async def tver_health(request: Request):
+    if request.method == "HEAD":
+        return Response(b"", status_code=200, media_type="application/json")
     return {
         "ok": True,
         "service": SERVICE_NAME,
@@ -4365,14 +4411,35 @@ async def tver_health():
     }
 
 
-@router.get("/tver/{subpath:path}", response_class=HTMLResponse, include_in_schema=False)
+@router.api_route("/tver/{subpath:path}", methods=["GET", "HEAD"], response_class=HTMLResponse, include_in_schema=False)
 async def tver_deep_link(subpath: str, request: Request):
     clean = (subpath or "").lstrip("/")
     if clean in ("sw.js", "wisp", "wisp/") or clean.startswith(("runtime/", "~/sj/", "openchat/")):
         return Response(b"not found", status_code=404)
     q = f"?{request.url.query}" if request.url.query else ""
-    target = f"https://tver.jp/{clean}{q}"
+    if clean.startswith(("http://", "https://")):
+        target = _target_from_input(clean + q)
+    elif clean.startswith(("id.tver.jp", "tverid.tver.jp", "auth.tver.jp", "user.tver.jp")):
+        target = _target_from_input("https://" + clean + q)
+    elif clean == "login" or clean.startswith("login/"):
+        target = f"https://id.tver.jp/{clean}{q}"
+    elif clean == "signup" or clean.startswith("signup/"):
+        target = f"https://id.tver.jp/{clean}{q}"
+    else:
+        target = f"https://tver.jp/{clean}{q}"
     _schedule_tver_prewarm(target)
+    if request.method == "HEAD":
+        return Response(
+            b"",
+            status_code=200,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Referrer-Policy": "strict-origin-when-cross-origin",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
