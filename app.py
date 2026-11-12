@@ -2146,7 +2146,7 @@ async def _background_prewarm_runtime_assets() -> None:
             return_exceptions=True,
         )
         warm_tasks = []
-        for mod_name in ("instagram_proxy", "youtube_scramjet_proxy", "x_proxy", "tver_proxy", "kazwire_proxy", "wakame_plus", "twitch_proxy", "tiktok_proxy"):
+        for mod_name in ("instagram_proxy", "youtube_scramjet_proxy", "x_proxy", "tver_proxy", "kazwire_proxy", "wakame_plus", "twitch_proxy", "tiktok_proxy", "florr_proxy"):
             mod = sys.modules.get(mod_name)
             fn = getattr(mod, "prewarm_service_cache", None) if mod else None
             if callable(fn):

@@ -35,6 +35,7 @@ except Exception:
     CurlCffiAsyncSession = None
     CurlOpt = None
 from fastapi import APIRouter, Request, Response, WebSocket, WebSocketDisconnect
+import florr_runtime_embedded
 
 for _np_var in ("NO_PROXY", "no_proxy"):
     _np_val = os.environ.get(_np_var, "")
@@ -107,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-ws-hybrid-v67"
+FLORR_SW_REVISION = "2026-11-12-ws-hybrid-v68"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1135,6 +1136,37 @@ async def _runtime_asset(name: str, *, patch=None) -> bytes:
     key = name + ("|patched" if patch else "")
     if key in RUNTIME_CACHE:
         return RUNTIME_CACHE[key]
+
+    # 1. Fast local return from pre-patched embedded assets
+    if patch and name == "controller.sw.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_SW"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_SW.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+    if patch and name == "controller.api.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_API"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_API.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+    if patch and name == "controller.inject.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_INJECT"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_INJECT.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+
+    # 2. Try host_app.scramjet_asset if available
+    try:
+        import app as host_app
+        resp = await host_app.scramjet_asset(name)
+        if getattr(resp, "status_code", 500) == 200 and getattr(resp, "body", b""):
+            body = bytes(resp.body)
+            if patch:
+                body = patch(body)
+                _log(f"RUNTIME PATCHED {name} (from host_app) bytes={len(body)}")
+            if body:
+                RUNTIME_CACHE[key] = body
+                return body
+    except Exception:
+        pass
+
+    # 3. Try CDN URLs
     last_error = None
     for base in CONTROLLER_CDN_URLS:
         try:
@@ -1150,6 +1182,21 @@ async def _runtime_asset(name: str, *, patch=None) -> bytes:
             return body
         except Exception as exc:
             last_error = exc
+
+    # 4. Final guaranteed fallback from embedded assets
+    if name == "controller.sw.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_SW"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_SW.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+    if name == "controller.api.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_API"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_API.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+    if name == "controller.inject.js" and hasattr(florr_runtime_embedded, "EMBEDDED_CONTROLLER_INJECT"):
+        body = florr_runtime_embedded.EMBEDDED_CONTROLLER_INJECT.encode("utf-8")
+        RUNTIME_CACHE[key] = body
+        return body
+
     raise RuntimeError(f"runtime asset {name} unavailable: {last_error!r}")
 
 
@@ -1167,6 +1214,23 @@ SCRAMJET_LAUNCHER = r'''<!doctype html>
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="stylesheet" href="/design-system/m3.css">
 <script src="/design-system/m3.js"></script>
+<link rel="preload" href="/florr/sw-florr.js?v=__FLORR_SW_REVISION__" as="script">
+<link rel="preload" href="/florr-runtime/scramjet.js?v=__SCRAMJET_VERSION__-__FLORR_SW_REVISION__" as="script">
+<link rel="preload" href="/florr-runtime/controller.api.js?v=__CONTROLLER_VERSION__-__FLORR_SW_REVISION__" as="script">
+<script>
+if ('serviceWorker' in navigator) {
+  try {
+    window.__florrSwRegP = navigator.serviceWorker.register('/florr/sw-florr.js?v=__FLORR_SW_REVISION__', {
+      scope: '/florr/',
+      updateViaCache: 'none',
+      type: 'classic'
+    }).catch(function(e) {
+      console.warn('[FLORR-DIAG] early SW registration catch:', e);
+      return null;
+    });
+  } catch (_) {}
+}
+</script>
 <style>
 :root{color-scheme:dark}
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sys-color-surface,#0f0f0f);font-family:var(--md-sys-typescale-font-plain,sans-serif)}
@@ -1311,26 +1375,66 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
     if (!('serviceWorker' in navigator)) throw new Error('Service Worker API unavailable');
 
     log('STEP 1: registering Service Worker');
-    const registration = await navigator.serviceWorker.register('/florr/sw-florr.js?v=__FLORR_SW_REVISION__', {
-      scope: '/florr/',
-      updateViaCache: 'none'
-    });
+    const swUrl = '/florr/sw-florr.js?v=__FLORR_SW_REVISION__';
 
-    log('SW REGISTERED:', registration.scope);
+    const isCurrentController = () => {
+      const ctrl = navigator.serviceWorker.controller;
+      return !!(ctrl && String(ctrl.scriptURL || '').includes('__FLORR_SW_REVISION__'));
+    };
+
+    let registration = null;
+    if (isCurrentController()) {
+      log('SW CONTROLLER ALREADY RUNNING CURRENT REVISION:', navigator.serviceWorker.controller.scriptURL);
+      try {
+        registration = await navigator.serviceWorker.getRegistration('/florr/');
+      } catch (_) {}
+    }
+
+    if (!registration) {
+      let regP = window.__florrSwRegP;
+      window.__florrSwRegP = null;
+      try {
+        registration = await withTimeout(
+          regP || navigator.serviceWorker.register(swUrl, {
+            scope: '/florr/',
+            updateViaCache: 'none',
+            type: 'classic'
+          }),
+          9000,
+          'SW register'
+        );
+      } catch (err1) {
+        log('SW INITIAL REGISTER NOTICE:', textOf(err1?.message || err1), '- executing WebKit recovery');
+        try {
+          const old = await navigator.serviceWorker.getRegistration('/florr/');
+          if (old) {
+            log('UPDATING OLD FLORR REGISTRATION...');
+            await old.update().catch(() => {});
+            registration = old;
+          }
+        } catch (_) {}
+        if (!registration || !registration.active) {
+          await new Promise(r => setTimeout(r, 350));
+          registration = await navigator.serviceWorker.register(swUrl, {
+            scope: '/florr/',
+            updateViaCache: 'none',
+            type: 'classic'
+          });
+        }
+      }
+    }
+
+    log('SW REGISTERED:', registration ? registration.scope : 'fallback');
     log('SW STATES:', {
-      installing: registration.installing && registration.installing.state,
-      waiting: registration.waiting && registration.waiting.state,
-      active: registration.active && registration.active.state,
+      installing: registration && registration.installing && registration.installing.state,
+      waiting: registration && registration.waiting && registration.waiting.state,
+      active: registration && registration.active && registration.active.state,
       controller: !!navigator.serviceWorker.controller
     });
 
     await withTimeout((async () => {
-      const isCurrentController = () => {
-        const ctrl = navigator.serviceWorker.controller;
-        return !!(ctrl && String(ctrl.scriptURL || '').includes('__FLORR_SW_REVISION__'));
-      };
       if (isCurrentController()) return;
-      const pending = registration.installing || registration.waiting;
+      const pending = registration && (registration.installing || registration.waiting);
       if (pending) {
         await new Promise(resolve => {
           const onState = () => {
@@ -1350,9 +1454,9 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           resolve();
         };
         navigator.serviceWorker.addEventListener('controllerchange', onChange, {once:true});
-        setTimeout(resolve, 2500);
+        setTimeout(resolve, 3000);
       });
-    })(), 7000, 'Service Worker control');
+    })(), 8500, 'Service Worker control');
 
     if (!navigator.serviceWorker.controller) {
       if (sessionStorage.getItem('__florr_sw_reload_once') !== '1') {
@@ -2780,9 +2884,22 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
 </html>'''
 
 
-SCRAMJET_SW = r'''importScripts('/florr-runtime/controller.sw.js?v=__CONTROLLER_VERSION__-__FLORR_SW_REVISION__');
+def build_service_worker_code() -> str:
+    ctrl_code = ""
+    try:
+        ctrl_code = florr_runtime_embedded.EMBEDDED_CONTROLLER_SW
+    except Exception:
+        pass
+    return (
+        ctrl_code
+        + "\n\n"
+        + SCRAMJET_SW.replace("__CONTROLLER_VERSION__", CONTROLLER_VERSION).replace(
+            "__FLORR_SW_REVISION__", FLORR_SW_REVISION
+        )
+    )
 
-const _swAssetCache = new Map();
+
+SCRAMJET_SW = r'''const _swAssetCache = new Map();
 
 self.addEventListener('install', event => {
   event.waitUntil(self.skipWaiting());
@@ -3018,34 +3135,70 @@ async def florr_scramjet_js(request: Request):
 @router.get("/florr-runtime/controller.api.js", include_in_schema=False)
 async def florr_controller_api(request: Request):
     try:
-        cache_hdr = "public, max-age=3600" if request.query_params.get("v") else "no-store"
+        cache_hdr = "public, max-age=3600" if (request and request.query_params.get("v")) else "no-store"
         body = await _runtime_asset("controller.api.js", patch=patch_controller_api)
-        return Response(body, media_type="application/javascript", headers={"Cache-Control": cache_hdr})
+        return Response(body, media_type="text/javascript", headers={
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": cache_hdr,
+            "Access-Control-Allow-Origin": "*",
+        })
     except Exception as exc:
         _log(f"RUNTIME controller.api FAILED: {type(exc).__name__}: {exc}")
-        return Response(f"controller api unavailable: {exc}", status_code=502)
+        return Response(
+            florr_runtime_embedded.EMBEDDED_CONTROLLER_API.encode("utf-8"),
+            media_type="text/javascript",
+            headers={
+                "Content-Type": "text/javascript; charset=utf-8",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
 
 @router.get("/florr-runtime/controller.sw.js", include_in_schema=False)
 async def florr_controller_sw(request: Request):
     try:
-        cache_hdr = "public, max-age=3600" if request.query_params.get("v") else "no-store"
+        cache_hdr = "public, max-age=3600" if (request and request.query_params.get("v")) else "no-store"
         body = await _runtime_asset("controller.sw.js", patch=patch_controller_sw)
-        return Response(body, media_type="application/javascript", headers={"Cache-Control": cache_hdr})
+        return Response(body, media_type="text/javascript", headers={
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": cache_hdr,
+            "Access-Control-Allow-Origin": "*",
+        })
     except Exception as exc:
         _log(f"RUNTIME controller.sw FAILED: {type(exc).__name__}: {exc}")
-        return Response(f"controller sw unavailable: {exc}", status_code=502)
+        return Response(
+            florr_runtime_embedded.EMBEDDED_CONTROLLER_SW.encode("utf-8"),
+            media_type="text/javascript",
+            headers={
+                "Content-Type": "text/javascript; charset=utf-8",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
 
 @router.get("/florr-runtime/controller.inject.js", include_in_schema=False)
 async def florr_controller_inject(request: Request):
     try:
-        cache_hdr = "public, max-age=3600" if request.query_params.get("v") else "no-store"
+        cache_hdr = "public, max-age=3600" if (request and request.query_params.get("v")) else "no-store"
         body = await _runtime_asset("controller.inject.js", patch=patch_controller_inject)
-        return Response(body, media_type="application/javascript", headers={"Cache-Control": cache_hdr})
+        return Response(body, media_type="text/javascript", headers={
+            "Content-Type": "text/javascript; charset=utf-8",
+            "Cache-Control": cache_hdr,
+            "Access-Control-Allow-Origin": "*",
+        })
     except Exception as exc:
         _log(f"RUNTIME controller.inject FAILED: {type(exc).__name__}: {exc}")
-        return Response(f"controller inject unavailable: {exc}", status_code=502)
+        return Response(
+            florr_runtime_embedded.EMBEDDED_CONTROLLER_INJECT.encode("utf-8"),
+            media_type="text/javascript",
+            headers={
+                "Content-Type": "text/javascript; charset=utf-8",
+                "Cache-Control": "no-store",
+                "Access-Control-Allow-Origin": "*",
+            },
+        )
 
 
 import hashlib
@@ -3551,21 +3704,18 @@ async def florr_scramjet_virtual_fallback(request: Request, rest: str):
 
 @router.get("/florr/sw-florr.js", include_in_schema=False)
 async def florr_service_worker_direct():
-    _log("SW GET /florr/sw-florr.js (controller import + single fetch router)")
-    try:
-        await _runtime_asset("controller.sw.js", patch=patch_controller_sw)
-        body = (
-            SCRAMJET_SW
-            .replace("__CONTROLLER_VERSION__", CONTROLLER_VERSION)
-            .replace("__FLORR_SW_REVISION__", FLORR_SW_REVISION)
-        )
-        return Response(body, media_type="application/javascript", headers={
+    _log("SW GET /florr/sw-florr.js (controller bundled + zero-import)")
+    body = build_service_worker_code()
+    return Response(
+        body,
+        media_type="text/javascript",
+        headers={
+            "Content-Type": "text/javascript; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Service-Worker-Allowed": "/florr/",
-        })
-    except Exception as exc:
-        _log(f"SW BUILD FAILED: {type(exc).__name__}: {exc}")
-        return Response(f"Florr service worker unavailable: {exc}", status_code=502)
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3688,16 +3838,30 @@ async def florr_launcher(request: Request):
 
 @router.get("/florr/sw.js", include_in_schema=False)
 async def florr_service_worker():
-    _log("SW GET /florr/sw.js")
-    code = SCRAMJET_SW.replace("__CONTROLLER_VERSION__", CONTROLLER_VERSION)
+    _log("SW GET /florr/sw.js (controller bundled + zero-import)")
+    body = build_service_worker_code()
     return Response(
-        code,
-        media_type="application/javascript",
+        body,
+        media_type="text/javascript",
         headers={
+            "Content-Type": "text/javascript; charset=utf-8",
             "Cache-Control": "no-store, no-cache, must-revalidate",
             "Service-Worker-Allowed": "/florr/",
+            "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+async def prewarm_service_cache() -> None:
+    try:
+        await asyncio.gather(
+            _runtime_asset("controller.sw.js", patch=patch_controller_sw),
+            _runtime_asset("controller.api.js", patch=patch_controller_api),
+            _runtime_asset("controller.inject.js", patch=patch_controller_inject),
+            return_exceptions=True,
+        )
+    except Exception as exc:
+        _log(f"Prewarm warning: {exc}")
 
 
 # ---------------------------------------------------------------------------
