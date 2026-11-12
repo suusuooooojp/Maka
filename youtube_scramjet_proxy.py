@@ -149,7 +149,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-yt-v45"
+RUNTIME_REV = "20261112-yt-v46"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -480,6 +480,7 @@ def _patch_controller_inject(source: bytes) -> bytes:
         'if(window.addEventListener){const _oa=window.addEventListener;window.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}'
         'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
         'try{Object.defineProperty(window,"ononline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
+        'try{const _op=window.open;window.open=function(u,...a){if(u&&(String(u).includes("accounts.google.")||String(u).includes("ServiceLogin"))){window.location.href=u;return window;}return _op?_op.call(this,u,...a):null;};}catch(_){}'
         '}}catch(_){}\n'
     )
     if not text.startswith("try{if(typeof navigator"):
@@ -4608,10 +4609,8 @@ async def _execute_relay_core(
     ephemeral_session: StatelessCurlSession | None = None
     try:
         if StatelessCurlSession is not None:
-            if has_sensitive_auth or (is_google_auth_req and is_safari_ua):
-                tls_imp = "chrome131"
-                if is_google_auth_req and is_safari_ua:
-                    tls_imp = "safari18_0_ios" if ("iPad" in client_ua or "iPhone" in client_ua or "Mobile" in client_ua) else "safari18_0"
+            if is_google_auth_req and is_safari_ua:
+                tls_imp = "safari18_0_ios" if ("iPad" in client_ua or "iPhone" in client_ua or "Mobile" in client_ua) else "safari18_0"
                 ephemeral_session = StatelessCurlSession(
                     impersonate=tls_imp,
                     allow_redirects=False,
@@ -4798,7 +4797,6 @@ async def _execute_relay_core(
     if (
         cacheable
         and not has_set_cookie
-        and not has_sensitive_auth
         and status == 200
         and 0 < len(resp_body) <= _STATIC_ASSET_MAX_BYTES
     ):
@@ -6073,7 +6071,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
           try {{
             const u = escapedUrl instanceof URL ? escapedUrl.href : String(escapedUrl || "");
             if (u && (u.startsWith("http://") || u.startsWith("https://"))) {{
-              return new URL("/youtube/?q=" + encodeURIComponent(u), location.origin);
+              return new URL(PREFIX + encodeURIComponent(u), location.origin);
             }}
           }} catch (_) {{}}
           return new URL(location.href);
@@ -6308,6 +6306,33 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
 
       if (doc.documentElement && !doc.documentElement.dataset.shPrewarmBound) {{
         doc.documentElement.dataset.shPrewarmBound = "1";
+        const onLoginClick = (ev) => {{
+          try {{
+            if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
+            const t = ev.target;
+            if (!t || typeof t.closest !== "function") return;
+            const loginLink = t.closest(
+              "a[href*='ServiceLogin'], a[scramjet-attr-href*='ServiceLogin'], " +
+              "a[href*='accounts.google.'], a[scramjet-attr-href*='accounts.google.'], " +
+              "a[href*='/signin'], a[scramjet-attr-href*='/signin'], " +
+              "ytd-button-renderer a[href*='ServiceLogin'], yt-button-shape a[href*='ServiceLogin']"
+            );
+            if (!loginLink) return;
+            const rawH = rawGetAttr.call(loginLink, "scramjet-attr-href") || rawGetAttr.call(loginLink, "href") || loginLink.href || "";
+            if (rawH) {{
+              ev.preventDefault();
+              ev.stopPropagation();
+              ev.stopImmediatePropagation();
+              let targetAuth = rawH;
+              if (targetAuth.startsWith("/")) {{
+                targetAuth = "https://www.youtube.com" + targetAuth;
+              }}
+              navigate(targetAuth, "login-click");
+            }}
+          }} catch (_) {{}}
+        }};
+        doc.addEventListener("click", onLoginClick, {{ passive: false, capture: true }});
+
         const onWatchClick = (ev) => {{
           try {{
             if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;

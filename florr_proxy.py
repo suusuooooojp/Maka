@@ -107,7 +107,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-wasm-uaf-fix-v63"
+FLORR_SW_REVISION = "2026-11-12-wasm-uaf-fix-v64"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -3491,6 +3491,19 @@ async def florr_ws_bridge(websocket: WebSocket):
         except Exception as exc:
             _log(f"WS BRIDGE TLS DETAIL ERROR {type(exc).__name__}: {exc}")
 
+        try:
+            sock = upstream.transport.get_extra_info('socket') if getattr(upstream, 'transport', None) else None
+            if sock is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+        try:
+            raw_socket = websocket.scope.get("transport", {}).get_extra_info("socket")
+            if raw_socket is not None:
+                raw_socket.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except Exception:
+            pass
+
         counters = {"c2u_messages": 0, "c2u_bytes": 0, "u2c_messages": 0, "u2c_bytes": 0}
         last_c2u = time.monotonic()
         last_u2c = time.monotonic()
@@ -3643,6 +3656,50 @@ async def florr_ws_bridge(websocket: WebSocket):
                 await _run_bridge(upstream, "discord-websockets-direct")
                 return
 
+        if _host_is_florr_game_ws(parsed.hostname):
+            try:
+                _log(f"WS BRIDGE DIRECT GAME CONNECT TRY target={parsed.hostname}:443")
+                direct_headers = [
+                    ("Origin", UPSTREAM_ORIGIN),
+                    ("Referer", UPSTREAM_ORIGIN + "/"),
+                    ("Pragma", "no-cache"),
+                    ("Cache-Control", "no-cache"),
+                ]
+                if cookie:
+                    direct_headers.append(("Cookie", cookie))
+                user_agent_for_ws = upstream_ua if upstream_ua else DEFAULT_UA
+                async with websockets.connect(
+                    parsed.geturl(),
+                    origin=UPSTREAM_ORIGIN,
+                    user_agent_header=user_agent_for_ws,
+                    additional_headers=direct_headers,
+                    subprotocols=offered or None,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                    max_size=None,
+                    max_queue=1024,
+                    compression=None,
+                    ssl=tls_context,
+                    open_timeout=4,
+                ) as upstream:
+                    try:
+                        sock = upstream.transport.get_extra_info("socket")
+                        if sock is not None:
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except Exception:
+                        pass
+                    _log(f"WS BRIDGE direct low-latency connection established target={parsed.hostname}")
+                    await _run_bridge(upstream, "direct-low-latency")
+                    return
+            except Exception as exc:
+                if (
+                    type(exc).__name__ in ("WebSocketDisconnect", "ClientDisconnected")
+                    or websocket.client_state.name == "DISCONNECTED"
+                ):
+                    return
+                _log(f"WS BRIDGE DIRECT GAME FAIL ({type(exc).__name__}: {exc}), falling back to Wisp pool")
+
         for wisp_index, wisp_url in enumerate(WISP_SERVERS, 1):
             if websocket.client_state.name == "DISCONNECTED":
                 return
@@ -3677,7 +3734,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     close_timeout=5,
                     max_size=None,
                     max_queue=1024,
-                    compression="deflate",
+                    compression=None,
                     proxy=proxy_url,
                     ssl=tls_context,
                     open_timeout=12,
