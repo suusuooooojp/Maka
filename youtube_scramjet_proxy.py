@@ -149,7 +149,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-yt-v44"
+RUNTIME_REV = "20261112-yt-v45"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -561,7 +561,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
         'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
         'try{Object.defineProperty(t,"ononline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
-        '}catch(_){}})(),'
+        '}}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
