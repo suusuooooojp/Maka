@@ -107,7 +107,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-cf-bot-fix-v65"
+FLORR_SW_REVISION = "2026-11-12-ws-direct-v66"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1182,6 +1182,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
 (() => {
   'use strict';
 
+  const NativeWebSocket = globalThis.WebSocket;
   const TARGET = 'https://florr.io/';
   const WISP_SERVERS = __WISP_SERVERS__;
   const SCRAMJET_VERSION = '__SCRAMJET_VERSION__';
@@ -1737,7 +1738,11 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         }, 0);
         return [() => {}, () => {}];
       }
-      const isFlorrGameSocket = /\.s\.m28n\.net$/i.test(sockHostname);
+      const isFlorrGameSocket = (
+        /\.s\.m28n\.net$/i.test(sockHostname) ||
+        sockHostname.endsWith('.m28n.net') ||
+        sockHostname.endsWith('.m28.io')
+      );
       const isDiscordSocket = (
         sockHostname === 'gateway.discord.gg' ||
         sockHostname === 'remote-auth-gateway.discord.gg' ||
@@ -2055,11 +2060,172 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         return { opened: false, reason: new Error(selectedWsLabel + ' all candidates failed') };
       };
 
+      const tryDirectNativeWebSocket = () => {
+        return new Promise((resolve) => {
+          let directWs = null;
+          let settled = false;
+          let directTimeoutId = null;
+
+          const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            if (directTimeoutId !== null) {
+              clearTimeout(directTimeoutId);
+              directTimeoutId = null;
+            }
+            resolve(result);
+          };
+
+          let targetHref = url.href;
+          if (location.protocol === 'https:' && targetHref.startsWith('ws://')) {
+            targetHref = 'wss://' + targetHref.slice(5);
+          }
+
+          try {
+            log('TRANSPORT WS DIRECT NATIVE TRY:', '#' + n, targetHref,
+                'protocols=' + JSON.stringify(protocols || []));
+            const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
+            directWs = protocols && protocols.length
+              ? new WSConstructor(targetHref, protocols)
+              : new WSConstructor(targetHref);
+            directWs.binaryType = 'arraybuffer';
+          } catch (createErr) {
+            log('TRANSPORT WS DIRECT NATIVE CREATE ERROR:', '#' + n, targetHref,
+                createErr?.message || String(createErr));
+            finish({ success: false, reason: createErr });
+            return;
+          }
+
+          activeClose = (code, reason) => {
+            try { directWs?.close(code || 1000, reason || ''); } catch (_) {}
+          };
+
+          directTimeoutId = setTimeout(() => {
+            if (settled || opened || relayStarted) return;
+            log('TRANSPORT WS DIRECT NATIVE TIMEOUT (2000ms):', '#' + n, targetHref);
+            try { directWs.close(1000, 'direct attempt timeout'); } catch (_) {}
+            finish({ success: false, reason: new Error('direct native ws timeout (2000ms)') });
+          }, 2000);
+
+          let flushingDirectQueue = false;
+          const flushDirectQueue = () => {
+            if (flushingDirectQueue || !queued.length || !directWs || directWs.readyState !== WebSocket.OPEN) return;
+            flushingDirectQueue = true;
+            try {
+              while (queued.length) {
+                const pending = queued;
+                queued = [];
+                for (const data of pending) {
+                  try {
+                    directWs.send(data);
+                  } catch (err) {
+                    log('TRANSPORT WS DIRECT QUEUED SEND ERROR:', '#' + n, err?.message || String(err));
+                    onerror(err);
+                    return;
+                  }
+                }
+              }
+            } finally {
+              flushingDirectQueue = false;
+            }
+          };
+
+          directWs.onopen = () => {
+            if (settled || opened || relayStarted || localClosed) {
+              try { directWs.close(1000, 'stale direct attempt'); } catch (_) {}
+              return;
+            }
+            opened = true;
+            log('TRANSPORT WS OPEN (DIRECT NATIVE):', '#' + n, targetHref,
+                'protocol=' + String(directWs.protocol || ''),
+                'extensions=' + String(directWs.extensions || ''),
+                'elapsed_ms=' + Math.round(performance.now() - started));
+
+            activeSend = (data) => {
+              const safeData = cloneFrameIfNeeded(data);
+              if (directWs && directWs.readyState === WebSocket.OPEN && !flushingDirectQueue) {
+                directWs.send(safeData);
+              } else {
+                queued.push(safeData);
+              }
+            };
+
+            activeClose = (code, reason) => {
+              try { directWs.close(code || 1000, reason || ''); } catch (_) {}
+            };
+
+            flushDirectQueue();
+            onopen(directWs.protocol || '', directWs.extensions || '');
+            flushDirectQueue();
+
+            finish({ success: true, ws: directWs });
+          };
+
+          directWs.onmessage = (event) => {
+            if (relayStarted) return;
+            const data = event.data;
+            const bytes = sizeOf(data);
+            recvBytes += bytes;
+            if (recvBytes === bytes) {
+              log('TRANSPORT WS FIRST DATA (DIRECT NATIVE):', '#' + n, targetHref, 'bytes=' + bytes);
+            }
+            onmessage(data);
+          };
+
+          directWs.onerror = (event) => {
+            const detail = event?.error || event?.message || 'direct native ws error';
+            log('TRANSPORT WS DIRECT NATIVE ERROR:', '#' + n, targetHref, String(detail));
+            if (!opened && !settled) {
+              finish({ success: false, reason: new Error('direct native ws error: ' + String(detail)) });
+            } else if (opened) {
+              onerror(new Error(String(detail)));
+            }
+          };
+
+          directWs.onclose = (event) => {
+            log('TRANSPORT WS DIRECT NATIVE CLOSE:', '#' + n, targetHref,
+                'code=' + String(event.code),
+                'reason=' + String(event.reason || ''),
+                'opened=' + String(opened),
+                'sent_total=' + sentBytes,
+                'recv_total=' + recvBytes,
+                'elapsed_ms=' + Math.round(performance.now() - started));
+            if (!opened && !settled) {
+              finish({
+                success: false,
+                reason: new Error('direct native ws closed before open: ' + event.code + ' ' + String(event.reason || ''))
+              });
+            } else if (opened) {
+              onclose(event.code, event.reason || '');
+            }
+          };
+        });
+      };
+
       (async () => {
         try {
-          if (isFlorrGameSocket || isDiscordSocket) {
-            log('TRANSPORT WS PRIMARY RELAY:', '#' + n, url.href);
-            await startRelay(new Error(isDiscordSocket ? 'discord ws uses server relay' : 'm28n game uses server Wisp egress'), true);
+          if (isDiscordSocket) {
+            log('TRANSPORT WS PRIMARY RELAY (DISCORD):', '#' + n, url.href);
+            await startRelay(new Error('discord ws uses server relay'), true);
+            return;
+          }
+          if (isFlorrGameSocket) {
+            if (window.__florr_direct_ws_blocked) {
+              log('TRANSPORT WS DIRECT PREVIOUSLY BLOCKED, USING SERVER RELAY:', '#' + n, url.href);
+              await startRelay(new Error('direct ws previously failed in this session'), false);
+              return;
+            }
+            const directResult = await tryDirectNativeWebSocket();
+            if (directResult?.success) {
+              window.__florr_direct_ws_works = true;
+              window.__florr_direct_ws_failures = 0;
+              return;
+            }
+            window.__florr_direct_ws_failures = (window.__florr_direct_ws_failures || 0) + 1;
+            window.__florr_direct_ws_blocked = true;
+            log('TRANSPORT WS DIRECT FAILED, FALLING BACK TO SERVER RELAY:', '#' + n, url.href,
+                directResult?.reason?.message || String(directResult?.reason));
+            await startRelay(directResult?.reason || new Error('direct native ws failed'), false);
             return;
           }
           const primaryResult = await tryPrimaryTransports();
