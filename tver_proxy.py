@@ -105,7 +105,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-tver15"
+RUNTIME_REV = "20261112-tver16"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -2469,87 +2469,6 @@ def _schedule_tver_prewarm(target_url: str = TVER_HOME) -> None:
         pass
 
 
-@router.api_route(
-    "/tver/~/sj/{rest:path}",
-    methods=["GET", "HEAD", "POST", "OPTIONS"],
-    include_in_schema=False,
-)
-async def tver_sj_direct_fallback(rest: str, request: Request):
-    """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
-    fetches bypass the Service Worker and request /tver/~/sj/... directly."""
-    if request.method == "OPTIONS":
-        return Response(
-            b"",
-            status_code=204,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-            },
-        )
-    if rest.endswith("scramjet.wasm.js"):
-        return await _serve_virtual_wasm_js()
-    decoded_rest = _decode_repeated_str(rest)
-    m_data = re.search(r"(data:([A-Za-z0-9.+/-]+);base64,([A-Za-z0-9+/=]+))", decoded_rest)
-    if m_data:
-        try:
-            raw_bytes = base64.b64decode(m_data.group(3))
-            return Response(
-                b"" if request.method == "HEAD" else raw_bytes,
-                media_type=m_data.group(2),
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
-            )
-        except Exception:
-            pass
-    m_raw_data = re.search(r"data:([A-Za-z0-9.+/-]+)?(?:;charset=[^,;]+)?,(.*)$", rest, re.S)
-    if m_raw_data:
-        try:
-            mime = (m_raw_data.group(1) or "text/plain").strip()
-            payload_bytes = unquote(m_raw_data.group(2)).encode("utf-8")
-            return Response(
-                b"" if request.method == "HEAD" else payload_bytes,
-                media_type=mime,
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
-            )
-        except Exception:
-            pass
-    virtual_url = _extract_sj_virtual_url(rest, request.url.query)
-    if not virtual_url:
-        return Response(b"invalid virtual url", status_code=404)
-    try:
-        parsed = urlparse(virtual_url)
-        if parsed.path == "/tver/runtime/media-relay":
-            qs = parse_qs(parsed.query)
-            k_nested = (qs.get("k") or [""])[0]
-            nested = _decode_media_key(k_nested) if k_nested else (qs.get("url") or [""])[0]
-            if nested:
-                return await _serve_tver_media_url(nested, request)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        path = (parsed.path or "").lower()
-        sc = _check_server_short_circuit(host, parsed.path or "")
-        if sc is not None:
-            sc_status, sc_ct, sc_body = sc
-            return Response(
-                b"" if request.method == "HEAD" else sc_body,
-                status_code=sc_status,
-                media_type=sc_ct,
-                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
-            )
-        if host == "image-cdn.tver.jp" or path.endswith(
-            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
-        ):
-            return await _serve_tver_media_url(virtual_url, request)
-    except Exception:
-        return Response(b"bad virtual url", status_code=400)
-    if request.method == "POST":
-        return Response(
-            b"{}",
-            status_code=200,
-            media_type="application/json",
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
-    return Response(b"Service Worker route required", status_code=404)
-
 
 def _normalize_tver_set_cookie(cookie_val: str, host: str) -> str:
     """Ensure cookies set on tver.jp / *.tver.jp share cleanly across TVer subdomains."""
@@ -2607,25 +2526,14 @@ def _is_leaked_proxy_url(ref_val: str) -> bool:
     )
 
 
-@router.post("/tver/runtime/http-relay", include_in_schema=False)
-async def tver_http_relay(request: Request):
+async def _execute_tver_relay_core(
+    url: str,
+    method: str,
+    raw_headers: list | dict,
+    req_body: bytes,
+    proxy_origin: str = "",
+) -> tuple[int, str, list[list[str]], bytes, str, float]:
     global _CURL_DISABLED_UNTIL
-
-    raw = await request.body()
-    if len(raw) < 4:
-        return Response(b"invalid frame", status_code=400)
-    meta_len = struct.unpack(">I", raw[:4])[0]
-    if len(raw) < 4 + meta_len:
-        return Response(b"truncated frame", status_code=400)
-    try:
-        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
-    except Exception:
-        return Response(b"bad json", status_code=400)
-
-    req_body = raw[4 + meta_len :]
-    url = str(meta.get("url") or "").strip()
-    method = str(meta.get("method") or "GET").upper().strip()
-    raw_headers = meta.get("headers") or []
 
     try:
         for _ in range(3):
@@ -2641,20 +2549,20 @@ async def tver_http_relay(request: Request):
         url = _strip_dollar_query(url)
         parsed = urlparse(url)
     except Exception:
-        return Response(b"bad url", status_code=400)
+        return 400, "Bad Request", [["content-type", "text/plain"]], b"bad url", "", 0.0
 
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return Response(b"unsupported scheme", status_code=400)
+        return 400, "Bad Request", [["content-type", "text/plain"]], b"unsupported scheme", "", 0.0
 
     host = parsed.hostname.lower().rstrip(".")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
-        return Response(b"unsupported port", status_code=403)
+        return 403, "Forbidden", [["content-type", "text/plain"]], b"unsupported port", "", 0.0
 
     sc = _check_server_short_circuit(host, parsed.path or "")
     if sc is not None:
         sc_status, sc_ct, sc_body = sc
-        return _pack_relay_response(
+        return (
             sc_status,
             "OK",
             [
@@ -2663,12 +2571,14 @@ async def tver_http_relay(request: Request):
                 ["access-control-allow-credentials", "true"],
             ],
             b"" if method == "HEAD" else sc_body,
+            "",
+            0.0,
         )
 
     try:
         await _ensure_public_host(host, port)
     except Exception:
-        return Response(b"blocked host", status_code=403)
+        return 403, "Forbidden", [["content-type", "text/plain"]], b"blocked host", "", 0.0
 
     req_headers: list[tuple[str, str]] = []
     seen_ua = False
@@ -2774,7 +2684,7 @@ async def tver_http_relay(request: Request):
         cached_img = _IMAGE_CACHE.get(url)
         if cached_img and (time.time() - cached_img[0]) < _IMAGE_CACHE_TTL:
             _, c_status, c_media_type, c_body, c_cc = cached_img
-            return _pack_relay_response(
+            return (
                 c_status,
                 "OK",
                 [
@@ -2784,7 +2694,8 @@ async def tver_http_relay(request: Request):
                     ["cross-origin-resource-policy", "cross-origin"],
                 ],
                 b"" if method == "HEAD" else c_body,
-                request=request,
+                "",
+                0.0,
             )
 
     has_auth = any(k.lower() == "authorization" for k in header_dict)
@@ -2793,14 +2704,13 @@ async def tver_http_relay(request: Request):
         cached_pub = _PUBLIC_API_CACHE.get(pub_cache_key)
         if cached_pub and (time.time() - cached_pub[0]) < cached_pub[1]:
             _, p_ttl, p_status, p_text, p_headers, p_body = cached_pub
-            return _pack_relay_response(
+            return (
                 p_status,
                 p_text,
                 p_headers,
                 b"" if method == "HEAD" else p_body,
-                request=request,
-                cache_key=pub_cache_key,
-                cache_ttl=p_ttl,
+                pub_cache_key,
+                p_ttl,
             )
 
     cacheable = (not has_range) and _is_cacheable_static_asset(method, url)
@@ -2809,14 +2719,13 @@ async def tver_http_relay(request: Request):
         static_ttl = 300.0 if path_lower in ("/setting.js", "/setting.json") else _STATIC_ASSET_TTL
         if cached and (time.time() - cached[0]) < static_ttl:
             _, c_status, c_text, c_headers, c_body = cached
-            return _pack_relay_response(
+            return (
                 c_status,
                 c_text,
                 c_headers,
                 b"" if method == "HEAD" else c_body,
-                request=request,
-                cache_key=url,
-                cache_ttl=static_ttl,
+                url,
+                static_ttl,
             )
         header_dict.pop("Cookie", None)
 
@@ -2831,14 +2740,13 @@ async def tver_http_relay(request: Request):
         cached_guest = _GUEST_HTML_CACHE.get(url)
         if cached_guest and (time.time() - cached_guest[0]) < _GUEST_HTML_TTL:
             _, g_status, g_text, g_headers, g_body = cached_guest
-            return _pack_relay_response(
+            return (
                 g_status,
                 g_text,
                 g_headers,
                 b"" if method == "HEAD" else g_body,
-                request=request,
-                cache_key=f"guesthtml:{url}",
-                cache_ttl=_GUEST_HTML_TTL,
+                f"guesthtml:{url}",
+                _GUEST_HTML_TTL,
             )
 
     impersonate_profile = _select_curl_impersonate(client_ua)
@@ -2934,11 +2842,13 @@ async def tver_http_relay(request: Request):
                 pass
     except Exception as exc:
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
-        return _pack_relay_response(
+        return (
             502,
             "Bad Gateway",
             [["content-type", "text/plain; charset=utf-8"]],
             err_msg,
+            "",
+            0.0,
         )
 
     out_headers: list[list[str]] = []
@@ -2986,9 +2896,6 @@ async def tver_http_relay(request: Request):
         )
 
     if is_m3u8 and status in (200, 206) and resp_body:
-        req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
-        req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
-        proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
         resp_body = _rewrite_hls_manifest(resp_body, url, proxy_origin=proxy_origin)
         status = 200
         out_headers = [h for h in out_headers if h[0].lower() != "content-range"]
@@ -3084,6 +2991,126 @@ async def tver_http_relay(request: Request):
         except Exception:
             pass
 
+    return status, status_text, out_headers, resp_body, out_cache_key, out_cache_ttl
+
+
+@router.api_route(
+    "/tver/~/sj/{rest:path}",
+    methods=["GET", "HEAD", "POST", "OPTIONS"],
+    include_in_schema=False,
+)
+async def tver_sj_direct_fallback(rest: str, request: Request):
+    """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
+    fetches bypass the Service Worker and request /tver/~/sj/... directly."""
+    if request.method == "OPTIONS":
+        return Response(
+            b"",
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
+    if rest.endswith("scramjet.wasm.js"):
+        return await _serve_virtual_wasm_js()
+    decoded_rest = _decode_repeated_str(rest)
+    m_data = re.search(r"(data:([A-Za-z0-9.+/-]+);base64,([A-Za-z0-9+/=]+))", decoded_rest)
+    if m_data:
+        try:
+            raw_bytes = base64.b64decode(m_data.group(3))
+            return Response(
+                b"" if request.method == "HEAD" else raw_bytes,
+                media_type=m_data.group(2),
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
+            )
+        except Exception:
+            pass
+    m_raw_data = re.search(r"data:([A-Za-z0-9.+/-]+)?(?:;charset=[^,;]+)?,(.*)$", rest, re.S)
+    if m_raw_data:
+        try:
+            mime = (m_raw_data.group(1) or "text/plain").strip()
+            payload_bytes = unquote(m_raw_data.group(2)).encode("utf-8")
+            return Response(
+                b"" if request.method == "HEAD" else payload_bytes,
+                media_type=mime,
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
+            )
+        except Exception:
+            pass
+    virtual_url = _extract_sj_virtual_url(rest, request.url.query)
+    if not virtual_url:
+        return Response(b"invalid virtual url", status_code=404)
+    try:
+        parsed = urlparse(virtual_url)
+        if parsed.path == "/tver/runtime/media-relay":
+            qs = parse_qs(parsed.query)
+            k_nested = (qs.get("k") or [""])[0]
+            nested = _decode_media_key(k_nested) if k_nested else (qs.get("url") or [""])[0]
+            if nested:
+                return await _serve_tver_media_url(nested, request)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = (parsed.path or "").lower()
+        sc = _check_server_short_circuit(host, parsed.path or "")
+        if sc is not None:
+            sc_status, sc_ct, sc_body = sc
+            return Response(
+                b"" if request.method == "HEAD" else sc_body,
+                status_code=sc_status,
+                media_type=sc_ct,
+                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
+            )
+        if host == "image-cdn.tver.jp" or path.endswith(
+            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
+        ):
+            return await _serve_tver_media_url(virtual_url, request)
+    except Exception:
+        return Response(b"bad virtual url", status_code=400)
+    req_body = await request.body()
+    raw_headers = list(request.headers.items())
+    req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
+    proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
+    status, status_text, out_headers, resp_body, _, _ = await _execute_tver_relay_core(
+        virtual_url, request.method, raw_headers, req_body, proxy_origin=proxy_origin
+    )
+    resp = Response(
+        content=b"" if request.method == "HEAD" else resp_body,
+        status_code=status,
+    )
+    for hk, hv in out_headers:
+        if hk.lower() == "set-cookie":
+            resp.raw_headers.append((hk.encode("latin-1"), hv.encode("latin-1")))
+        else:
+            resp.headers[hk] = hv
+    return resp
+
+
+@router.post("/tver/runtime/http-relay", include_in_schema=False)
+async def tver_http_relay(request: Request):
+    raw = await request.body()
+    if len(raw) < 4:
+        return Response(b"invalid frame", status_code=400)
+    meta_len = struct.unpack(">I", raw[:4])[0]
+    if len(raw) < 4 + meta_len:
+        return Response(b"truncated frame", status_code=400)
+    try:
+        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
+    except Exception:
+        return Response(b"bad json", status_code=400)
+
+    req_body = raw[4 + meta_len :]
+    url = str(meta.get("url") or "").strip()
+    method = str(meta.get("method") or "GET").upper().strip()
+    raw_headers = meta.get("headers") or []
+
+    req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
+    proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
+
+    status, status_text, out_headers, resp_body, out_cache_key, out_cache_ttl = await _execute_tver_relay_core(
+        url, method, raw_headers, req_body, proxy_origin=proxy_origin
+    )
     return _pack_relay_response(
         status,
         status_text,
@@ -3220,7 +3247,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   const SESSION_KEY = "schoolhub.tver.target.v1";
   const SW_GUARD = "schoolhub.tver.sw-reload.v1";
   const MAX_RECOVERY = 3;
-  const CONTROL_WAIT = 12000;
+  const CONTROL_WAIT = 3500;
   const HEALTH_DELAY = 22000;
   const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -3240,6 +3267,57 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
+
+  const LOG_ENDPOINT = "/_diag/tver";
+  let logSequence = 0;
+  const clientLog = (level, event, details = {{}}) => {{
+    const payload = {{
+      source: "tver-scramjet",
+      level: String(level || "info"),
+      event: String(event || "event"),
+      seq: ++logSequence,
+      ts: new Date().toISOString(),
+      transport: transportName || null,
+      details,
+    }};
+    try {{
+      const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.debug;
+      fn.call(console, "[SchoolHub TVer]", event, details);
+    }} catch (_) {{}}
+    try {{
+      fetch(LOG_ENDPOINT, {{
+        method: "POST",
+        credentials: "omit",
+        cache: "no-store",
+        keepalive: true,
+        headers: {{ "content-type": "application/json" }},
+        body: JSON.stringify(payload),
+      }}).catch(() => {{}});
+    }} catch (_) {{}}
+  }};
+
+  function safeError(error) {{
+    if (!error) return {{}};
+    return {{
+      name: String(error.name || "Error"),
+      message: String(error.message || error),
+      stack: String(error.stack || "").slice(0, 12000),
+    }};
+  }}
+
+  window.addEventListener("error", (event) => {{
+    clientLog("error", "window-error", {{
+      message: String(event.message || ""),
+      source: String(event.filename || ""),
+      line: Number(event.lineno || 0),
+      column: Number(event.colno || 0),
+      error: safeError(event.error),
+    }});
+  }});
+
+  window.addEventListener("unhandledrejection", (event) => {{
+    clientLog("error", "unhandled-rejection", {{ reason: safeError(event.reason) }});
+  }});
 
   async function withTimeout(promise, ms, label) {{
     let timer = 0;
@@ -3818,9 +3896,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                   if (parsedPb && typeof parsedPb === "object" && "ads" in parsedPb) {{
                     delete parsedPb.ads;
                     outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
-                  }} catch (_) {{}}
-                }}
-                return {{
+                  }}
+                }} catch (_) {{}}
+              }}
+              return {{
                 body: outBuf,
                 headers: [...apiResp.headers.entries()],
                 status: apiResp.status,
@@ -4059,22 +4138,37 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   function currentDocumentHealthy() {{
     try {{
       const win = frameEl.contentWindow;
-      const href = String(win?.location?.href || "");
-      const doc = frameEl.contentDocument;
-      if (!doc || href === "about:blank") {{
+      let href = "";
+      try {{ href = String(win?.location?.href || ""); }} catch (_) {{}}
+      const frameSrc = String(frameEl.src || "");
+      if (!href && !frameSrc) {{
         return {{ healthy: false, loading: false }};
       }}
+      if (href === "about:blank" && !frameSrc) {{
+        return {{ healthy: false, loading: false }};
+      }}
+      let doc = null;
+      try {{ doc = frameEl.contentDocument; }} catch (_) {{}}
+
+      if (!doc) {{
+        const isTargetSrc = frameSrc.includes(PREFIX) || frameSrc.includes("tver.jp") || frameSrc.includes("id.tver.jp");
+        return {{ healthy: Boolean(isTargetSrc), loading: false }};
+      }}
+
       const body = doc.body;
       const text = String(body?.innerText || "").replace(/\\s+/g, " ").trim();
+      const title = String(doc.title || "").trim();
       const hasTVerRoot = Boolean(
-        doc.querySelector("#__next > *, header, main, nav, video, [class*='Header'], [class*='Layout']")
+        doc.querySelector("#__next > *, #__next, header, main, nav, video, form, input, button, [class*='Header'], [class*='header'], [class*='Layout'], [class*='layout'], [class*='Top_'], [class*='episode'], [class*='player']")
       );
-      const isProxied = href.includes(PREFIX);
+      const isProxied = href.includes(PREFIX) || frameSrc.includes(PREFIX) || href.includes("tver.jp") || href.includes("id.tver.jp");
       const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive");
-      const healthy = Boolean(isProxied && (hasTVerRoot || text.length > 20));
+      const healthy = Boolean(isProxied && (hasTVerRoot || text.length > 15 || title.length > 0 || (body && body.children.length > 0)));
       return {{ healthy, loading }};
     }} catch (_) {{
-      return {{ healthy: false, loading: false }};
+      const frameSrc = String(frameEl.src || "");
+      const isTarget = frameSrc.includes(PREFIX) || frameSrc.includes("tver.jp") || frameSrc.includes("id.tver.jp");
+      return {{ healthy: Boolean(isTarget), loading: false }};
     }}
   }}
 
@@ -4087,6 +4181,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     const detected = url || readFrameTarget();
     if (detected) observeUrl(detected);
     ensurePageMedia();
+    clientLog("info", "show-healthy", {{ target: detected || lastUrl }});
   }}
 
   function armHealthCheck(token, waitMs = HEALTH_DELAY) {{
@@ -4120,27 +4215,34 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       }},
     }};
 
-    const instance = new C({{
-      serviceworker: navigator.serviceWorker.controller,
-      transport: client,
-      config: {{
-        prefix: PREFIX,
-        scramjetPath: "/tver/runtime/scramjet.js?v={RUNTIME_REV}",
-        injectPath: "/tver/runtime/controller.inject.js?v={RUNTIME_REV}",
-        wasmPath: "/scramjet/scramjet.wasm",
-        virtualWasmPath: "scramjet.wasm.js",
-        codec: {{
-          encode: (value) => value ? encodeURIComponent(value) : value,
-          decode: (value) => value ? decodeURIComponent(value) : value,
+    let instance = null;
+    try {{
+      instance = new C({{
+        serviceworker: navigator.serviceWorker.controller,
+        transport: client,
+        config: {{
+          prefix: PREFIX,
+          scramjetPath: "/tver/runtime/scramjet.js?v={RUNTIME_REV}",
+          injectPath: "/tver/runtime/controller.inject.js?v={RUNTIME_REV}",
+          wasmPath: "/scramjet/scramjet.wasm",
+          virtualWasmPath: "scramjet.wasm.js",
+          codec: {{
+            encode: (value) => value ? encodeURIComponent(value) : value,
+            decode: (value) => value ? decodeURIComponent(value) : value,
+          }},
         }},
-      }},
-      scramjetConfig,
-    }});
-    await withTimeout(instance.wait(), 20000, "Scramjet Controller");
-    return {{ instance, client }};
+        scramjetConfig,
+      }});
+      await withTimeout(instance.wait(), 20000, "Scramjet Controller");
+      return {{ instance, client }};
+    }} catch (error) {{
+      try {{ client?.destroy?.(); }} catch (_) {{}}
+      try {{ client?.close?.(); }} catch (_) {{}}
+      throw error;
+    }}
   }}
 
-  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes("/tver/sw.js"));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -4237,6 +4339,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         remember(target);
         frame.go(target);
         armHealthCheck(recoveryToken, HEALTH_DELAY);
+        setTimeout(() => {{
+          if (!cover.classList.contains("hidden")) {{
+            showHealthy();
+          }}
+        }}, 3500);
       }} catch (_) {{}}
     }}, attempt * 1000);
   }}
@@ -4264,8 +4371,14 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     frameEl.addEventListener("load", () => {{
       const token = navigationToken;
       const snap = currentDocumentHealthy();
-      if (snap.healthy) showHealthy();
-      else armHealthCheck(token, 12000);
+      clientLog("info", "frame-load", {{ healthy: snap.healthy, src: frameEl.src }});
+      if (snap.healthy) {{
+        showHealthy();
+      }} else {{
+        setTimeout(() => {{
+          showHealthy();
+        }}, 800);
+      }}
     }});
     frameEl.addEventListener("error", () => {{ recover("iframe-error"); }});
     startFrameMonitor();
@@ -4281,6 +4394,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }}
 
   async function boot() {{
+    clientLog("info", "boot-start", {{ target: INITIAL }});
     if (!("serviceWorker" in navigator)) throw new Error("Service Worker unavailable");
     try {{
       const revKey = "sh:tver:rev";
@@ -4304,6 +4418,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       ).catch(async () => await navigator.serviceWorker.getRegistration(SW_SCOPE));
       await waitForWorkerControl(registration);
     }}
+    clientLog("info", "sw-controlled", {{ controller: Boolean(navigator.serviceWorker.controller) }});
     navigator.serviceWorker.addEventListener("controllerchange", () => {{
       try {{ controller?.setupMessagePort?.(); }} catch (_) {{}}
     }});
@@ -4313,11 +4428,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     try {{
       created = await createController("hybrid");
       transportName = "hybrid";
-    }} catch (_) {{
+    }} catch (hybridErr) {{
+      clientLog("warn", "hybrid-failed", {{ error: safeError(hybridErr) }});
       try {{
         created = await createController("libcurl");
         transportName = "libcurl";
-      }} catch (_) {{
+      }} catch (curlErr) {{
+        clientLog("warn", "libcurl-failed", {{ error: safeError(curlErr) }});
         created = await createController("epoxy");
         transportName = "epoxy";
       }}
@@ -4329,13 +4446,21 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     frame = controller.createFrame(frameEl, {{ plugins: buildPlugins() }});
     bindFrame();
     ready = true;
+    clientLog("info", "controller-ready", {{ transport: transportName }});
 
     const stored = restore();
     navigationToken += 1;
     lastUrl = stored;
     remember(stored);
     frame.go(stored);
+    clientLog("info", "frame-go", {{ target: stored }});
     armHealthCheck(navigationToken, HEALTH_DELAY);
+    setTimeout(() => {{
+      if (!cover.classList.contains("hidden")) {{
+        clientLog("info", "safety-reveal-fallback", {{ target: stored }});
+        showHealthy(stored);
+      }}
+    }}, 3500);
   }}
 
   window.addEventListener("beforeunload", () => {{
@@ -4345,6 +4470,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }});
 
   boot().catch((error) => {{
+    clientLog("error", "boot-failed", {{ error: safeError(error) }});
     console.error("[SchoolHub TVer] boot failed", error);
     cover.classList.remove("hidden");
     cover.textContent = "ページを読み込めませんでした。再読み込みしてください。";
