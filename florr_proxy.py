@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-ws-direct-v69"
+FLORR_SW_REVISION = "2026-11-12-ws-direct-v70"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1247,6 +1247,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
   'use strict';
 
   const NativeWebSocket = globalThis.WebSocket;
+  const NativeFetch = typeof globalThis.fetch === 'function' ? globalThis.fetch.bind(globalThis) : null;
   const TARGET = 'https://florr.io/';
   const WISP_SERVERS = __WISP_SERVERS__;
   const SCRAMJET_VERSION = '__SCRAMJET_VERSION__';
@@ -1533,9 +1534,6 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
     isDiscordOrOAuthHost(hostname) {
       const h = String(hostname || '').toLowerCase().replace(/\.$/, '');
       return (
-        h === 'florr.io' || h.endsWith('.florr.io') ||
-        h === 'm28.io' || h.endsWith('.m28.io') ||
-        h === 'm28n.net' || h.endsWith('.m28n.net') ||
         h === 'discord.com' || h.endsWith('.discord.com') ||
         h === 'discordapp.com' || h.endsWith('.discordapp.com') ||
         h === 'discord.gg' || h.endsWith('.discord.gg') ||
@@ -1547,6 +1545,88 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         h === 'js.stripe.com' || h.endsWith('.stripe.com') ||
         h === 'accounts.google.com' || h === 'appleid.apple.com'
       );
+    }
+    canTryDirectBrowserFetch(remote, method, body, headers) {
+      if (!NativeFetch || !remote) return false;
+      const mUpper = String(method || 'GET').toUpperCase();
+      if ((mUpper !== 'GET' && mUpper !== 'HEAD') || body != null) return false;
+      const h = String(remote.hostname || '').toLowerCase().replace(/\.$/, '');
+      if (!this._directFetchFailCounts) this._directFetchFailCounts = new Map();
+      if ((this._directFetchFailCounts.get(h) || 0) >= 2) return false;
+      const isFlorrOrM28 = (
+        h === 'florr.io' || h.endsWith('.florr.io') ||
+        h === 'm28.io' || h.endsWith('.m28.io') ||
+        h === 'm28n.net' || h.endsWith('.m28n.net')
+      );
+      if (!isFlorrOrM28) return false;
+      // Only use direct anonymous CORS fetch for m28/m28n APIs or static assets
+      const isM28Api = h.endsWith('.m28.io') || h === 'm28.io' || h.endsWith('.m28n.net') || h === 'm28n.net';
+      const isStaticAssetPath = (
+        remote.pathname.startsWith('/assets/') ||
+        /\.(?:js|mjs|css|wasm|png|jpg|jpeg|webp|svg|gif|ico|woff2?|ttf|json|mp3|ogg|wav)$/i.test(remote.pathname)
+      );
+      if (!isM28Api && !isStaticAssetPath) return false;
+      // Skip direct fetch if caller explicitly requires Cookie or Authorization headers
+      try {
+        const checkPairs = [];
+        if (headers instanceof Headers) headers.forEach((v, k) => checkPairs.push([k, v]));
+        else if (Array.isArray(headers)) {
+          for (const p of headers) if (Array.isArray(p) && p.length >= 2) checkPairs.push(p);
+        } else if (headers && typeof headers === 'object') {
+          for (const [k, v] of Object.entries(headers)) checkPairs.push([k, v]);
+        }
+        for (const [k, v] of checkPairs) {
+          const kl = String(k).toLowerCase();
+          if ((kl === 'cookie' || kl === 'authorization') && v) return false;
+        }
+      } catch (_) {}
+      return true;
+    }
+    async requestViaDirectFetch(remote, method, signal) {
+      const h = String(remote.hostname || '').toLowerCase().replace(/\.$/, '');
+      const mUpper = String(method || 'GET').toUpperCase();
+      const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      let timer = null;
+      const onOuterAbort = () => { try { ctrl?.abort(); } catch (_) {} };
+      if (signal && ctrl) {
+        if (signal.aborted) ctrl.abort();
+        else signal.addEventListener('abort', onOuterAbort, { once: true });
+      }
+      if (ctrl) {
+        timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, 2500);
+      }
+      try {
+        const resp = await NativeFetch(remote.href, {
+          method: mUpper,
+          mode: 'cors',
+          credentials: 'omit',
+          cache: 'default',
+          signal: ctrl ? ctrl.signal : signal,
+        });
+        if (!resp || resp.type === 'opaque' || resp.status < 200 || resp.status >= 400) {
+          throw new Error('direct fetch non-ok status: ' + String(resp?.status));
+        }
+        const hdrPairs = [];
+        resp.headers.forEach((v, k) => { hdrPairs.push([k, v]); });
+        const bodyBuf = mUpper === 'HEAD' ? null : await resp.arrayBuffer();
+        if (this._directFetchFailCounts) this._directFetchFailCounts.set(h, 0);
+        return {
+          body: bodyBuf,
+          headers: hdrPairs,
+          status: resp.status,
+          statusText: resp.statusText || 'OK',
+        };
+      } catch (err) {
+        if (this._directFetchFailCounts) {
+          this._directFetchFailCounts.set(h, (this._directFetchFailCounts.get(h) || 0) + 1);
+        }
+        throw err;
+      } finally {
+        if (timer !== null) clearTimeout(timer);
+        if (signal && ctrl) {
+          try { signal.removeEventListener('abort', onOuterAbort); } catch (_) {}
+        }
+      }
     }
     async requestViaHttpRelay(remote, method, body, headers) {
       const mUpper = String(method || 'GET').toUpperCase();
@@ -1723,7 +1803,28 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
     async request(remote, method, body, headers, signal) {
       const n = ++this.requestCount;
       const started = performance.now();
+      const mUpper = String(method || 'GET').toUpperCase();
       const isQuietAsset = remote?.pathname?.startsWith('/assets/');
+      const isStaticAsset = (
+        mUpper === 'GET' &&
+        body == null &&
+        remote?.pathname?.startsWith('/assets/') &&
+        /\.(?:js|css|woff2?|ttf|svg|png|webp|ico)$/i.test(remote.pathname)
+      );
+      if (isStaticAsset) {
+        if (!this._staticAssetCache) this._staticAssetCache = new Map();
+        const cached = this._staticAssetCache.get(remote.href);
+        if (cached) {
+          const clonedHeaders = cached.headers.map(p => [p[0], p[1]]);
+          if (cached.headers.location) clonedHeaders.location = cached.headers.location;
+          return {
+            body: cached.body ? cached.body.slice(0) : null,
+            headers: clonedHeaders,
+            status: cached.status,
+            statusText: cached.statusText,
+          };
+        }
+      }
       let reusableBody = body;
       if (body instanceof ReadableStream || body instanceof Blob) {
         try {
@@ -1747,6 +1848,32 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         } catch (error) {
           log('TRANSPORT HTTP RELAY ERROR:', '#' + n, remote.href,
               error?.stack || error?.message || String(error));
+        }
+      } else if (this.canTryDirectBrowserFetch(remote, method, reusableBody, headers)) {
+        try {
+          const directResp = await this.requestViaDirectFetch(remote, method, signal);
+          if (isStaticAsset && directResp.status >= 200 && directResp.status < 300) {
+            try {
+              const cachedHeaders = (directResp.headers || []).map(p => [p[0], p[1]]);
+              this._staticAssetCache.set(remote.href, {
+                body: directResp.body ? directResp.body.slice(0) : null,
+                headers: cachedHeaders,
+                status: directResp.status,
+                statusText: directResp.statusText,
+              });
+            } catch (_) {}
+          }
+          if (!isQuietAsset) {
+            log('TRANSPORT HTTP OK:', '#' + n, directResp.status, directResp.statusText || '',
+                remote.href, 'via=direct-fetch',
+                'elapsed_ms=' + Math.round(performance.now() - started));
+          }
+          return directResp;
+        } catch (directErr) {
+          if (!isQuietAsset) {
+            log('TRANSPORT HTTP DIRECT FETCH SKIP/FAIL -> LIBCURL:', '#' + n, remote.href,
+                directErr?.message || String(directErr));
+          }
         }
       }
       if (!isQuietAsset) log('TRANSPORT HTTP START:', '#' + n, method, remote.href, 'via=libcurl');
@@ -1794,9 +1921,25 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             }
           } catch (_) {}
         }
-        log('TRANSPORT HTTP OK:', '#' + n, response.status, response.statusText || '',
-            remote.href, 'via=libcurl',
-            'elapsed_ms=' + Math.round(performance.now() - started));
+        if (isStaticAsset && response && response.status >= 200 && response.status < 300) {
+          try {
+            const cachedHeaders = Array.isArray(response.headers)
+              ? response.headers.map(p => [p[0], p[1]])
+              : [];
+            if (response.headers?.location) cachedHeaders.location = response.headers.location;
+            this._staticAssetCache.set(remote.href, {
+              body: response.body ? response.body.slice(0) : null,
+              headers: cachedHeaders,
+              status: response.status,
+              statusText: response.statusText,
+            });
+          } catch (_) {}
+        }
+        if (!isQuietAsset) {
+          log('TRANSPORT HTTP OK:', '#' + n, response.status, response.statusText || '',
+              remote.href, 'via=libcurl',
+              'elapsed_ms=' + Math.round(performance.now() - started));
+        }
         return response;
       } catch (error) {
         log('TRANSPORT HTTP ERROR (TRYING RELAY FALLBACK):', '#' + n, remote.href,
@@ -2169,9 +2312,10 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         let winner = null; // 'direct-epoxy' | 'direct-native' | 'server-bridge'
         let directWs = null;
         let relayWs = null;
-        let epoxySend = null;
-        let epoxyClose = null;
+        let epoxyCloses = [];
         let overallTimer = null;
+        let bridgeDelayTimer = null;
+        let bridgeStarted = false;
         let directNativeFailed = false;
         let epoxyFailed = false;
         let relayFailed = false;
@@ -2204,14 +2348,19 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           }
         };
 
-        const chooseWinner = (choice, handles) => {
+        const clearHybridTimers = () => {
+          if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
+          if (bridgeDelayTimer !== null) { clearTimeout(bridgeDelayTimer); bridgeDelayTimer = null; }
+        };
+
+        const chooseWinner = (choice, handles, winningEpoxyClose) => {
           if (winner !== null || localClosed) {
             try { handles?.close?.(1000, 'stale winner'); } catch (_) {}
             return;
           }
           winner = choice;
           opened = true;
-          if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
+          clearHybridTimers();
 
           const elapsed = Math.round(performance.now() - started);
           log('TRANSPORT WS HYBRID WINNER:', '#' + n, 'winner=' + choice, targetHref,
@@ -2231,10 +2380,11 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             } catch (_) {}
             directWs = null;
           }
-          if (choice !== 'direct-epoxy' && epoxyClose) {
-            try { epoxyClose(1000, 'loser'); } catch (_) {}
-            epoxyClose = null;
+          for (const closeFn of epoxyCloses) {
+            if (choice === 'direct-epoxy' && closeFn === winningEpoxyClose) continue;
+            try { closeFn(1000, 'loser'); } catch (_) {}
           }
+          epoxyCloses = winningEpoxyClose ? [winningEpoxyClose] : [];
           if (choice !== 'server-bridge' && relayWs) {
             try {
               relayWs.onopen = relayWs.onmessage = relayWs.onerror = relayWs.onclose = null;
@@ -2262,13 +2412,26 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
 
         const onAllFailed = (err) => {
           if (winner !== null || opened || localClosed) return;
+          clearHybridTimers();
           log('TRANSPORT WS HYBRID ALL FAILED:', '#' + n, targetHref, err?.message || String(err));
           onerror(err || new Error('all hybrid websocket candidate paths failed'));
           onclose(1006, 'hybrid connection failed');
         };
 
+        const triggerServerBridge = (reasonLabel) => {
+          if (bridgeStarted || winner !== null || opened || localClosed) return;
+          bridgeStarted = true;
+          if (bridgeDelayTimer !== null) { clearTimeout(bridgeDelayTimer); bridgeDelayTimer = null; }
+          log('TRANSPORT WS HYBRID LAUNCHING SERVER BRIDGE:', '#' + n, 'reason=' + reasonLabel);
+          startServerBridgeAttempt();
+        };
+
         const checkAllFailed = () => {
           if (winner !== null || opened || localClosed) return;
+          if (directNativeFailed && epoxyFailed && !bridgeStarted) {
+            triggerServerBridge('direct-paths-failed-early');
+            return;
+          }
           if (directNativeFailed && epoxyFailed && relayFailed) {
             onAllFailed(new Error('all hybrid websocket paths failed (direct-epoxy, direct-native, server-bridge)'));
           }
@@ -2276,76 +2439,98 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
 
         activeClose = (code, reason) => {
           localClosed = true;
-          if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
+          clearHybridTimers();
           try { directWs?.close(code || 1000, reason || ''); } catch (_) {}
-          try { epoxyClose?.(code || 1000, reason || ''); } catch (_) {}
+          for (const closeFn of epoxyCloses) {
+            try { closeFn(code || 1000, reason || ''); } catch (_) {}
+          }
           try { relayWs?.close(code || 1000, reason || ''); } catch (_) {}
         };
 
         // --- PATH 1: Direct Client-Side Epoxy/Wisp (runs in WASM, sends Origin: https://florr.io directly) ---
-        const startDirectEpoxyAttempt = () => {
-          const transport = (Array.isArray(this.gameWsTransports) && this.gameWsTransports[0]) || this.wsTransport;
-          if (!transport || typeof transport.connect !== 'function') {
+        const startDirectEpoxyAttempts = () => {
+          const pool = (Array.isArray(this.gameWsTransports) && this.gameWsTransports.length)
+            ? this.gameWsTransports.filter(t => t && typeof t.connect === 'function')
+            : (this.wsTransport && typeof this.wsTransport.connect === 'function' ? [this.wsTransport] : []);
+          if (!pool.length) {
             log('TRANSPORT WS HYBRID DIRECT EPOXY UNAVAILABLE');
             epoxyFailed = true;
             checkAllFailed();
             return;
           }
-          log('TRANSPORT WS HYBRID DIRECT EPOXY TRY:', '#' + n, targetHref);
-          try {
-            const handles = transport.connect(
-              url,
-              protocols,
-              normalizedHeaders,
-              (protocol, extensions) => {
-                if (winner !== null || localClosed) {
-                  try { epoxyClose?.(1000, 'stale epoxy'); } catch (_) {}
-                  return;
-                }
-                chooseWinner('direct-epoxy', {
-                  send: epoxySend,
-                  close: epoxyClose,
-                  protocol: protocol || '',
-                  extensions: extensions || ''
-                });
-              },
-              (data) => {
-                if (winner !== 'direct-epoxy') return;
-                const bytes = sizeOf(data);
-                recvBytes += bytes;
-                if (recvBytes === bytes) {
-                  log('TRANSPORT WS FIRST DATA (DIRECT EPOXY):', '#' + n, targetHref, 'bytes=' + bytes);
-                }
-                onmessage(data);
-              },
-              (code, reason) => {
-                log('TRANSPORT WS HYBRID DIRECT EPOXY CLOSE:', '#' + n, 'code=' + code, 'reason=' + String(reason || ''));
-                if (winner === 'direct-epoxy') {
-                  onclose(code, reason || '');
-                } else if (winner === null) {
-                  epoxyFailed = true;
-                  checkAllFailed();
-                }
-              },
-              (error) => {
-                log('TRANSPORT WS HYBRID DIRECT EPOXY ERROR:', '#' + n, error?.message || String(error));
-                if (winner === 'direct-epoxy') {
-                  onerror(error);
-                } else if (winner === null) {
-                  epoxyFailed = true;
-                  checkAllFailed();
-                }
-              }
-            );
-            if (Array.isArray(handles) && handles.length >= 2) {
-              epoxySend = handles[0];
-              epoxyClose = handles[1];
+          let pendingEpoxy = pool.length;
+          const markOneEpoxyFailed = () => {
+            pendingEpoxy--;
+            if (pendingEpoxy <= 0 && winner === null) {
+              epoxyFailed = true;
+              checkAllFailed();
             }
-          } catch (err) {
-            log('TRANSPORT WS HYBRID DIRECT EPOXY CREATE ERROR:', '#' + n, err?.message || String(err));
-            epoxyFailed = true;
-            checkAllFailed();
-          }
+          };
+          pool.forEach((transport, idx) => {
+            const wispLabel = String(this._gameWispLabels?.[idx] || ('epoxy-' + (idx + 1)));
+            log('TRANSPORT WS HYBRID DIRECT EPOXY TRY:', '#' + n, targetHref, 'candidate=' + wispLabel);
+            let localSend = null;
+            let localClose = null;
+            let localSettled = false;
+            try {
+              const handles = transport.connect(
+                url,
+                protocols,
+                normalizedHeaders,
+                (protocol, extensions) => {
+                  if (winner !== null || localClosed) {
+                    try { localClose?.(1000, 'stale epoxy'); } catch (_) {}
+                    return;
+                  }
+                  localSettled = true;
+                  chooseWinner('direct-epoxy', {
+                    send: localSend,
+                    close: localClose,
+                    protocol: protocol || '',
+                    extensions: extensions || ''
+                  }, localClose);
+                },
+                (data) => {
+                  if (winner !== 'direct-epoxy' || !localSettled) return;
+                  const bytes = sizeOf(data);
+                  recvBytes += bytes;
+                  if (recvBytes === bytes) {
+                    log('TRANSPORT WS FIRST DATA (DIRECT EPOXY):', '#' + n, targetHref, 'candidate=' + wispLabel, 'bytes=' + bytes);
+                  }
+                  onmessage(data);
+                },
+                (code, reason) => {
+                  log('TRANSPORT WS HYBRID DIRECT EPOXY CLOSE:', '#' + n, 'candidate=' + wispLabel, 'code=' + code, 'reason=' + String(reason || ''));
+                  if (winner === 'direct-epoxy' && localSettled) {
+                    onclose(code, reason || '');
+                  } else if (!localSettled && winner === null) {
+                    localSettled = true;
+                    markOneEpoxyFailed();
+                  }
+                },
+                (error) => {
+                  log('TRANSPORT WS HYBRID DIRECT EPOXY ERROR:', '#' + n, 'candidate=' + wispLabel, error?.message || String(error));
+                  if (winner === 'direct-epoxy' && localSettled) {
+                    onerror(error);
+                  } else if (!localSettled && winner === null) {
+                    localSettled = true;
+                    markOneEpoxyFailed();
+                  }
+                }
+              );
+              if (Array.isArray(handles) && handles.length >= 2) {
+                localSend = handles[0];
+                localClose = handles[1];
+                epoxyCloses.push(localClose);
+              }
+            } catch (err) {
+              log('TRANSPORT WS HYBRID DIRECT EPOXY CREATE ERROR:', '#' + n, 'candidate=' + wispLabel, err?.message || String(err));
+              if (!localSettled) {
+                localSettled = true;
+                markOneEpoxyFailed();
+              }
+            }
+          });
         };
 
         // --- PATH 2: Direct Native WebSocket (Raw browser WebSocket attempt) ---
@@ -2416,7 +2601,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           };
         };
 
-        // --- PATH 3: Ultra-Fast Direct Server Relay Bridge (no HTTP ticket delay) ---
+        // --- PATH 3: Ultra-Fast Direct Server Relay Bridge (fallback after 750ms direct head-start) ---
         const startServerBridgeAttempt = () => {
           log('TRANSPORT WS HYBRID SERVER BRIDGE TRY:', '#' + n, targetHref);
           try {
@@ -2496,10 +2681,13 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           onAllFailed(new Error('hybrid websocket timeout (10000ms) across all candidate paths'));
         }, 10000);
 
-        // Tri-path parallel racing: launch all 3 candidate paths simultaneously!
-        startDirectEpoxyAttempt();
+        // Give direct client-side paths (all Epoxy/Wisp candidates + Direct Native) a 750ms head start
+        // so direct connections win whenever reachable, while still guaranteeing fast server-bridge fallback.
+        startDirectEpoxyAttempts();
         startDirectNativeAttempt();
-        startServerBridgeAttempt();
+        bridgeDelayTimer = setTimeout(() => {
+          triggerServerBridge('750ms-headstart-elapsed');
+        }, 750);
       };
 
       (async () => {
@@ -2632,8 +2820,28 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             const transport = new HybridDiagnosticTransport(httpTransport, wsTransport, gameWsTransport, wisp, combinedGameTransports);
             transport._gameWispLabels = ['epoxy:' + wisp];
             await preflightTransport(transport, wisp);
-            log('WISP PREFLIGHT OK:', wisp, 'http=libcurl', 'game-ws=server-relay(websockets-first)+curl-fallback', 'other-ws=epoxy');
-            return { transport, wisp, mode: 'hybrid-libcurl-http+wisp-egress-server-game-ws+epoxy-other-ws+relay-fallback' };
+            log('WISP PREFLIGHT OK:', wisp, 'http=direct-fetch+libcurl', 'game-ws=direct-epoxy+direct-native->server-bridge', 'other-ws=epoxy');
+            // Warm up secondary Wisp EpoxyClient instances in background for multi-Wisp direct WS racing
+            for (let j = 0; j < WISP_SERVERS.length; j++) {
+              if (j === i) continue;
+              const extraWisp = WISP_SERVERS[j].endsWith('/') ? WISP_SERVERS[j] : WISP_SERVERS[j] + '/';
+              (async () => {
+                try {
+                  const extraEpoxy = new EpoxyClient({ wisp: extraWisp });
+                  if (!extraEpoxy.ready && typeof extraEpoxy.init === 'function') {
+                    await withTimeout(extraEpoxy.init(), 10000, 'secondary epoxy init ' + extraWisp);
+                  }
+                  if (extraEpoxy.ready !== false) {
+                    transport.gameWsTransports.push(extraEpoxy);
+                    transport._gameWispLabels.push('epoxy:' + extraWisp);
+                    log('WISP SECONDARY EPOXY READY:', extraWisp);
+                  }
+                } catch (secErr) {
+                  log('WISP SECONDARY EPOXY SKIP:', extraWisp, secErr?.message || String(secErr));
+                }
+              })();
+            }
+            return { transport, wisp, mode: 'hybrid-direct-fetch+libcurl-http+direct-epoxy+direct-native-ws+relay-fallback' };
           } catch (error) {
             log('WISP FAIL:', 'hybrid', wisp, error?.stack || error?.message || String(error));
             try { httpTransport?.close?.(); } catch (_) {}
