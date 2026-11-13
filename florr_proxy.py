@@ -2821,10 +2821,18 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             transport._gameWispLabels = ['epoxy:' + wisp];
             await preflightTransport(transport, wisp);
             log('WISP PREFLIGHT OK:', wisp, 'http=direct-fetch+libcurl', 'game-ws=direct-epoxy+direct-native->server-bridge', 'other-ws=epoxy');
-            // Warm up secondary Wisp EpoxyClient instances in background for multi-Wisp direct WS racing
+            // Warm up secondary Wisp EpoxyClient instances (including Cloud Run same-origin /wisp/) in background for multi-Wisp direct WS racing
+            const sameOriginWisp = new URL('/wisp/', location.origin).href.replace(/^http/i, 'ws');
+            const secondaryGameWisps = [];
             for (let j = 0; j < WISP_SERVERS.length; j++) {
               if (j === i) continue;
-              const extraWisp = WISP_SERVERS[j].endsWith('/') ? WISP_SERVERS[j] : WISP_SERVERS[j] + '/';
+              secondaryGameWisps.push(WISP_SERVERS[j].endsWith('/') ? WISP_SERVERS[j] : WISP_SERVERS[j] + '/');
+            }
+            if (!secondaryGameWisps.includes(sameOriginWisp) && wisp !== sameOriginWisp) {
+              secondaryGameWisps.push(sameOriginWisp);
+            }
+            for (let j = 0; j < secondaryGameWisps.length; j++) {
+              const extraWisp = secondaryGameWisps[j];
               (async () => {
                 try {
                   const extraEpoxy = new EpoxyClient({ wisp: extraWisp });
@@ -2854,6 +2862,27 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
     }
     log('WISP FALLBACK: using same-origin server-relay transport for HTTP and WS');
     const relayTransport = new HybridDiagnosticTransport(null, null, null, '/florr/runtime/http-relay', []);
+    relayTransport._gameWispLabels = [];
+    (async () => {
+      try {
+        const epoxyMod = await withTimeout(import('/scramjet/epoxy/index.mjs?boot=' + Date.now()), 10000, 'fallback epoxy import');
+        const EpoxyClient = epoxyMod?.default || epoxyMod?.EpoxyClient;
+        if (EpoxyClient) {
+          const sameOriginWisp = new URL('/wisp/', location.origin).href.replace(/^http/i, 'ws');
+          const localEpoxy = new EpoxyClient({ wisp: sameOriginWisp });
+          if (!localEpoxy.ready && typeof localEpoxy.init === 'function') {
+            await withTimeout(localEpoxy.init(), 10000, 'same-origin epoxy init');
+          }
+          if (localEpoxy.ready !== false) {
+            relayTransport.gameWsTransports.push(localEpoxy);
+            relayTransport._gameWispLabels.push('epoxy:' + sameOriginWisp);
+            log('WISP SAME-ORIGIN EPOXY READY (FALLBACK):', sameOriginWisp);
+          }
+        }
+      } catch (e) {
+        log('WISP SAME-ORIGIN EPOXY SKIP:', e?.message || String(e));
+      }
+    })();
     return { transport: relayTransport, wisp: 'server-relay', mode: 'server-http-relay+server-ws-relay' };
   }
 
