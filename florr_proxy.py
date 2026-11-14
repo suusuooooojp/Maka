@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-14-ws-v72"
+FLORR_SW_REVISION = "2026-11-14-ws-v73"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1043,7 +1043,7 @@ def patch_scramjet_js(source: bytes) -> bytes:
         'A.addEventListener("open",()=>{c(new Event("open"))}),'
         'A.addEventListener("close",e=>{c(new CloseEvent("close",e))}),'
         'A.addEventListener("message",e=>{let t=e.data;'
-        'if("string"!=typeof t){if("byteLength"in t){"blob"===l.binaryType?t=new Blob([t]):t instanceof ArrayBuffer||(0,i.Cu)(t,ArrayBuffer.prototype)}else if("arrayBuffer"in t&&"arraybuffer"===l.binaryType)return void t.arrayBuffer().then(b=>{(0,i.Cu)(b,ArrayBuffer.prototype),c(new MessageEvent("message",{data:b,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})}'
+        'if("string"!=typeof t){if("byteLength"in t){"blob"===l.binaryType?t=new Blob([t]):t instanceof ArrayBuffer||(t=new Uint8Array(t).slice().buffer)}else if("arrayBuffer"in t&&"arraybuffer"===l.binaryType)return void t.arrayBuffer().then(b=>{b instanceof ArrayBuffer||(b=new Uint8Array(b).slice().buffer),c(new MessageEvent("message",{data:b,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})}'
         'c(new MessageEvent("message",{data:t,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})'
     )
     if old_ws_msg in text:
@@ -1972,7 +1972,10 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
       };
       const cloneFrameIfNeeded = value => {
         if (ArrayBuffer.isView(value)) {
-          return value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+          return new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice().buffer;
+        }
+        if (value && typeof value === 'object' && typeof value.byteLength === 'number' && !(value instanceof Blob)) {
+          return new Uint8Array(value).slice().buffer;
         }
         return value;
       };
@@ -2601,16 +2604,19 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           };
         };
 
-        // --- PATH 3: Ultra-Fast Direct Server Relay Bridge (fallback after 750ms direct head-start) ---
+        // --- PATH 3: Ultra-Fast Direct Server Relay Bridge ---
         const startServerBridgeAttempt = () => {
           log('TRANSPORT WS HYBRID SERVER BRIDGE TRY:', '#' + n, targetHref);
           try {
             const bridgeUrl = new URL('/florr_ws_bridge', location.origin);
+            bridgeUrl.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
             bridgeUrl.searchParams.set('target', targetHref);
-            try {
-              const cookieStr = this.cookieProvider ? this.cookieProvider(url.href) : (document.cookie || '');
-              if (cookieStr) bridgeUrl.searchParams.set('cookie', cookieStr);
-            } catch (_) {}
+            if (!sockHostname.endsWith('.m28n.net')) {
+              try {
+                const cookieStr = this.cookieProvider ? this.cookieProvider(url.href) : (document.cookie || '');
+                if (cookieStr && cookieStr.length < 1500) bridgeUrl.searchParams.set('cookie', cookieStr);
+              } catch (_) {}
+            }
             bridgeUrl.searchParams.set('session_id', typeof __florr_diag_session !== 'undefined' ? __florr_diag_session : '');
 
             const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
@@ -2674,20 +2680,27 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           };
         };
 
-        // Safety timeout across all paths (10000ms)
+        // Safety timeout across all paths (15000ms)
         overallTimer = setTimeout(() => {
           if (winner !== null || opened || localClosed) return;
-          log('TRANSPORT WS HYBRID OVERALL TIMEOUT (10000ms):', '#' + n, targetHref);
-          onAllFailed(new Error('hybrid websocket timeout (10000ms) across all candidate paths'));
-        }, 10000);
+          log('TRANSPORT WS HYBRID OVERALL TIMEOUT (15000ms):', '#' + n, targetHref);
+          onAllFailed(new Error('hybrid websocket timeout (15000ms) across all candidate paths'));
+        }, 15000);
 
-        // Give direct client-side paths (all Epoxy/Wisp candidates + Direct Native) a 750ms head start
-        // so direct connections win whenever reachable, while still guaranteeing fast server-bridge fallback.
-        startDirectEpoxyAttempts();
-        startDirectNativeAttempt();
-        bridgeDelayTimer = setTimeout(() => {
-          triggerServerBridge('750ms-headstart-elapsed');
-        }, 750);
+        if (sockHostname.endsWith('.m28n.net')) {
+          // *.s.m28n.net rejects non-florr.io Origin (403) and uses a cert chain that fails strict
+          // browser/rustls verification, so direct-native and direct-epoxy cannot succeed.
+          // Connect immediately via server-bridge (0ms delay).
+          directNativeFailed = true;
+          epoxyFailed = true;
+          triggerServerBridge('m28n-immediate-server-bridge');
+        } else {
+          startDirectEpoxyAttempts();
+          startDirectNativeAttempt();
+          bridgeDelayTimer = setTimeout(() => {
+            triggerServerBridge('450ms-headstart-elapsed');
+          }, 450);
+        }
       };
 
       (async () => {
@@ -4488,7 +4501,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     max_queue=1024,
                     compression=None,
                     ssl=tls_context,
-                    open_timeout=4,
+                    open_timeout=8,
                 ) as upstream:
                     try:
                         sock = upstream.transport.get_extra_info("socket")
