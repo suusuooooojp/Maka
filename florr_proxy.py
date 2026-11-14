@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-12-ws-direct-v70"
+FLORR_SW_REVISION = "2026-11-14-ws-v71"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -2821,15 +2821,11 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             transport._gameWispLabels = ['epoxy:' + wisp];
             await preflightTransport(transport, wisp);
             log('WISP PREFLIGHT OK:', wisp, 'http=direct-fetch+libcurl', 'game-ws=direct-epoxy+direct-native->server-bridge', 'other-ws=epoxy');
-            // Warm up secondary Wisp EpoxyClient instances (including Cloud Run same-origin /wisp/) in background for multi-Wisp direct WS racing
-            const sameOriginWisp = new URL('/wisp/', location.origin).href.replace(/^http/i, 'ws');
+            // Warm up secondary external Wisp EpoxyClient instances in background for multi-Wisp direct WS racing
             const secondaryGameWisps = [];
             for (let j = 0; j < WISP_SERVERS.length; j++) {
               if (j === i) continue;
               secondaryGameWisps.push(WISP_SERVERS[j].endsWith('/') ? WISP_SERVERS[j] : WISP_SERVERS[j] + '/');
-            }
-            if (!secondaryGameWisps.includes(sameOriginWisp) && wisp !== sameOriginWisp) {
-              secondaryGameWisps.push(sameOriginWisp);
             }
             for (let j = 0; j < secondaryGameWisps.length; j++) {
               const extraWisp = secondaryGameWisps[j];
@@ -4468,50 +4464,6 @@ async def florr_ws_bridge(websocket: WebSocket):
                 await _run_bridge(upstream, "discord-websockets-direct")
                 return
 
-        if _host_is_florr_game_ws(parsed.hostname):
-            try:
-                _log(f"WS BRIDGE DIRECT GAME CONNECT TRY target={parsed.hostname}:443")
-                direct_headers = [
-                    ("Origin", UPSTREAM_ORIGIN),
-                    ("Referer", UPSTREAM_ORIGIN + "/"),
-                    ("Pragma", "no-cache"),
-                    ("Cache-Control", "no-cache"),
-                ]
-                if cookie:
-                    direct_headers.append(("Cookie", cookie))
-                user_agent_for_ws = upstream_ua if upstream_ua else DEFAULT_UA
-                async with websockets.connect(
-                    parsed.geturl(),
-                    origin=UPSTREAM_ORIGIN,
-                    user_agent_header=user_agent_for_ws,
-                    additional_headers=direct_headers,
-                    subprotocols=offered or None,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=5,
-                    max_size=None,
-                    max_queue=1024,
-                    compression=None,
-                    ssl=tls_context,
-                    open_timeout=8,
-                ) as upstream:
-                    try:
-                        sock = upstream.transport.get_extra_info("socket")
-                        if sock is not None:
-                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    except Exception:
-                        pass
-                    _log(f"WS BRIDGE direct low-latency connection established target={parsed.hostname}")
-                    await _run_bridge(upstream, "direct-low-latency")
-                    return
-            except Exception as exc:
-                if (
-                    type(exc).__name__ in ("WebSocketDisconnect", "ClientDisconnected")
-                    or websocket.client_state.name == "DISCONNECTED"
-                ):
-                    return
-                _log(f"WS BRIDGE DIRECT GAME FAIL ({type(exc).__name__}: {exc}), falling back to Wisp pool")
-
         for wisp_index, wisp_url in enumerate(WISP_SERVERS, 1):
             if websocket.client_state.name == "DISCONNECTED":
                 return
@@ -4581,6 +4533,49 @@ async def florr_ws_bridge(websocket: WebSocket):
                         await wisp_conn.close()
                     except Exception:
                         pass
+
+        if _host_is_florr_game_ws(parsed.hostname):
+            try:
+                _log(f"WS BRIDGE DIRECT GAME FALLBACK TRY target={parsed.hostname}:443")
+                direct_headers = [
+                    ("Referer", UPSTREAM_ORIGIN + "/"),
+                    ("Pragma", "no-cache"),
+                    ("Cache-Control", "no-cache"),
+                ]
+                if cookie:
+                    direct_headers.append(("Cookie", cookie))
+                user_agent_for_ws = upstream_ua if upstream_ua else DEFAULT_UA
+                async with websockets.connect(
+                    parsed.geturl(),
+                    origin=UPSTREAM_ORIGIN,
+                    user_agent_header=user_agent_for_ws,
+                    additional_headers=direct_headers,
+                    subprotocols=offered or None,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    close_timeout=5,
+                    max_size=None,
+                    max_queue=1024,
+                    compression=None,
+                    ssl=tls_context,
+                    open_timeout=8,
+                ) as upstream:
+                    try:
+                        sock = upstream.transport.get_extra_info("socket")
+                        if sock is not None:
+                            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except Exception:
+                        pass
+                    _log(f"WS BRIDGE direct low-latency connection established target={parsed.hostname}")
+                    await _run_bridge(upstream, "direct-low-latency")
+                    return
+            except Exception as exc:
+                if (
+                    type(exc).__name__ in ("WebSocketDisconnect", "ClientDisconnected")
+                    or websocket.client_state.name == "DISCONNECTED"
+                ):
+                    return
+                _log(f"WS BRIDGE DIRECT GAME FALLBACK FAIL ({type(exc).__name__}: {exc})")
 
         if CurlCffiAsyncSession is not None:
             for wisp_index, wisp_url in enumerate(WISP_SERVERS, 1):

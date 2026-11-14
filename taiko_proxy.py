@@ -83,16 +83,12 @@ except Exception:
 try:
     if API_SONGS_CACHE_FILE.is_file() and API_SONGS_CACHE_FILE.stat().st_size > 10:
         _API_SONGS_MEM_CACHE = (time.time(), API_SONGS_CACHE_FILE.read_bytes())
-    elif SONGS_FALLBACK_FILE.is_file() and SONGS_FALLBACK_FILE.stat().st_size > 10:
-        _API_SONGS_MEM_CACHE = (time.time(), SONGS_FALLBACK_FILE.read_bytes())
 except Exception:
     pass
 
 try:
     if API_CATEGORIES_CACHE_FILE.is_file() and API_CATEGORIES_CACHE_FILE.stat().st_size > 10:
         _API_CATEGORIES_MEM_CACHE = (time.time(), API_CATEGORIES_CACHE_FILE.read_bytes())
-    elif CATEGORIES_FILE.is_file() and CATEGORIES_FILE.stat().st_size > 10:
-        _API_CATEGORIES_MEM_CACHE = (time.time(), CATEGORIES_FILE.read_bytes())
 except Exception:
     pass
 
@@ -434,15 +430,14 @@ async def _ensure_api_songs_cached() -> bytes:
             asyncio.create_task(_revalidate_api_songs())
         return cached_bytes
 
-    for disk_file in (API_SONGS_CACHE_FILE, SONGS_FALLBACK_FILE):
-        if disk_file.is_file() and disk_file.stat().st_size > 10:
-            try:
-                disk_bytes = disk_file.read_bytes()
-                _API_SONGS_MEM_CACHE = (now, disk_bytes)
-                asyncio.create_task(_revalidate_api_songs())
-                return disk_bytes
-            except Exception:
-                pass
+    if API_SONGS_CACHE_FILE.is_file() and API_SONGS_CACHE_FILE.stat().st_size > 10:
+        try:
+            disk_bytes = API_SONGS_CACHE_FILE.read_bytes()
+            _API_SONGS_MEM_CACHE = (now, disk_bytes)
+            asyncio.create_task(_revalidate_api_songs())
+            return disk_bytes
+        except Exception:
+            pass
 
     if _API_SONGS_INFLIGHT is not None and not _API_SONGS_INFLIGHT.done():
         try:

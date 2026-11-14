@@ -166,7 +166,20 @@ class SoundBuffer{
 				}
 			})
 		}
-		this._oggmentedPromise.then(oggmented => oggmented.decodeOggData(buffer, resolve, reject), reject)
+		this._oggmentedPromise.then(oggmented => {
+			try {
+				oggmented.decodeOggData(buffer, resolve, err => {
+					this._oggmentedPromise = null
+					reject(err)
+				})
+			} catch (e) {
+				this._oggmentedPromise = null
+				reject(e)
+			}
+		}, err => {
+			this._oggmentedPromise = null
+			reject(err)
+		})
 	}
 }
 class SoundGain{

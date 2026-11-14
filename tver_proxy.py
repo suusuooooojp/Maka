@@ -105,7 +105,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-tver18"
+RUNTIME_REV = "20261114-tver19"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -716,12 +716,30 @@ async def _ensure_patched_runtime(asset_name: str, patcher) -> tuple[bytes, byte
     cached_gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
     if cached is not None and cached_gz is not None:
         return cached, cached_gz
-    import app as host_app
+    raw_bytes = b""
+    try:
+        import app as host_app
 
-    resp = await host_app.scramjet_asset(asset_name)
-    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
+        resp = await host_app.scramjet_asset(asset_name)
+        if getattr(resp, "status_code", 500) == 200:
+            raw_bytes = bytes(getattr(resp, "body", b"") or b"")
+            if not raw_bytes:
+                resp_path = getattr(resp, "path", None)
+                if resp_path:
+                    with open(resp_path, "rb") as fp:
+                        raw_bytes = fp.read()
+    except Exception:
+        raw_bytes = b""
+    if not raw_bytes and asset_name == "controller.sw.js":
+        try:
+            from florr_runtime_embedded import EMBEDDED_CONTROLLER_SW
+
+            raw_bytes = EMBEDDED_CONTROLLER_SW.replace("/florr/~/sj/", "/tver/~/sj/").encode("utf-8")
+        except Exception:
+            raw_bytes = b""
+    if not raw_bytes:
         return None
-    patched = patcher(bytes(resp.body))
+    patched = patcher(raw_bytes)
     gz = gzip.compress(patched, compresslevel=6)
     _PATCHED_RUNTIME_CACHE[asset_name] = patched
     _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
@@ -779,8 +797,12 @@ async def tver_controller_inject(request: Request):
 
 
 async def _tver_sw_override(request: Request) -> Response:
-    code = f"""
-importScripts('/tver/runtime/controller.sw.js?v={RUNTIME_REV}');
+    ctrl_sw_pair = await _ensure_patched_runtime("controller.sw.js", _patch_controller_sw)
+    if ctrl_sw_pair is not None:
+        ctrl_sw_code = ctrl_sw_pair[0].decode("utf-8", errors="replace")
+    else:
+        ctrl_sw_code = f"importScripts('/tver/runtime/controller.sw.js?v={RUNTIME_REV}');"
+    code = ctrl_sw_code + f"""
 const TVER_MEDIA_CACHE = 'sh-tver-media-{RUNTIME_REV}';
 const TVER_REWRITTEN_CACHE = 'sh-tver-rewritten-{RUNTIME_REV}';
 const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
@@ -3986,7 +4008,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                 headers: cdnHdrs,
                 mode: "cors",
                 credentials: "omit",
-              }}, 2500, signal);
+              }}, 6000, signal);
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
                 if (ct.includes("text/html") || ct.includes("application/xhtml")) {{
@@ -4091,7 +4113,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               mode: "cors",
               credentials: "omit",
               cache: "no-store",
-            }}, 3000, signal);
+            }}, 7000, signal);
             const apiCt = String(apiResp?.headers?.get("content-type") || "").toLowerCase();
             if (apiCt.includes("text/html") || apiCt.includes("application/xhtml")) {{
               blockDirectHost(apiHost);
@@ -4111,6 +4133,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                 headers: [...apiResp.headers.entries()],
                 status: apiResp.status,
                 statusText: apiResp.statusText || "OK",
+              }};
+            }} else if (apiResp && apiResp.status >= 400 && apiResp.status < 500 && apiCt.includes("json") && apiHost === "playback.api.streaks.jp") {{
+              return {{
+                body: m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer(),
+                headers: [...apiResp.headers.entries()],
+                status: apiResp.status,
+                statusText: apiResp.statusText || "Error",
               }};
             }}
           }} catch (_) {{
