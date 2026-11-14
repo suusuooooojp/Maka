@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-14-ws-v75"
+FLORR_SW_REVISION = "2026-11-14-ws-v76"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1049,6 +1049,25 @@ def patch_scramjet_js(source: bytes) -> bytes:
     if old_ws_msg in text:
         text = text.replace(old_ws_msg, new_ws_msg, 1)
 
+    old_win_open = (
+        'e.Proxy("window.open",{apply(t){'
+        'if(void 0!==t.args[0]){let r=(0,n.Qf)(t.args[0]);""!==r&&(t.args[0]=e.rewriteUrl(r))}'
+        'if(void 0!==t.args[1]&&null!==t.args[1]){let r=(0,n.Qf)(t.args[1]);("_top"===r||"_unfencedTop"===r)&&(r=e.meta.topFrameName),"_parent"===r&&(r=e.meta.parentFrameName),t.args[1]=r}'
+        'let r=t.call();return r?(i.p in r||e.init.hookSubcontext(r),r):t.return(r)}})'
+    )
+    new_win_open = (
+        'e.Proxy("window.open",{apply(t){'
+        'if(void 0!==t.args[0]){let r=(0,n.Qf)(t.args[0]);""!==r&&(t.args[0]=e.rewriteUrl(r))}'
+        'if(void 0!==t.args[1]&&null!==t.args[1]){let r=(0,n.Qf)(t.args[1]);("_top"===r||"_unfencedTop"===r)&&(r=e.meta.topFrameName),"_parent"===r&&(r=e.meta.parentFrameName),t.args[1]=r}'
+        'const _isIOS=/iPad|iPhone|iPod/i.test(navigator.userAgent)||(/Macintosh/i.test(navigator.userAgent)&&navigator.maxTouchPoints>1);'
+        'if(_isIOS&&t.args.length>2){t.args[2]=void 0}'
+        'let r=t.call();'
+        'if(!r&&t.args[0]){try{window.top?.__florrPopupBlockedFallback?.(t.args[0],window,t.args[1])}catch(_){}}'
+        'return r?(i.p in r||e.init.hookSubcontext(r),r):t.return(r)}})'
+    )
+    if old_win_open in text:
+        text = text.replace(old_win_open, new_win_open, 1)
+
     old_storage = (
         'defineProperty:(t,r,i)=>(t.setItem(e.url.host+"@"+r,i.value),!0)},'
         "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
@@ -1236,11 +1255,16 @@ if ('serviceWorker' in navigator) {
 html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sys-color-surface,#0f0f0f);font-family:var(--md-sys-typescale-font-plain,sans-serif)}
 #status{position:fixed;z-index:2147483647;left:12px;right:12px;top:12px;max-height:45vh;overflow:auto;padding:10px 14px;border:1px solid var(--md-sys-color-outline-variant,rgba(255,255,255,.16));border-radius:var(--md-sys-shape-corner-medium,12px);background:var(--md-sys-color-surface-container-high,rgba(17,17,17,.92));color:var(--md-sys-color-on-surface,#e8e8e8);font:11px/1.45 var(--md-sys-typescale-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);white-space:pre-wrap;pointer-events:none;box-shadow:var(--md-sys-elevation-level2,0 6px 20px rgba(0,0,0,.18))}
 #game{position:absolute;inset:0;width:100%;height:100%;border:0}
+#popup-fallback{position:fixed;z-index:2147483647;top:14px;left:50%;transform:translateX(-50%);display:none;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:rgba(20,22,28,.95);border:1px solid rgba(255,255,255,.2);box-shadow:0 8px 24px rgba(0,0,0,.4);color:#fff;font:13px/1.3 sans-serif}
+#popup-fallback.show{display:flex}
+#popup-open-btn{border:0;border-radius:999px;padding:6px 14px;background:#5865F2;color:#fff;font:600 13px/1.2 sans-serif;cursor:pointer}
+#popup-close-btn{border:0;background:transparent;color:#aaa;font:16px/1 sans-serif;padding:2px 6px;cursor:pointer}
 .hidden{display:none}
 </style>
 </head>
 <body>
 <div id="status">[FLORR-DIAG] boot page executing</div>
+<div id="popup-fallback"><button id="popup-open-btn" type="button">ログイン画面を開く</button><button id="popup-close-btn" type="button" aria-label="閉じる">×</button></div>
 <div id="game"></div>
 <script>
 (() => {
@@ -1256,6 +1280,44 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
   const RUNTIME_BASE = '/florr-runtime';
   const game = document.getElementById('game');
   const status = document.getElementById('status');
+  const popupFallback = document.getElementById('popup-fallback');
+  const popupOpenBtn = document.getElementById('popup-open-btn');
+  const popupCloseBtn = document.getElementById('popup-close-btn');
+  let pendingPopup = null;
+  if (popupCloseBtn) {
+    popupCloseBtn.addEventListener('click', () => {
+      popupFallback?.classList.remove('show');
+      pendingPopup = null;
+    });
+  }
+  if (popupOpenBtn) {
+    popupOpenBtn.addEventListener('click', () => {
+      const item = pendingPopup;
+      popupFallback?.classList.remove('show');
+      pendingPopup = null;
+      if (!item || !item.url) return;
+      let win = null;
+      try { win = item.sourceWin?.open?.(item.url, '_blank'); } catch (_) {}
+      if (!win) {
+        try { win = window.open(item.url, '_blank'); } catch (_) {}
+      }
+      if (!win) {
+        try { location.href = item.url; } catch (_) {}
+      }
+    });
+  }
+  window.__florrPopupBlockedFallback = (url, sourceWin, targetName) => {
+    try {
+      const rawUrl = String(url || '');
+      if (!rawUrl) return;
+      pendingPopup = { url: rawUrl, sourceWin, targetName };
+      if (popupOpenBtn) {
+        popupOpenBtn.textContent = /discord/i.test(rawUrl) ? 'Discordログインを開く' : 'ポップアップを開く';
+      }
+      popupFallback?.classList.add('show');
+      console.log('[FLORR-DIAG] POPUP BLOCKED -> tap-to-open fallback shown:', rawUrl);
+    } catch (_) {}
+  };
   const startedAt = performance.now();
   let __florr_diag_session = '';
   try {
@@ -1687,17 +1749,25 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           if (jarCookies) hdrPairs.push(['cookie', jarCookies]);
         }
       } catch (_) {}
-      const resp = await fetch('/florr/runtime/http-relay', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          url: remote.href,
-          method: mUpper,
-          headers: hdrPairs,
-          body_b64: bodyB64,
-        }),
-        credentials: 'omit',
-      });
+      const relayCtrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const relayTimer = relayCtrl ? setTimeout(() => { try { relayCtrl.abort(); } catch (_) {} }, 12000) : null;
+      let resp;
+      try {
+        resp = await fetch('/florr/runtime/http-relay', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            url: remote.href,
+            method: mUpper,
+            headers: hdrPairs,
+            body_b64: bodyB64,
+          }),
+          credentials: 'omit',
+          signal: relayCtrl ? relayCtrl.signal : undefined,
+        });
+      } finally {
+        if (relayTimer !== null) clearTimeout(relayTimer);
+      }
       if (!resp.ok) throw new Error('HTTP relay failed: ' + resp.status);
       const rawBuf = await resp.arrayBuffer();
       if (rawBuf.byteLength >= 4) {
@@ -4451,6 +4521,8 @@ async def florr_ws_bridge(websocket: WebSocket):
                         f"u2c_messages={counters['u2c_messages']} silent_ms={u2c_age * 1000:.0f} "
                         f"last_c2u_age_ms={c2u_age * 1000:.0f}"
                     )
+                if impl_name == "direct-low-latency" and counters["c2u_bytes"] > 0 and counters["u2c_bytes"] == 0 and u2c_age >= 5:
+                    raise RuntimeError("direct-low-latency 0-byte upstream silent after 5s")
                 if counters["c2u_bytes"] and counters["u2c_bytes"] <= 9 and u2c_age >= 30 and not getattr(websocket, "_florr_silence_reported", False):
                     try:
                         setattr(websocket, "_florr_silence_reported", True)
