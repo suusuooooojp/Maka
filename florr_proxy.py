@@ -585,8 +585,8 @@ async def florr_http_relay(url: str = ""):
 
 
 _WISP_ENDPOINTS = (
-    "wss://wisp.mercurywork.shop/",
     "wss://anura.pro/",
+    "wss://wisp.mercurywork.shop/",
 )
 
 
@@ -1018,7 +1018,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v10"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v11"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
