@@ -699,7 +699,7 @@ _LAUNCHER_HTML = """<!doctype html>
       }
       var swUrl = "/florr/sw-florr.js?v=" + encodeURIComponent(V_TAG);
       addLog("info", "[SW] registering " + swUrl);
-      var reg = await navigator.serviceWorker.register(swUrl, { scope: "/florr/" });
+      var reg = await navigator.serviceWorker.register(swUrl, { scope: "/" });
       var sw = reg.active || reg.waiting || reg.installing;
       if (!sw) throw new Error("No ServiceWorker instance");
       if (sw.state !== "activated") {
@@ -1023,7 +1023,7 @@ async def florr_launcher(request: Request):
     import json as _json
 
     scramjet_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{scramjet_ver}-{ctrl_ver}-clean1"
+    v_tag = f"{scramjet_ver}-{ctrl_ver}-clean2"
     html = (
         _LAUNCHER_HTML
         .replace("__V_TAG__", v_tag)
