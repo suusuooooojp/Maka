@@ -622,7 +622,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v5"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v6"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -980,8 +980,12 @@ async def florr_launcher(request: Request):
                   credentials: 'omit'
                 }});
                 if (directResp && directResp.ok) {{
-                  var dHeaders = {{}};
-                  directResp.headers.forEach(function (v, k) {{ dHeaders[k] = v; }});
+                  var dHeaders = [];
+                  directResp.headers.forEach(function (v, k) {{
+                    var kl = String(k).toLowerCase();
+                    if (kl === 'content-encoding' || kl === 'content-length') return;
+                    dHeaders.push([k, v]);
+                  }});
                   var dBuf = m === 'HEAD' ? new ArrayBuffer(0) : await directResp.arrayBuffer();
                   addLog('info', '[TOP-API] direct ' + directResp.status + ' ' + u.href);
                   return {{
@@ -1000,8 +1004,12 @@ async def florr_launcher(request: Request):
                   credentials: 'same-origin'
                 }});
                 if (relayResp && relayResp.ok) {{
-                  var rHeaders = {{}};
-                  relayResp.headers.forEach(function (v, k) {{ rHeaders[k] = v; }});
+                  var rHeaders = [];
+                  relayResp.headers.forEach(function (v, k) {{
+                    var kl = String(k).toLowerCase();
+                    if (kl === 'content-encoding' || kl === 'content-length') return;
+                    rHeaders.push([k, v]);
+                  }});
                   var rBuf = m === 'HEAD' ? new ArrayBuffer(0) : await relayResp.arrayBuffer();
                   addLog('info', '[TOP-API] relay ' + relayResp.status + ' ' + u.href);
                   return {{
