@@ -925,7 +925,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v8"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v9"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -1337,13 +1337,17 @@ async def florr_launcher(request: Request):
             var validProtocols = Array.isArray(protocols)
               ? protocols.filter(function (p) {{ return typeof p === 'string' && p.length > 0; }})
               : (typeof protocols === 'string' && protocols.length > 0 ? [protocols] : []);
-            addLog('info', '[TOP-WS-BRIDGE] connect ' + u.href);
-            var ws = validProtocols.length > 0
-              ? new WebSocket(bridgeUrl, validProtocols)
-              : new WebSocket(bridgeUrl);
-            ws.binaryType = 'arraybuffer';
+
+            var winner = null;
+            var winnerWs = null;
             var settled = false;
-            var opened = false;
+            var localClosed = false;
+            var directWs = null;
+            var directDone = false;
+            var bridgeWs = null;
+            var bridgeStarted = false;
+            var bridgeDone = false;
+            var bridgeTimer = null;
             var sendCount = 0;
             var recvCount = 0;
             var silentTimer = null;
@@ -1364,15 +1368,65 @@ async def florr_launcher(request: Request):
               }}
             }}
 
-            ws.onopen = function () {{
-              opened = true;
-              addLog('ok', '[TOP-WS-BRIDGE] open ' + u.href + (ws.protocol ? ' proto=' + ws.protocol : ''));
+            function clearBridgeTimer() {{
+              if (bridgeTimer) {{
+                clearTimeout(bridgeTimer);
+                bridgeTimer = null;
+              }}
+            }}
+
+            function safeClose(sock, code, reason) {{
+              if (!sock) return;
+              try {{
+                if (sock.readyState === WebSocket.CLOSING || sock.readyState === WebSocket.CLOSED) return;
+                if (typeof code === 'number' && code >= 1000 && code <= 4999) {{
+                  sock.close(code, typeof reason === 'string' ? reason.slice(0, 123) : '');
+                }} else {{
+                  sock.close();
+                }}
+              }} catch (_) {{
+                try {{ sock.close(); }} catch (_2) {{}}
+              }}
+            }}
+
+            function checkAllFailed() {{
+              if (!winner && !settled && !localClosed && directDone && bridgeStarted && bridgeDone) {{
+                settled = true;
+                clearSilentTimer();
+                clearBridgeTimer();
+                try {{
+                  if (typeof onerror === 'function') onerror('WebSocket direct and bridge both failed');
+                }} catch (_) {{}}
+              }}
+            }}
+
+            function scheduleSilentCheck(sock, label) {{
+              if (sendCount === 2 && recvCount <= 1 && !silentTimer) {{
+                silentTimer = setTimeout(function () {{
+                  if (sock && sock.readyState === WebSocket.OPEN && recvCount <= 1) {{
+                    addLog('warn', '[' + label + '] upstream silent 4s after send#2 (sent=' + sendCount + ', recv=' + recvCount + ') ' + u.host);
+                  }}
+                }}, 4000);
+              }}
+            }}
+
+            function attachWinner(ws, tag) {{
+              winner = tag;
+              winnerWs = ws;
+              clearBridgeTimer();
+              var label = tag === 'direct' ? 'TOP-WS-DIRECT' : 'TOP-WS-BRIDGE';
+              var loser = tag === 'direct' ? bridgeWs : directWs;
+              if (loser && loser !== ws) {{
+                safeClose(loser);
+              }}
+              addLog('ok', '[TOP-WS-WINNER] ' + tag + ' ' + u.href + (ws.protocol ? ' proto=' + ws.protocol : ''));
               while (pendingQueue.length > 0) {{
                 var qItem = pendingQueue.shift();
                 sendCount++;
                 if (sendCount <= 5) {{
-                  addLog('info', '[TOP-WS-BRIDGE] send #' + sendCount + ' bytes=' + dataByteLen(qItem) + ' ' + u.host);
+                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(qItem) + ' ' + u.host);
                 }}
+                scheduleSilentCheck(ws, label);
                 try {{
                   ws.send(qItem);
                 }} catch (_) {{}}
@@ -1383,86 +1437,145 @@ async def florr_launcher(request: Request):
                   if (typeof onopen === 'function') onopen(ws.protocol || '', ws.extensions || '');
                 }} catch (_) {{}}
               }}
-            }};
+            }}
 
-            ws.onmessage = function (ev) {{
-              var data = ev.data;
-              recvCount++;
-              if (recvCount >= 2) {{
-                clearSilentTimer();
-              }}
-              if (recvCount <= 5) {{
-                addLog('ok', '[TOP-WS-BRIDGE] recv #' + recvCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
-              }}
-              if (data instanceof Blob) {{
-                data.arrayBuffer().then(function (ab) {{
-                  try {{
-                    if (typeof onmessage === 'function') onmessage(ab);
-                  }} catch (_) {{}}
-                }}).catch(function () {{}});
-                return;
-              }}
+            function wireSocket(ws, tag) {{
+              var label = tag === 'direct' ? 'TOP-WS-DIRECT' : 'TOP-WS-BRIDGE';
+              ws.binaryType = 'arraybuffer';
+
+              ws.onopen = function () {{
+                if (localClosed || winner) {{
+                  safeClose(ws);
+                  return;
+                }}
+                addLog('ok', '[' + label + '] open ' + u.href + (ws.protocol ? ' proto=' + ws.protocol : ''));
+                attachWinner(ws, tag);
+              }};
+
+              ws.onmessage = function (ev) {{
+                if (winner !== tag || localClosed) return;
+                var data = ev.data;
+                recvCount++;
+                if (recvCount >= 2) {{
+                  clearSilentTimer();
+                }}
+                if (recvCount <= 5) {{
+                  addLog('ok', '[' + label + '] recv #' + recvCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
+                }}
+                if (data instanceof Blob) {{
+                  data.arrayBuffer().then(function (ab) {{
+                    if (winner !== tag || localClosed) return;
+                    try {{
+                      if (typeof onmessage === 'function') onmessage(ab);
+                    }} catch (_) {{}}
+                  }}).catch(function () {{}});
+                  return;
+                }}
+                try {{
+                  if (typeof onmessage === 'function') onmessage(data);
+                }} catch (_) {{}}
+              }};
+
+              ws.onclose = function (ev) {{
+                if (tag === 'direct') directDone = true;
+                else bridgeDone = true;
+                var code = ev && typeof ev.code === 'number' ? ev.code : 1000;
+                var reason = ev && ev.reason ? ev.reason : '';
+                if (winner === tag) {{
+                  clearSilentTimer();
+                  addLog(code === 1000 || code === 1005 ? 'info' : 'warn', '[' + label + '] close code=' + code + (reason ? ' reason=' + reason : '') + ' sent=' + sendCount + ' recv=' + recvCount + ' ' + u.href);
+                  if (settled && !localClosed) {{
+                    try {{
+                      if (typeof onclose === 'function') onclose(code, reason);
+                    }} catch (_) {{}}
+                  }}
+                }} else if (!winner) {{
+                  addLog('warn', '[' + label + '] pre-open close code=' + code + (reason ? ' reason=' + reason : '') + ' ' + u.href);
+                  if (tag === 'direct' && !bridgeStarted && !localClosed) {{
+                    startBridge();
+                  }}
+                  checkAllFailed();
+                }}
+              }};
+
+              ws.onerror = function () {{
+                if (tag === 'direct') directDone = true;
+                else bridgeDone = true;
+                if (winner === tag) {{
+                  clearSilentTimer();
+                  addLog('error', '[' + label + '] error ' + u.href);
+                }} else if (!winner) {{
+                  addLog('warn', '[' + label + '] error ' + u.href);
+                  if (tag === 'direct' && !bridgeStarted && !localClosed) {{
+                    startBridge();
+                  }}
+                  checkAllFailed();
+                }}
+              }};
+            }}
+
+            function startBridge() {{
+              if (bridgeStarted || winner || localClosed) return;
+              bridgeStarted = true;
+              clearBridgeTimer();
+              addLog('info', '[TOP-WS-BRIDGE] try ' + u.href);
               try {{
-                if (typeof onmessage === 'function') onmessage(data);
-              }} catch (_) {{}}
-            }};
-
-            ws.onclose = function (ev) {{
-              clearSilentTimer();
-              var code = ev && typeof ev.code === 'number' ? ev.code : 1000;
-              var reason = ev && ev.reason ? ev.reason : '';
-              addLog(code === 1000 || code === 1005 ? 'info' : 'warn', '[TOP-WS-BRIDGE] close code=' + code + (reason ? ' reason=' + reason : '') + ' sent=' + sendCount + ' recv=' + recvCount + ' ' + u.href);
-              if (!settled) {{
-                settled = true;
-                try {{
-                  if (typeof onerror === 'function') onerror('WebSocket closed before open (code=' + code + ')');
-                }} catch (_) {{}}
-              }} else if (opened) {{
-                try {{
-                  if (typeof onclose === 'function') onclose(code, reason);
-                }} catch (_) {{}}
+                bridgeWs = validProtocols.length > 0
+                  ? new WebSocket(bridgeUrl, validProtocols)
+                  : new WebSocket(bridgeUrl);
+                wireSocket(bridgeWs, 'bridge');
+              }} catch (e) {{
+                bridgeDone = true;
+                addLog('error', '[TOP-WS-BRIDGE] exception ' + (e && e.message ? e.message : String(e)));
+                checkAllFailed();
               }}
-            }};
+            }}
 
-            ws.onerror = function () {{
-              clearSilentTimer();
-              addLog('error', '[TOP-WS-BRIDGE] error ' + u.href);
-              if (!settled) {{
-                settled = true;
-                try {{
-                  if (typeof onerror === 'function') onerror('WebSocket bridge error');
-                }} catch (_) {{}}
+            addLog('info', '[TOP-WS-DIRECT] try ' + u.href);
+            try {{
+              directWs = validProtocols.length > 0
+                ? new WebSocket(u.href, validProtocols)
+                : new WebSocket(u.href);
+              wireSocket(directWs, 'direct');
+            }} catch (e) {{
+              directDone = true;
+              addLog('warn', '[TOP-WS-DIRECT] exception ' + (e && e.message ? e.message : String(e)));
+              startBridge();
+            }}
+
+            bridgeTimer = setTimeout(function () {{
+              if (!winner && !localClosed) {{
+                startBridge();
               }}
-            }};
+            }}, 200);
 
             var sendFn = function (data) {{
-              if (ws.readyState === WebSocket.OPEN) {{
+              if (localClosed) return;
+              if (winnerWs && winnerWs.readyState === WebSocket.OPEN) {{
+                var label = winner === 'direct' ? 'TOP-WS-DIRECT' : 'TOP-WS-BRIDGE';
                 sendCount++;
                 if (sendCount <= 5) {{
-                  addLog('info', '[TOP-WS-BRIDGE] send #' + sendCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
+                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
                 }}
-                if (sendCount === 2 && recvCount <= 1 && !silentTimer) {{
-                  silentTimer = setTimeout(function () {{
-                    if (ws.readyState === WebSocket.OPEN && recvCount <= 1) {{
-                      addLog('warn', '[TOP-WS-BRIDGE] upstream silent 4s after send#2 (sent=' + sendCount + ', recv=' + recvCount + ') ' + u.host);
-                    }}
-                  }}, 4000);
-                }}
-                ws.send(data);
-              }} else if (ws.readyState === WebSocket.CONNECTING) {{
+                scheduleSilentCheck(winnerWs, label);
+                winnerWs.send(data);
+              }} else if (!winner || (winnerWs && winnerWs.readyState === WebSocket.CONNECTING)) {{
                 pendingQueue.push(data);
               }}
             }};
 
             var closeFn = function (code, reason) {{
-              try {{
-                if (typeof code === 'number' && code >= 1000 && code <= 4999) {{
-                  ws.close(code, typeof reason === 'string' ? reason.slice(0, 123) : '');
-                }} else {{
-                  ws.close();
-                }}
-              }} catch (_) {{
-                try {{ ws.close(); }} catch (_2) {{}}
+              localClosed = true;
+              clearBridgeTimer();
+              clearSilentTimer();
+              if (winnerWs) {{
+                safeClose(winnerWs, code, reason);
+              }}
+              if (directWs && directWs !== winnerWs) {{
+                safeClose(directWs);
+              }}
+              if (bridgeWs && bridgeWs !== winnerWs) {{
+                safeClose(bridgeWs);
               }}
             }};
 
