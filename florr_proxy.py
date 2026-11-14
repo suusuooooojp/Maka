@@ -564,7 +564,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v1"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v2"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -719,6 +719,7 @@ async def florr_launcher(request: Request):
     <div id="florr-log-body"></div>
   </div>
 
+  <script src="/florr/scramjet.js?v={v_tag}"></script>
   <script src="/florr/controller.api.js?v={v_tag}"></script>
   <script>
   (function () {{
@@ -942,7 +943,7 @@ async def florr_launcher(request: Request):
             scramjetPath: '/florr/scramjet.js?v=' + encodeURIComponent(V_TAG),
             injectPath: '/florr/inject.js?v=' + encodeURIComponent(V_TAG),
             wasmPath: '/scramjet/scramjet.wasm?v=' + encodeURIComponent(V_TAG),
-            virtualWasmPath: '/scramjet/scramjet.wasm?v=' + encodeURIComponent(V_TAG)
+            virtualWasmPath: 'scramjet.wasm.js'
           }}
         }});
 
@@ -962,7 +963,11 @@ async def florr_launcher(request: Request):
         sjFrame.go(TARGET_URL);
         setStatus('Florr.io 読み込み中...', '');
       }} catch (err) {{
-        var msg = err && err.stack ? err.stack : (err && err.message ? err.message : String(err));
+        var errMsg = err && err.message ? err.message : '';
+        var errStack = err && err.stack ? err.stack : '';
+        var msg = (errMsg && errStack && errStack.indexOf(errMsg) === -1)
+          ? (errMsg + '\\n' + errStack)
+          : (errStack || errMsg || String(err));
         addLog('error', '[FATAL] ' + msg);
         setStatus('エラー発生 (ログを確認)', 'err');
       }}
