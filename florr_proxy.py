@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-14-ws-v73"
+FLORR_SW_REVISION = "2026-11-14-ws-v74"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -1871,8 +1871,27 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           return directResp;
         } catch (directErr) {
           if (!isQuietAsset) {
-            log('TRANSPORT HTTP DIRECT FETCH SKIP/FAIL -> LIBCURL:', '#' + n, remote.href,
+            log('TRANSPORT HTTP DIRECT FETCH SKIP/FAIL:', '#' + n, remote.href,
                 directErr?.message || String(directErr));
+          }
+        }
+      }
+      const reqHost = String(remote?.hostname || '').toLowerCase();
+      if (reqHost === 'm28.io' || reqHost.endsWith('.m28.io') || reqHost === 'm28n.net' || reqHost.endsWith('.m28n.net')) {
+        try {
+          const m28RelayResp = await this.requestViaHttpRelay(remote, method, reusableBody, headers);
+          if (m28RelayResp && m28RelayResp.status < 500 && m28RelayResp.status !== 403 && m28RelayResp.status !== 429) {
+            if (!isQuietAsset) {
+              log('TRANSPORT HTTP OK:', '#' + n, m28RelayResp.status, m28RelayResp.statusText || '',
+                  remote.href, 'via=http-relay-m28',
+                  'elapsed_ms=' + Math.round(performance.now() - started));
+            }
+            return m28RelayResp;
+          }
+        } catch (m28RelayErr) {
+          if (!isQuietAsset) {
+            log('TRANSPORT HTTP M28 RELAY FALLBACK -> LIBCURL:', '#' + n, remote.href,
+                m28RelayErr?.message || String(m28RelayErr));
           }
         }
       }
@@ -1911,7 +1930,11 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         if (!this.httpTransport) {
           return await this.requestViaHttpRelay(remote, method, reusableBody, headers);
         }
-        const response = await this.httpTransport.request(remote, method, reusableBody, cleanHeaders, signal);
+        const response = await withTimeout(
+          this.httpTransport.request(remote, method, reusableBody, cleanHeaders, signal),
+          7000,
+          'libcurl http ' + (remote?.hostname || '')
+        );
         if (response && (response.status === 403 || response.status === 429 || response.status >= 500)) {
           try {
             const fallbackResp = await this.requestViaHttpRelay(remote, method, reusableBody, headers);
@@ -2318,11 +2341,22 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         let epoxyCloses = [];
         let overallTimer = null;
         let bridgeDelayTimer = null;
+        let epoxyStallTimer = null;
         let bridgeStarted = false;
         let directNativeFailed = false;
         let epoxyFailed = false;
         let relayFailed = false;
         let flushingHybridQueue = false;
+        let closedNotified = false;
+        const validProtocols = Array.isArray(protocols)
+          ? protocols.filter(p => typeof p === 'string' && p.length > 0)
+          : (typeof protocols === 'string' && protocols.length > 0 ? [protocols] : []);
+
+        const safeOnClose = (code, reason) => {
+          if (closedNotified) return;
+          closedNotified = true;
+          onclose(code, reason || '');
+        };
 
         let targetHref = url.href;
         if (location.protocol === 'https:' && targetHref.startsWith('ws://')) {
@@ -2354,6 +2388,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
         const clearHybridTimers = () => {
           if (overallTimer !== null) { clearTimeout(overallTimer); overallTimer = null; }
           if (bridgeDelayTimer !== null) { clearTimeout(bridgeDelayTimer); bridgeDelayTimer = null; }
+          if (epoxyStallTimer !== null) { clearTimeout(epoxyStallTimer); epoxyStallTimer = null; }
         };
 
         const chooseWinner = (choice, handles, winningEpoxyClose) => {
@@ -2408,6 +2443,18 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             try { handles.close(code || 1000, reason || ''); } catch (_) {}
           };
 
+          if (choice === 'direct-epoxy') {
+            epoxyStallTimer = setTimeout(() => {
+              epoxyStallTimer = null;
+              if (winner === 'direct-epoxy' && recvBytes === 0 && !localClosed && !closedNotified) {
+                log('TRANSPORT WS HYBRID DIRECT EPOXY 0-BYTE STALL (3000ms) -> CLOSING & MARKING BROKEN:', '#' + n, targetHref);
+                window.__florr_epoxy_ws_broken = true;
+                try { activeClose?.(1006, 'direct-epoxy 0-byte stall'); } catch (_) {}
+                safeOnClose(1006, 'direct-epoxy 0-byte stall');
+              }
+            }, 3000);
+          }
+
           flushHybridQueue(handles.send);
           onopen(handles?.protocol || '', handles?.extensions || '');
           flushHybridQueue(handles.send);
@@ -2418,7 +2465,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           clearHybridTimers();
           log('TRANSPORT WS HYBRID ALL FAILED:', '#' + n, targetHref, err?.message || String(err));
           onerror(err || new Error('all hybrid websocket candidate paths failed'));
-          onclose(1006, 'hybrid connection failed');
+          safeOnClose(1006, 'hybrid connection failed');
         };
 
         const triggerServerBridge = (reasonLabel) => {
@@ -2452,6 +2499,12 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
 
         // --- PATH 1: Direct Client-Side Epoxy/Wisp (runs in WASM, sends Origin: https://florr.io directly) ---
         const startDirectEpoxyAttempts = () => {
+          if (window.__florr_epoxy_ws_broken) {
+            log('TRANSPORT WS HYBRID DIRECT EPOXY SKIPPED (marked broken)');
+            epoxyFailed = true;
+            checkAllFailed();
+            return;
+          }
           const pool = (Array.isArray(this.gameWsTransports) && this.gameWsTransports.length)
             ? this.gameWsTransports.filter(t => t && typeof t.connect === 'function')
             : (this.wsTransport && typeof this.wsTransport.connect === 'function' ? [this.wsTransport] : []);
@@ -2505,7 +2558,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
                 (code, reason) => {
                   log('TRANSPORT WS HYBRID DIRECT EPOXY CLOSE:', '#' + n, 'candidate=' + wispLabel, 'code=' + code, 'reason=' + String(reason || ''));
                   if (winner === 'direct-epoxy' && localSettled) {
-                    onclose(code, reason || '');
+                    safeOnClose(code, reason || '');
                   } else if (!localSettled && winner === null) {
                     localSettled = true;
                     markOneEpoxyFailed();
@@ -2542,8 +2595,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
               'protocols=' + JSON.stringify(protocols || []));
           try {
             const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
-            directWs = protocols && protocols.length
-              ? new WSConstructor(targetHref, protocols)
+            directWs = validProtocols.length
+              ? new WSConstructor(targetHref, validProtocols)
               : new WSConstructor(targetHref);
             directWs.binaryType = 'arraybuffer';
           } catch (err) {
@@ -2595,7 +2648,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
                 'reason=' + String(event.reason || ''),
                 'winner=' + String(winner));
             if (winner === 'direct-native') {
-              onclose(event.code, event.reason || '');
+              safeOnClose(event.code, event.reason || '');
             } else if (winner === null) {
               directNativeFailed = true;
               window.__florr_direct_ws_failures = (window.__florr_direct_ws_failures || 0) + 1;
@@ -2620,8 +2673,8 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
             bridgeUrl.searchParams.set('session_id', typeof __florr_diag_session !== 'undefined' ? __florr_diag_session : '');
 
             const WSConstructor = typeof NativeWebSocket !== 'undefined' ? NativeWebSocket : WebSocket;
-            relayWs = protocols && protocols.length
-              ? new WSConstructor(bridgeUrl.href, protocols)
+            relayWs = validProtocols.length
+              ? new WSConstructor(bridgeUrl.href, validProtocols)
               : new WSConstructor(bridgeUrl.href);
             relayWs.binaryType = 'arraybuffer';
           } catch (err) {
@@ -2672,7 +2725,7 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
                 'reason=' + String(event.reason || ''),
                 'winner=' + String(winner));
             if (winner === 'server-bridge') {
-              onclose(event.code, event.reason || '');
+              safeOnClose(event.code, event.reason || '');
             } else if (winner === null) {
               relayFailed = true;
               checkAllFailed();
@@ -2680,12 +2733,12 @@ html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--md-sy
           };
         };
 
-        // Safety timeout across all paths (15000ms)
+        // Safety timeout across all paths (20000ms)
         overallTimer = setTimeout(() => {
           if (winner !== null || opened || localClosed) return;
-          log('TRANSPORT WS HYBRID OVERALL TIMEOUT (15000ms):', '#' + n, targetHref);
-          onAllFailed(new Error('hybrid websocket timeout (15000ms) across all candidate paths'));
-        }, 15000);
+          log('TRANSPORT WS HYBRID OVERALL TIMEOUT (20000ms):', '#' + n, targetHref);
+          onAllFailed(new Error('hybrid websocket timeout (20000ms) across all candidate paths'));
+        }, 20000);
 
         if (sockHostname.endsWith('.m28n.net')) {
           // *.s.m28n.net rejects non-florr.io Origin (403) and uses a cert chain that fails strict
@@ -4501,7 +4554,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     max_queue=1024,
                     compression=None,
                     ssl=tls_context,
-                    open_timeout=8,
+                    open_timeout=4,
                 ) as upstream:
                     try:
                         sock = upstream.transport.get_extra_info("socket")
@@ -4531,7 +4584,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     f"wisp={normalized_wisp} target={parsed.hostname}:443"
                 )
                 wisp_conn, wisp_server, proxy_port = await asyncio.wait_for(
-                    _start_local_wisp_http_connect(normalized_wisp, parsed.hostname), 4
+                    _start_local_wisp_http_connect(normalized_wisp, parsed.hostname), 3
                 )
                 proxy_url = f"http://127.0.0.1:{proxy_port}"
                 additional_headers = [
@@ -4557,7 +4610,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     compression=None,
                     proxy=proxy_url,
                     ssl=tls_context,
-                    open_timeout=5,
+                    open_timeout=4,
                 ) as upstream:
                     _log(
                         f"WS BRIDGE upstream client=websockets via_wisp={normalized_wisp} "
