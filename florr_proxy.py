@@ -564,7 +564,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v2"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v3"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -853,7 +853,7 @@ async def florr_launcher(request: Request):
       }}
       var swUrl = '/florr/sw-florr.js?v=' + encodeURIComponent(V_TAG);
       addLog('info', '[SW] registering ' + swUrl);
-      var reg = await navigator.serviceWorker.register(swUrl, {{ scope: '/' }});
+      var reg = await navigator.serviceWorker.register(swUrl, {{ scope: '/', updateViaCache: 'none' }});
       if (reg.waiting) {{
         try {{ reg.waiting.postMessage({{ type: 'SKIP_WAITING' }}); }} catch (_) {{}}
       }}
@@ -874,8 +874,18 @@ async def florr_launcher(request: Request):
           }});
         }});
       }}
-      addLog('ok', '[SW] ready scope=' + (reg.scope || '/'));
-      return swUrl;
+      try {{
+        await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise(function (resolve) {{ setTimeout(resolve, 3000); }})
+        ]);
+      }} catch (_) {{}}
+      var activeSw = navigator.serviceWorker.controller || reg.active || reg.waiting || reg.installing;
+      if (!activeSw || typeof activeSw.postMessage !== 'function') {{
+        throw new Error('ServiceWorker active instance unavailable');
+      }}
+      addLog('ok', '[SW] ready scope=' + (reg.scope || '/') + ' controller=' + Boolean(navigator.serviceWorker.controller) + ' state=' + activeSw.state);
+      return activeSw;
     }}
 
     async function selectTransport() {{
@@ -913,6 +923,15 @@ async def florr_launcher(request: Request):
           var Cls = mod.default || mod[item.name] || mod.EpoxyTransport || mod.LibcurlClient;
           if (!Cls) throw new Error('Export not found in ' + item.path);
           var transport = new Cls({{ wisp: chosenWisp }});
+          if (!transport.ready && typeof transport.init === 'function') {{
+            addLog('info', '[TRANSPORT] initializing ' + item.name);
+            await Promise.race([
+              transport.init(),
+              new Promise(function (_, rej) {{
+                setTimeout(function () {{ rej(new Error(item.name + ' init timeout')); }}, 8000);
+              }})
+            ]);
+          }}
           addLog('ok', '[TRANSPORT] ' + item.name + ' ready -> ' + chosenWisp);
           return transport;
         }} catch (e) {{
@@ -931,12 +950,12 @@ async def florr_launcher(request: Request):
           throw new Error('$scramjetController.Controller is missing');
         }}
 
-        var swUrl = await registerSw();
+        var sw = await registerSw();
         var transport = await selectTransport();
 
         addLog('info', '[CTRL] creating Controller');
         var controller = new window.$scramjetController.Controller({{
-          serviceworker: swUrl,
+          serviceworker: sw,
           transport: transport,
           config: {{
             prefix: '/~/sj/',
