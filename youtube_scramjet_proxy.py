@@ -74,22 +74,25 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
-        tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
-        if tcp_keepalive is not None:
-            curl.setopt(tcp_keepalive, 1)
-        fresh_connect = getattr(CurlOpt, "FRESH_CONNECT", None)
-        if fresh_connect is not None:
-            curl.setopt(fresh_connect, 1 if fresh else 0)
         if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
             ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
             if ipresolve is not None:
                 curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
         connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
         if connect_timeout_ms is not None:
-            curl.setopt(connect_timeout_ms, 12000)
+            curl.setopt(connect_timeout_ms, 15000)
         happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
         if happy_eyeballs_ms is not None:
             curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
+        tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
+        if tcp_keepalive is not None:
+            curl.setopt(tcp_keepalive, 1)
+        fresh_connect = getattr(CurlOpt, "FRESH_CONNECT", None)
+        if fresh_connect is not None:
+            curl.setopt(fresh_connect, 1 if fresh else 0)
     except Exception:
         pass
 
@@ -149,7 +152,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261112-yt-v46"
+RUNTIME_REV = "20261112-yt-v42"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 
@@ -190,17 +193,10 @@ YOUTUBE_IMAGE_SUFFIXES = (
 )
 AUTH_HOSTS = {
     "accounts.google.com",
-    "accounts.google.co.jp",
     "accounts.youtube.com",
     "myaccount.google.com",
     "gds.google.com",
     "ogs.google.com",
-    "apis.google.com",
-    "ssl.gstatic.com",
-    "www.gstatic.com",
-    "play.google.com",
-    "oauth2.googleapis.com",
-    "youtube.googleapis.com",
 }
 VIDEO_ID_RE = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
@@ -469,22 +465,6 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
-    inject_preamble = (
-        'try{if(typeof navigator!=="undefined"){'
-        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
-        'if(_np){try{Object.defineProperty(_np,"onLine",{get:()=>true,configurable:true});}catch(_){}}'
-        'try{Object.defineProperty(navigator,"onLine",{get:()=>true,configurable:true});}catch(_){}'
-        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_cn,configurable:true});}Object.defineProperty(navigator,"connection",{get:()=>_cn,configurable:true});}catch(_){}'
-        '}}catch(_){}\n'
-        'try{if(typeof window!=="undefined"){'
-        'if(window.addEventListener){const _oa=window.addEventListener;window.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}'
-        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
-        'try{Object.defineProperty(window,"ononline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
-        'try{const _op=window.open;window.open=function(u,...a){if(u&&(String(u).includes("accounts.google.")||String(u).includes("ServiceLogin"))){window.location.href=u;return window;}return _op?_op.call(this,u,...a):null;};}catch(_){}'
-        '}}catch(_){}\n'
-    )
-    if not text.startswith("try{if(typeof navigator"):
-        text = inject_preamble + text
     return text.encode("utf-8")
 
 
@@ -550,19 +530,13 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '(()=>{try{'
         'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
         'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
-        'try{if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}}catch(_){}'
+        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
         'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
         'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
-        '}'
-        'try{const _od=Object.getOwnPropertyDescriptor(_np,"onLine");const _og=new Proxy(_od&&_od.get?_od.get:()=>!0,{apply:()=>!0});e.box.unproxy.set(_og,_od?.get||(()=>!0));Object.defineProperty(_np,"onLine",{get:_og,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{Object.defineProperty(t.navigator,"onLine",{get:()=>!0,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});Object.defineProperty(t.navigator,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
-        'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
-        'try{Object.defineProperty(t,"ononline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
-        '}}catch(_){}})(),'
+        '}}'
+        '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
@@ -723,8 +697,6 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'try{if(typeof window!=="undefined"){'
         'try{delete window.IdentityCredential;delete Window.prototype.IdentityCredential;}catch(_){}'
         'try{delete window.FederatedCredential;delete Window.prototype.FederatedCredential;}catch(_){}'
-        'try{if(window.addEventListener){const _origAdd=window.addEventListener;window.addEventListener=function(type,fn,opt){if(type==="offline")return;_origAdd.call(this,type,fn,opt);};}}catch(_){}'
-        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
         '}'
         'if(typeof navigator!=="undefined"){'
         'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
@@ -733,11 +705,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _ua=navigator.userAgent.replace(/HeadlessChrome\\//g,"Chrome/");'
         'Object.defineProperty(_np,"userAgent",{get:()=>_ua,enumerable:true,configurable:true});'
         'Object.defineProperty(_np,"appVersion",{get:()=>_ua.replace(/^Mozilla\\//,""),enumerable:true,configurable:true});'
-        '}'
-        'try{if(_np){Object.defineProperty(_np,"onLine",{get:()=>true,enumerable:true,configurable:true});}}catch(_){}'
-        'try{if(!navigator.onLine){Object.defineProperty(navigator,"onLine",{get:()=>true,enumerable:true,configurable:true});}}catch(_){}'
-        'try{const _conn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_conn,enumerable:true,configurable:true});}}catch(_){}'
-        '}'
+        '}}'
         'if(typeof document!=="undefined"&&typeof location!=="undefined"&&location.pathname.includes("/youtube/~/sj/")&&location.pathname.includes("youtube.com")&&!String(document.cookie||"").includes("PREF=")){'
         'document.cookie="PREF=f6=400&hl=ja&gl=JP; path=/; max-age=31536000";'
         '}}catch(_){}\n'
@@ -920,40 +888,35 @@ function isImmutableYtStaticBundle(target) {{
   if (!target) return false;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
-  if ((h === 'www.youtube.com' || h === 'm.youtube.com' || h === 'music.youtube.com') && (p.startsWith('/s/') || p.includes('/_/js/'))) return true;
-  if (h.endsWith('.ytimg.com') && (p.startsWith('/yts/') || /\\.(js|mjs|css|woff2?|svg)(\\?|$)/i.test(p))) return true;
-  if ((h === 'fonts.gstatic.com' || h === 'www.gstatic.com' || h === 'fonts.googleapis.com') && (/\\.(woff2?|ttf|svg|png|css|js)(\\?|$)/i.test(p) || p.startsWith('/s/i/') || p.startsWith('/css') || p.startsWith('/icon'))) return true;
-  if (/\\.(js|mjs|css)(\\?|$)/i.test(p) && (h.endsWith('.youtube.com') || h.endsWith('.ytimg.com') || h.endsWith('.google.com') || h.endsWith('.gstatic.com'))) return true;
+  if (!/\\.(js|mjs|css)(\\?|$)/i.test(p)) return false;
+  if ((h === 'www.youtube.com' || h === 'm.youtube.com' || h === 'music.youtube.com') && p.startsWith('/s/')) return true;
+  if (h.endsWith('.ytimg.com') && p.startsWith('/yts/')) return true;
   return false;
 }}
-function checkShortCircuit(target, reqOrigin) {{
+function checkShortCircuit(target) {{
   if (!target) return null;
   const h = String(target.hostname || '').toLowerCase().replace(/\\.$/, '');
   const p = target.pathname || '';
-  const corsHeaders = {{
-    'Access-Control-Allow-Origin': reqOrigin || '*',
-    'Access-Control-Allow-Credentials': 'true',
-  }};
   if (h === 'fonts.googleapis.com' && (p === '/css' || p === '/css2')) {{
     return new Response('/* sh-fast-fonts */', {{
       status: 200,
-      headers: {{'Content-Type': 'text/css; charset=utf-8', ...corsHeaders, 'Cache-Control': 'public, max-age=86400'}},
+      headers: {{'Content-Type': 'text/css; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'public, max-age=86400'}},
     }});
   }}
   if (h.endsWith('.googlevideo.com') || h.endsWith('.c.youtube.com')) {{
     const exp = target.searchParams.get('expire') || '';
     if (p.includes(' ') || exp === '9421968081' || exp === '1685394838') {{
-      return new Response(null, {{status: 204, headers: corsHeaders}});
+      return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
     }}
   }}
   if (
-    (p.includes('generate_204') && h !== 'accounts.google.com' && h !== 'accounts.youtube.com') || p.includes('error_204') || p.includes('csi_204') ||
+    (p.includes('generate_204') && h !== 'accounts.google.com') || p.includes('error_204') || p.includes('csi_204') ||
     p.startsWith('/pagead/') || p.startsWith('/api/stats/') || p.startsWith('/ptracking') ||
     h.endsWith('doubleclick.net') || h.endsWith('googlesyndication.com') ||
     h.endsWith('googleadservices.com') || h.includes('adservice.google') ||
     h.endsWith('google-analytics.com') || ((h === 'play.google.com' || h.endsWith('.play.google.com')) && p.includes('log'))
   ) {{
-    return new Response(null, {{status: 204, headers: corsHeaders}});
+    return new Response(null, {{status: 204, headers: {{'Access-Control-Allow-Origin': '*'}}}});
   }}
   if (
     p.startsWith('/youtubei/v1/log_event') ||
@@ -963,7 +926,7 @@ function checkShortCircuit(target, reqOrigin) {{
   ) {{
     return new Response('{{}}', {{
       status: 200,
-      headers: {{'Content-Type': 'application/json', ...corsHeaders}},
+      headers: {{'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'}},
     }});
   }}
   return null;
@@ -987,8 +950,7 @@ self.addEventListener('fetch', event => {{
     }}
     const anyTarget = extractAnyVirtualUrl(event.request.url);
     if (anyTarget) {{
-      const reqOrigin = event.request.headers.get('Origin') || '';
-      const sc = checkShortCircuit(anyTarget, reqOrigin);
+      const sc = checkShortCircuit(anyTarget);
       if (sc) {{
         event.respondWith(sc);
         return;
@@ -1133,13 +1095,13 @@ _CURL_SESSION_LOCK = asyncio.Lock()
 _MEDIA_HTTP_CLIENT: httpx.AsyncClient | None = None
 _MEDIA_HTTP_CLIENT_LOCK = asyncio.Lock()
 _IMAGE_CACHE: dict[str, tuple[float, int, str, bytes, str]] = {}
-_IMAGE_CACHE_TTL = 86400.0
-_IMAGE_CACHE_MAX_ITEMS = 2048
-_IMAGE_CACHE_MAX_BYTES = 1024 * 1024
+_IMAGE_CACHE_TTL = 3600.0
+_IMAGE_CACHE_MAX_ITEMS = 512
+_IMAGE_CACHE_MAX_BYTES = 512 * 1024
 _STATIC_ASSET_CACHE: dict[str, tuple[float, int, str, list[list[str]], bytes]] = {}
-_STATIC_ASSET_TTL = 86400.0
-_STATIC_ASSET_MAX_ITEMS = 2048
-_STATIC_ASSET_MAX_BYTES = 8 * 1024 * 1024
+_STATIC_ASSET_TTL = 1800.0
+_STATIC_ASSET_MAX_ITEMS = 1024
+_STATIC_ASSET_MAX_BYTES = 4 * 1024 * 1024
 
 _RELAY_STRIP_REQ_HEADERS = {
     "host",
@@ -1184,7 +1146,6 @@ async def _get_curl_session():
         if _CURL_SESSION is None:
             _CURL_SESSION = StatelessCurlSession(
                 impersonate="chrome131",
-                default_headers=False,
                 allow_redirects=False,
                 timeout=25,
                 max_clients=64,
@@ -1203,6 +1164,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
             timeout = httpx.Timeout(connect=5.0, read=45.0, write=10.0, pool=10.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1311,6 +1273,7 @@ async def _serve_youtube_image_url(raw_url: str, method: str, accept_header: str
         "User-Agent": _DESKTOP_CHROME_UA,
         "Accept": accept_header
         or "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        "Accept-Encoding": "identity",
         "Referer": "https://www.youtube.com/",
     }
     try:
@@ -1448,21 +1411,15 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         path = parsed.path or ""
-        if host in ("www.youtube.com", "m.youtube.com", "music.youtube.com") and (
-            path.startswith("/s/") or "/_/js/" in path
-        ):
+        if host in ("www.youtube.com", "m.youtube.com", "music.youtube.com") and path.startswith("/s/"):
             return True
         if host.endswith(".ytimg.com") and (
-            path.startswith("/yts/") or path.endswith((".js", ".css", ".woff2", ".woff", ".ttf", ".svg", ".png", ".jpg", ".webp"))
+            path.startswith("/yts/") or path.endswith((".js", ".css", ".woff2", ".svg", ".png", ".jpg", ".webp"))
         ):
             return True
         if host in ("fonts.gstatic.com", "www.gstatic.com", "fonts.googleapis.com") and (
             path.endswith((".woff2", ".woff", ".ttf", ".svg", ".png", ".css", ".js"))
             or path.startswith(("/s/i/", "/css", "/icon"))
-        ):
-            return True
-        if path.endswith((".js", ".css", ".woff2", ".woff", ".ttf")) and (
-            host.endswith(".youtube.com") or host.endswith(".ytimg.com") or host.endswith(".gstatic.com")
         ):
             return True
     except Exception:
@@ -1471,11 +1428,7 @@ def _is_cacheable_static_asset(method: str, url: str) -> bool:
 
 
 def _pack_relay_response(
-    status: int,
-    status_text: str,
-    headers_list: list[list[str]],
-    body: bytes,
-    accept_encoding: str = "",
+    status: int, status_text: str, headers_list: list[list[str]], body: bytes
 ) -> Response:
     meta_bytes = json.dumps(
         {
@@ -1486,27 +1439,14 @@ def _pack_relay_response(
         ensure_ascii=False,
     ).encode("utf-8")
     payload = struct.pack(">I", len(meta_bytes)) + meta_bytes + body
-    headers = {
-        "Cache-Control": "private, no-store, no-cache, must-revalidate",
-        "Pragma": "no-cache",
-        "Vary": "Accept-Encoding",
-    }
-    if "gzip" in (accept_encoding or "").lower() and len(payload) >= 1024:
-        try:
-            gz_payload = gzip.compress(payload, compresslevel=4)
-            if len(gz_payload) < len(payload):
-                headers["Content-Encoding"] = "gzip"
-                return Response(
-                    gz_payload,
-                    media_type="application/octet-stream",
-                    headers=headers,
-                )
-        except Exception:
-            pass
     return Response(
         payload,
         media_type="application/octet-stream",
-        headers=headers,
+        headers={
+            "Cache-Control": "private, no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Vary": "*",
+        },
     )
 
 
@@ -2473,24 +2413,8 @@ def _decode_repeated_str(val: str) -> str:
 
 def _extract_sj_virtual_url(raw_rest: str, query_str: str) -> str:
     from urllib.parse import unquote
-    import base64
     decoded_rest = _decode_repeated_str(raw_rest)
     m = re.search(r"(https?://.*)$", decoded_rest, re.I)
-    if not m:
-        for part in raw_rest.split("/"):
-            if not part:
-                continue
-            try:
-                padded = part + "=" * ((4 - len(part) % 4) % 4)
-                dec = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8", "ignore")
-                if dec.startswith("http://") or dec.startswith("https://"):
-                    m_b64 = re.search(r"(https?://.*)$", dec, re.I)
-                    if m_b64:
-                        decoded_rest = m_b64.group(1)
-                        m = m_b64
-                        break
-            except Exception:
-                pass
     if not m:
         return ""
     base = m.group(1)
@@ -2538,12 +2462,41 @@ async def youtube_sj_direct_fallback(rest: str, request: Request):
     """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
     fetches bypass the Service Worker and request /youtube/~/sj/... directly."""
     if request.method == "OPTIONS":
-        req_orig = request.headers.get("origin") or "*"
         return Response(
             status_code=204,
             headers={
-                "Access-Control-Allow-Origin": req_orig,
-                "Access-Control-Allow-Credentials": "true",
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
+    if request.method == "POST":
+        virtual_post_url = _extract_sj_virtual_url(rest, request.url.query)
+        if virtual_post_url:
+            try:
+                p_post = urlparse(virtual_post_url)
+                h_post = (p_post.hostname or "").lower().rstrip(".")
+                if h_post == "play.google.com" or h_post in AUTH_HOSTS:
+                    post_body = await request.body()
+                    session = await _get_curl_session()
+                    if session is not None:
+                        await session.request(
+                            method="POST",
+                            url=virtual_post_url,
+                            headers={
+                                "User-Agent": request.headers.get("user-agent") or _DESKTOP_CHROME_UA,
+                                "Content-Type": request.headers.get("content-type") or "application/x-www-form-urlencoded;charset=UTF-8",
+                            },
+                            data=post_body if post_body else None,
+                            allow_redirects=False,
+                            timeout=6,
+                        )
+            except Exception:
+                pass
+        return Response(
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
                 "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
                 "Access-Control-Allow-Headers": "*",
             },
@@ -2580,49 +2533,21 @@ async def youtube_sj_direct_fallback(rest: str, request: Request):
                     nested, request.method, request.headers.get("accept") or ""
                 )
         host = (parsed.hostname or "").lower().rstrip(".")
-        path_str = parsed.path or ""
-        q_str = parsed.query or ""
-        if path_str in ("/generate_204", "/csi_204", "/error_204") and not (host in AUTH_HOSTS or host.endswith(".google.com")):
-            return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"})
         if host.endswith((".googlevideo.com", ".c.youtube.com")):
-            if " " in path_str or "expire=9421968081" in q_str or "expire=1685394838" in q_str or path_str in ("/generate_204", "/gen_204"):
-                return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
-            return await youtube_runtime_gv_stream(request)
+            return Response(status_code=204, headers={"Access-Control-Allow-Origin": "*"})
         if any(host == s or host.endswith("." + s) for s in YOUTUBE_IMAGE_SUFFIXES):
             path_l = (parsed.path or "").lower()
             if host.endswith(("gstatic.com", "googleapis.com")):
-                if path_l.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif", ".bmp", ".woff2", ".woff", ".ttf", ".otf")):
-                    return await _serve_youtube_image_url(
-                        virtual_url, request.method, request.headers.get("accept") or ""
-                    )
-            elif not path_l.endswith((".js", ".mjs", ".cjs", ".json", ".css", ".html", ".wasm")):
-                return await _serve_youtube_image_url(
-                    virtual_url, request.method, request.headers.get("accept") or ""
-                )
+                if not path_l.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".avif", ".bmp", ".woff2", ".woff", ".ttf", ".otf")):
+                    return Response(b"Service Worker route required", status_code=404)
+            elif path_l.endswith((".js", ".mjs", ".cjs", ".json", ".css", ".html", ".wasm")):
+                return Response(b"Service Worker route required", status_code=404)
+            return await _serve_youtube_image_url(
+                virtual_url, request.method, request.headers.get("accept") or ""
+            )
     except Exception:
-        pass
-
-    req_body = await request.body()
-    raw_headers = list(request.headers.items())
-    status, status_text, out_headers, resp_body = await _execute_relay_core(
-        virtual_url, request.method, raw_headers, req_body
-    )
-    resp = Response(
-        content=b"" if request.method == "HEAD" else resp_body,
-        status_code=status,
-    )
-    raw_out = []
-    for k, v in out_headers:
-        kl = str(k).lower()
-        if kl in ("transfer-encoding", "content-length", "connection", "access-control-allow-origin", "access-control-allow-credentials"):
-            continue
-        raw_out.append((kl.encode("latin-1", "replace"), str(v).encode("latin-1", "replace")))
-    req_orig = request.headers.get("origin") or "*"
-    raw_out.append((b"access-control-allow-origin", req_orig.encode("latin-1")))
-    raw_out.append((b"access-control-allow-credentials", b"true"))
-    raw_out.append((b"access-control-expose-headers", b"*"))
-    resp.raw_headers = raw_out
-    return resp
+        return Response(b"bad virtual url", status_code=400)
+    return Response(b"Service Worker route required", status_code=404)
 
 
 # ---------------------------------------------------------------------------
@@ -2818,9 +2743,12 @@ def _replace_js_var_json(html_text: str, marker: str, mutator) -> tuple[str, boo
         return html_text, False
 
 
-async def _refresh_home_rich_items() -> list[dict]:
+async def _get_home_rich_items() -> list[dict]:
     global _HOME_RICH_ITEMS_CACHE
     now = time.time()
+    if _HOME_RICH_ITEMS_CACHE[1] and (now - _HOME_RICH_ITEMS_CACHE[0]) < _HOME_RICH_ITEMS_TTL:
+        return _HOME_RICH_ITEMS_CACHE[1]
+
     session = await _get_curl_session()
     anon_cookie = await _get_anon_visitor_cookie_header()
 
@@ -2846,8 +2774,6 @@ async def _refresh_home_rich_items() -> list[dict]:
             }
         },
     }).encode("utf-8")
-
-
     try:
         if session is not None:
             r = await session.post(api_url, headers=api_headers, data=api_body, timeout=8)
@@ -2922,20 +2848,6 @@ async def _refresh_home_rich_items() -> list[dict]:
     except Exception:
         pass
     return _HOME_RICH_ITEMS_CACHE[1]
-
-
-async def _get_home_rich_items() -> list[dict]:
-    global _HOME_RICH_ITEMS_CACHE
-    now = time.time()
-    if _HOME_RICH_ITEMS_CACHE[1]:
-        if (now - _HOME_RICH_ITEMS_CACHE[0]) >= _HOME_RICH_ITEMS_TTL:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(_refresh_home_rich_items())
-            except Exception:
-                pass
-        return _HOME_RICH_ITEMS_CACHE[1]
-    return await _refresh_home_rich_items()
 
 
 def _video_renderer_to_compact(vr: dict) -> dict | None:
@@ -4155,25 +4067,37 @@ async def youtube_runtime_gv_stream(request: Request):
     return StreamingResponse(_iter_gv(), status_code=upstream.status_code, headers=out_hdrs)
 
 
-async def _execute_relay_core(
-    url: str,
-    method: str,
-    raw_headers: list | dict,
-    req_body: bytes,
-) -> tuple[int, str, list[list[str]], bytes]:
+@router.post("/youtube/runtime/http-relay", include_in_schema=False)
+async def youtube_http_relay(request: Request):
+    raw = await request.body()
+    if len(raw) < 4:
+        return Response(b"invalid frame", status_code=400)
+    meta_len = struct.unpack(">I", raw[:4])[0]
+    if len(raw) < 4 + meta_len:
+        return Response(b"truncated frame", status_code=400)
+    try:
+        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
+    except Exception:
+        return Response(b"bad json", status_code=400)
+
+    req_body = raw[4 + meta_len :]
+    url = str(meta.get("url") or "").strip()
+    method = str(meta.get("method") or "GET").upper().strip()
+    raw_headers = meta.get("headers") or []
+
     try:
         parsed = urlparse(url)
     except Exception:
-        return 400, "Bad Request", [["content-type", "text/plain"]], b"bad url"
+        return Response(b"bad url", status_code=400)
 
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return 400, "Bad Request", [["content-type", "text/plain"]], b"unsupported scheme"
+        return Response(b"unsupported scheme", status_code=400)
 
     url = _strip_dollar_query(url)
     parsed = urlparse(url)
     host = parsed.hostname.lower().rstrip(".")
     if host == "fonts.googleapis.com" and (parsed.path or "") in ("/css", "/css2"):
-        return (
+        return _pack_relay_response(
             200,
             "OK",
             [
@@ -4186,29 +4110,17 @@ async def _execute_relay_core(
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
         q_str = parsed.query or ""
         if " " in (parsed.path or "") or "expire=9421968081" in q_str or "expire=1685394838" in q_str:
-            return (
+            return _pack_relay_response(
                 204, "No Content", [["access-control-allow-origin", "*"]], b""
             )
-    path_str = parsed.path or ""
-    if path_str in ("/generate_204", "/csi_204", "/error_204") and not (host in AUTH_HOSTS or host.endswith(".google.com")):
-        return (
-            204,
-            "No Content",
-            [
-                ["content-type", "text/plain"],
-                ["access-control-allow-origin", "*"],
-                ["access-control-allow-credentials", "true"],
-            ],
-            b"",
-        )
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
-        return 403, "Forbidden", [["content-type", "text/plain"]], b"unsupported port"
+        return Response(b"unsupported port", status_code=403)
 
     try:
         await _ensure_public_host(host, port)
     except Exception:
-        return 403, "Forbidden", [["content-type", "text/plain"]], b"blocked host"
+        return Response(b"blocked host", status_code=403)
 
     if host in YOUTUBE_HOSTS and not req_body and "pbj=1" in (parsed.query or "") and (parsed.path or "").rstrip("/") == "/shorts":
         method = "GET"
@@ -4218,7 +4130,7 @@ async def _execute_relay_core(
         cached = _STATIC_ASSET_CACHE.get(url)
         if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
             _, c_status, c_text, c_headers, c_body = cached
-            return c_status, c_text, c_headers, c_body
+            return _pack_relay_response(c_status, c_text, c_headers, c_body)
 
     req_headers: list[tuple[str, str]] = []
     seen_ua = False
@@ -4348,14 +4260,14 @@ async def _execute_relay_core(
             cookie_parts.append(v)
         else:
             header_dict[k] = v
-    if cookie_parts and not cacheable:
+    if cookie_parts:
         header_dict["Cookie"] = "; ".join(cookie_parts)
 
     # Relay real googlevideo.com / .c.youtube.com MSE, SABR, and HLS requests
     # (dummy bandwidth probes were already filtered above by expire=9421968081 / 1685394838)
     if host.endswith((".googlevideo.com", ".c.youtube.com")):
         if method == "OPTIONS":
-            return (
+            return _pack_relay_response(
                 204,
                 "No Content",
                 [
@@ -4436,9 +4348,9 @@ async def _execute_relay_core(
                 if rkl in _RELAY_STRIP_RESP_HEADERS or rkl.startswith(":") or rkl.startswith("access-control-"):
                     continue
                 gv_out.append([rk, rv])
-            return status, status_text, gv_out, resp_body
+            return _pack_relay_response(status, status_text, gv_out, resp_body)
         except Exception as exc:
-            return (
+            return _pack_relay_response(
                 502,
                 "Bad Gateway",
                 [["content-type", "text/plain; charset=utf-8"], ["access-control-allow-origin", "*"]],
@@ -4446,7 +4358,7 @@ async def _execute_relay_core(
             )
 
     if host == "youtube.com" and method == "GET":
-        return (
+        return _pack_relay_response(
             301,
             "Moved Permanently",
             [["location", urlunparse(("https", "www.youtube.com", parsed.path or "/", "", parsed.query, ""))]],
@@ -4458,7 +4370,7 @@ async def _execute_relay_core(
         m_vstream = re.match(r"^/yts/stream/([A-Za-z0-9_-]{11})\.mp4$", parsed.path or "")
         if m_vstream:
             vid_s = m_vstream.group(1)
-            return (
+            return _pack_relay_response(
                 302,
                 "Found",
                 [
@@ -4478,11 +4390,9 @@ async def _execute_relay_core(
         or host.endswith(".google.com")
         or any(k.lower() in ("authorization", "x-goog-authuser") for k in header_dict)
     )
-    is_root_nav = (parsed.path or "") in ("", "/") and not (parsed.query or "")
     if (
         is_yt_host
         and not cacheable
-        and not is_root_nav
         and not has_user_auth_cookie
         and "__Secure-YNID=" not in existing_cookie_str
     ):
@@ -4609,8 +4519,10 @@ async def _execute_relay_core(
     ephemeral_session: StatelessCurlSession | None = None
     try:
         if StatelessCurlSession is not None:
-            if is_google_auth_req and is_safari_ua:
-                tls_imp = "safari18_0_ios" if ("iPad" in client_ua or "iPhone" in client_ua or "Mobile" in client_ua) else "safari18_0"
+            if has_sensitive_auth or (is_google_auth_req and is_safari_ua):
+                tls_imp = "chrome131"
+                if is_google_auth_req and is_safari_ua:
+                    tls_imp = "safari18_0_ios" if ("iPad" in client_ua or "iPhone" in client_ua or "Mobile" in client_ua) else "safari18_0"
                 ephemeral_session = StatelessCurlSession(
                     impersonate=tls_imp,
                     allow_redirects=False,
@@ -4707,7 +4619,7 @@ async def _execute_relay_core(
             if t and not t.done():
                 t.cancel()
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
-        return (
+        return _pack_relay_response(
             502,
             "Bad Gateway",
             [["content-type", "text/plain; charset=utf-8"]],
@@ -4739,7 +4651,7 @@ async def _execute_relay_core(
         for t in (home_task, next_task):
             if t and not t.done():
                 t.cancel()
-        return (
+        return _pack_relay_response(
             302,
             "Found",
             [
@@ -4797,6 +4709,8 @@ async def _execute_relay_core(
     if (
         cacheable
         and not has_set_cookie
+        and not cookie_parts
+        and not has_sensitive_auth
         and status == 200
         and 0 < len(resp_body) <= _STATIC_ASSET_MAX_BYTES
     ):
@@ -4811,32 +4725,7 @@ async def _execute_relay_core(
             resp_body,
         )
 
-    return status, status_text, out_headers, resp_body
-
-
-@router.post("/youtube/runtime/http-relay", include_in_schema=False)
-async def youtube_http_relay(request: Request):
-    raw = await request.body()
-    if len(raw) < 4:
-        return Response(b"invalid frame", status_code=400)
-    meta_len = struct.unpack(">I", raw[:4])[0]
-    if len(raw) < 4 + meta_len:
-        return Response(b"truncated frame", status_code=400)
-    try:
-        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
-    except Exception:
-        return Response(b"bad json", status_code=400)
-
-    req_body = raw[4 + meta_len :]
-    url = str(meta.get("url") or "").strip()
-    method = str(meta.get("method") or "GET").upper().strip()
-    raw_headers = meta.get("headers") or []
-
-    status, status_text, out_headers, resp_body = await _execute_relay_core(
-        url, method, raw_headers, req_body
-    )
-    accept_enc = request.headers.get("accept-encoding", "")
-    return _pack_relay_response(status, status_text, out_headers, resp_body, accept_encoding=accept_enc)
+    return _pack_relay_response(status, status_text, out_headers, resp_body)
 
 
 # ---------------------------------------------------------------------------
@@ -5082,27 +4971,6 @@ async def _youtube_google_login_override(request: Request):
         return Response("invalid google auth target", status_code=400)
 
 
-async def _youtube_204_probe(request: Request) -> Response:
-    origin = request.headers.get("origin") or "*"
-    headers = {
-        "access-control-allow-origin": origin,
-        "access-control-allow-credentials": "true",
-        "access-control-allow-methods": "GET, HEAD, POST, OPTIONS",
-        "access-control-allow-headers": "*",
-        "cache-control": "no-cache, no-store, must-revalidate",
-        "content-length": "0",
-    }
-    return Response(b"", status_code=204, headers=headers)
-
-
-@router.api_route("/generate_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
-@router.api_route("/gen_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
-@router.api_route("/csi_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
-@router.api_route("/error_204", methods=["GET", "HEAD", "POST", "OPTIONS"], include_in_schema=False)
-async def route_youtube_204_probe(request: Request):
-    return await _youtube_204_probe(request)
-
-
 def _install_wisp_fix() -> None:
     """Install the race-free Wisp handler, SW override, and google-login redirect fix in the host app."""
     try:
@@ -5136,14 +5004,6 @@ def _install_wisp_fix() -> None:
             host_app.app.router.routes.insert(
                 0, Route("/youtube/google-login", _youtube_google_login_override, methods=["GET"])
             )
-        for p204 in ("/generate_204", "/gen_204", "/csi_204", "/error_204"):
-            if not any(
-                isinstance(r, Route) and r.path == p204
-                for r in host_app.app.router.routes
-            ):
-                host_app.app.router.routes.insert(
-                    0, Route(p204, _youtube_204_probe, methods=["GET", "HEAD", "POST", "OPTIONS"])
-                )
     except Exception as exc:
         print(f"[YOUTUBE] Wisp route install warning: {exc}", flush=True)
 
@@ -5177,13 +5037,12 @@ def _is_google_auth_url(value: str) -> bool:
         parsed = urlparse(value)
     except Exception:
         return False
-    h = _hostname(value)
     return (
         parsed.scheme == "https"
         and parsed.port in (None, 443)
         and not parsed.username
         and not parsed.password
-        and (h in AUTH_HOSTS or h.endswith(".google.com") or h.endswith(".google.co.jp"))
+        and _hostname(value) in AUTH_HOSTS
     )
 
 
@@ -5318,7 +5177,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
   const STATIC_CACHE_NAME = "sh-yt-static-{RUNTIME_REV}";
   const MEDIA_CACHE_NAME = "sh-yt-media-{RUNTIME_REV}";
   const YOUTUBE_HOSTS = new Set(["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","studio.youtube.com","upload.youtube.com","youtu.be"]);
-  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.google.co.jp","accounts.youtube.com","myaccount.google.com","gds.google.com","ogs.google.com","apis.google.com","ssl.gstatic.com","www.gstatic.com","play.google.com","oauth2.googleapis.com","youtube.googleapis.com"]);
+  const AUTH_HOSTS = new Set(["accounts.google.com","accounts.youtube.com","myaccount.google.com","gds.google.com","ogs.google.com"]);
   const YT_IMAGE_SUFFIXES = [
     "i.ytimg.com","s.ytimg.com","img.youtube.com","ytimg.com",
     "yt3.ggpht.com","yt4.ggpht.com","ggpht.com",
@@ -5547,7 +5406,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
     try {{
       const u = new URL(candidate);
       const host = (u.hostname || "").toLowerCase().replace(/\\.$/, "");
-      const allowed = YOUTUBE_HOSTS.has(host) || AUTH_HOSTS.has(host) || host.endsWith(".google.com") || host.endsWith(".google.co.jp");
+      const allowed = YOUTUBE_HOSTS.has(host) || AUTH_HOSTS.has(host);
       if (allowed && (u.protocol === "http:" || u.protocol === "https:")) {{
         if (u.username || u.password || (u.port && u.port !== "443")) throw new Error("unsafe URL authority");
         u.protocol = "https:";
@@ -5643,10 +5502,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      if ((h === "www.youtube.com" || h === "m.youtube.com" || h === "music.youtube.com") && (p.startsWith("/s/") || p.includes("/_/js/"))) return true;
-      if (h.endsWith(".ytimg.com") && (p.startsWith("/yts/") || /\\.(js|css|woff2|woff|ttf|svg|png|jpg|webp)$/i.test(p))) return true;
+      if ((h === "www.youtube.com" || h === "m.youtube.com" || h === "music.youtube.com") && p.startsWith("/s/")) return true;
+      if (h.endsWith(".ytimg.com") && (p.startsWith("/yts/") || /\\.(js|css|woff2|svg|png|jpg|webp)$/i.test(p))) return true;
       if ((h === "fonts.gstatic.com" || h === "www.gstatic.com" || h === "fonts.googleapis.com") && (p.startsWith("/s/i/") || p.startsWith("/css") || p.startsWith("/icon") || /\\.(woff2|woff|ttf|svg|png|css|js)$/i.test(p))) return true;
-      if (/\\.(js|mjs|css|woff2?)(\\?|$)/i.test(p) && (h.endsWith(".youtube.com") || h.endsWith(".ytimg.com") || h.endsWith(".gstatic.com"))) return true;
     }} catch (_) {{}}
     return false;
   }}
@@ -5656,16 +5514,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
       const p = u.pathname || "";
-      const corsOrigin = (typeof location !== "undefined" && location.origin) ? location.origin : "*";
-      const corsHeaders = [
-        ["access-control-allow-origin", corsOrigin],
-        ["access-control-allow-credentials", "true"],
-      ];
       if (h === "fonts.googleapis.com" && (p === "/css" || p === "/css2")) {{
         const b = new TextEncoder().encode("/* sh-fast-fonts */").buffer;
         return {{
           body: b,
-          headers: [["content-type", "text/css; charset=utf-8"], ...corsHeaders, ["cache-control", "public, max-age=86400"]],
+          headers: [["content-type", "text/css; charset=utf-8"], ["access-control-allow-origin", "*"], ["cache-control", "public, max-age=86400"]],
           status: 200,
           statusText: "OK",
         }};
@@ -5673,7 +5526,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       if (h.endsWith(".googlevideo.com") || h.endsWith(".c.youtube.com")) {{
         const exp = u.searchParams.get("expire") || "";
         if (p.includes(" ") || exp === "9421968081" || exp === "1685394838") {{
-          return {{ body: new ArrayBuffer(0), headers: [...corsHeaders], status: 204, statusText: "No Content" }};
+          return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
         }}
       }}
       if (
@@ -5683,7 +5536,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
         h.endsWith("doubleclick.net") || h.endsWith("googlesyndication.com") ||
         h.endsWith("googleadservices.com") || h.includes("adservice.google")
       ) {{
-        return {{ body: new ArrayBuffer(0), headers: [...corsHeaders], status: 204, statusText: "No Content" }};
+        return {{ body: new ArrayBuffer(0), headers: [["access-control-allow-origin", "*"]], status: 204, statusText: "No Content" }};
       }}
       if (
         p.startsWith("/youtubei/v1/log_event") ||
@@ -5694,7 +5547,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
         const b = new TextEncoder().encode("{{}}").buffer;
         return {{
           body: b,
-          headers: [["content-type", "application/json"], ...corsHeaders],
+          headers: [["content-type", "application/json"], ["access-control-allow-origin", "*"]],
           status: 200,
           statusText: "OK",
         }};
@@ -5904,7 +5757,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       }}
 
       const list = normalizeHeadersList(headers, urlStr);
-      const canClientCache = isClientCacheableAsset(m, urlStr);
+      const hasCookie = list.some(([k]) => k.toLowerCase() === "cookie");
+      const canClientCache = !hasCookie && isClientCacheableAsset(m, urlStr);
       if (canClientCache && typeof caches !== "undefined") {{
         try {{
           const cache = await caches.open(STATIC_CACHE_NAME);
@@ -6066,17 +5920,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
       }} catch (e) {{ console.debug("UrlWatcherPlugin", e); }}
     }}
     if (typeof U.CatchEscapedLinksPlugin === "function") {{
-      try {{
-        result.push(new U.CatchEscapedLinksPlugin((escapedUrl) => {{
-          try {{
-            const u = escapedUrl instanceof URL ? escapedUrl.href : String(escapedUrl || "");
-            if (u && (u.startsWith("http://") || u.startsWith("https://"))) {{
-              return new URL(PREFIX + encodeURIComponent(u), location.origin);
-            }}
-          }} catch (_) {{}}
-          return new URL(location.href);
-        }}));
-      }} catch (e) {{ console.debug("CatchEscapedLinksPlugin", e); }}
+      try {{ result.push(new U.CatchEscapedLinksPlugin(() => new URL(location.href))); }} catch (e) {{ console.debug("CatchEscapedLinksPlugin", e); }}
     }}
     return result;
   }}
@@ -6306,33 +6150,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#0f0f0f;co
 
       if (doc.documentElement && !doc.documentElement.dataset.shPrewarmBound) {{
         doc.documentElement.dataset.shPrewarmBound = "1";
-        const onLoginClick = (ev) => {{
-          try {{
-            if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-            const t = ev.target;
-            if (!t || typeof t.closest !== "function") return;
-            const loginLink = t.closest(
-              "a[href*='ServiceLogin'], a[scramjet-attr-href*='ServiceLogin'], " +
-              "a[href*='accounts.google.'], a[scramjet-attr-href*='accounts.google.'], " +
-              "a[href*='/signin'], a[scramjet-attr-href*='/signin'], " +
-              "ytd-button-renderer a[href*='ServiceLogin'], yt-button-shape a[href*='ServiceLogin']"
-            );
-            if (!loginLink) return;
-            const rawH = rawGetAttr.call(loginLink, "scramjet-attr-href") || rawGetAttr.call(loginLink, "href") || loginLink.href || "";
-            if (rawH) {{
-              ev.preventDefault();
-              ev.stopPropagation();
-              ev.stopImmediatePropagation();
-              let targetAuth = rawH;
-              if (targetAuth.startsWith("/")) {{
-                targetAuth = "https://www.youtube.com" + targetAuth;
-              }}
-              navigate(targetAuth, "login-click");
-            }}
-          }} catch (_) {{}}
-        }};
-        doc.addEventListener("click", onLoginClick, {{ passive: false, capture: true }});
-
         const onWatchClick = (ev) => {{
           try {{
             if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;

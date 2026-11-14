@@ -1425,7 +1425,7 @@ def _get_peer_http_client() -> httpx.AsyncClient:
         _PEER_HTTP_CLIENT = httpx.AsyncClient(
             timeout=httpx.Timeout(3.5, connect=2.0),
             limits=httpx.Limits(max_connections=24, max_keepalive_connections=12, keepalive_expiry=30.0),
-            transport=None if _HAS_OC_PROXY_ENV else httpx.AsyncHTTPTransport(),
+            transport=None if _HAS_OC_PROXY_ENV else httpx.AsyncHTTPTransport(local_address="0.0.0.0"),
         )
     return _PEER_HTTP_CLIENT
 

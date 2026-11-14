@@ -51,6 +51,19 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy") or TVER_UPSTREAM_PROXY):
+            ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
+            if ipresolve is not None:
+                curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
+        if connect_timeout_ms is not None:
+            curl.setopt(connect_timeout_ms, 3500)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -105,7 +118,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261114-tver20"
+RUNTIME_REV = "20261112-tver14"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -121,11 +134,6 @@ AUTH_HOSTS = {
     "id.tver.jp",
     "tverid.tver.jp",
     "auth.tver.jp",
-    "user.tver.jp",
-    "user-api.tver.jp",
-    "s.tver.jp",
-    "payments.id.tver.jp",
-    "payments.tverid.tver.jp",
     "accounts.google.com",
     "appleid.apple.com",
 }
@@ -322,7 +330,7 @@ def _patch_controller_sw(source: bytes) -> bytes:
         'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
         'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
     )
-    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},350)", 1)
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
     return text.encode("utf-8")
 
 
@@ -374,21 +382,6 @@ def _patch_controller_inject(source: bytes) -> bytes:
         "(navigator.serviceWorker?.controller||c)?.postMessage({$sw$initRemoteTransport:{port:o.port2,prefix:this.init.prefix.href}},[o.port2])})()"
     )
     text = text.replace(old_post, new_post, 1)
-    inject_preamble = (
-        'try{if(typeof navigator!=="undefined"){'
-        'const _np=typeof Navigator!=="undefined"&&Navigator.prototype?Navigator.prototype:Object.getPrototypeOf(navigator);'
-        'if(_np){try{Object.defineProperty(_np,"onLine",{get:()=>true,configurable:true});}catch(_){}}'
-        'try{Object.defineProperty(navigator,"onLine",{get:()=>true,configurable:true});}catch(_){}'
-        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:false,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>true};if(_np){Object.defineProperty(_np,"connection",{get:()=>_cn,configurable:true});}Object.defineProperty(navigator,"connection",{get:()=>_cn,configurable:true});}catch(_){}'
-        '}}catch(_){}\n'
-        'try{if(typeof window!=="undefined"){'
-        'if(window.addEventListener){const _oa=window.addEventListener;window.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}'
-        'try{Object.defineProperty(window,"onoffline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
-        'try{Object.defineProperty(window,"ononline",{get:()=>null,set:()=>{},configurable:true});}catch(_){}'
-        '}}catch(_){}\n'
-    )
-    if not text.startswith("try{if(typeof navigator"):
-        text = inject_preamble + text
     return text.encode("utf-8")
 
 
@@ -451,19 +444,13 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '(()=>{try{'
         'e.Proxy(["Object.getOwnPropertyNames","Reflect.ownKeys"],{apply(t){let r=t.call();return t.return(Array.isArray(r)?r.filter(k=>"string"!=typeof k||(!k.startsWith("$scram")&&!k.startsWith("__sh_"))):r)}});'
         'const _np=t.Navigator&&t.Navigator.prototype;if(_np&&t.navigator){'
-        'try{if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}}catch(_){}'
+        'if(t.navigator.webdriver){const _wd=Object.getOwnPropertyDescriptor(_np,"webdriver");if(_wd&&_wd.get){const _wg=new Proxy(_wd.get,{apply:()=>!1});e.box.unproxy.set(_wg,_wd.get);Object.defineProperty(_np,"webdriver",{..._wd,get:_wg})}}'
         'const _u=String(t.navigator.userAgent||"");if(_u.includes("HeadlessChrome/")){'
         'const _c=_u.replace(/HeadlessChrome\\//g,"Chrome/"),_av=_c.replace(/^Mozilla\\//,"");'
         'const _ud=Object.getOwnPropertyDescriptor(_np,"userAgent");if(_ud&&_ud.get){const _ug=new Proxy(_ud.get,{apply:()=>_c});e.box.unproxy.set(_ug,_ud.get);Object.defineProperty(_np,"userAgent",{..._ud,get:_ug})}'
         'const _ad=Object.getOwnPropertyDescriptor(_np,"appVersion");if(_ad&&_ad.get){const _ag=new Proxy(_ad.get,{apply:()=>_av});e.box.unproxy.set(_ag,_ad.get);Object.defineProperty(_np,"appVersion",{..._ad,get:_ag})}'
-        '}'
-        'try{const _od=Object.getOwnPropertyDescriptor(_np,"onLine");const _og=new Proxy(_od&&_od.get?_od.get:()=>!0,{apply:()=>!0});e.box.unproxy.set(_og,_od?.get||(()=>!0));Object.defineProperty(_np,"onLine",{get:_og,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{Object.defineProperty(t.navigator,"onLine",{get:()=>!0,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{const _cn={downlink:10,effectiveType:"4g",rtt:50,saveData:!1,addEventListener:()=>{},removeEventListener:()=>{},dispatchEvent:()=>!0};Object.defineProperty(_np,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});Object.defineProperty(t.navigator,"connection",{get:()=>_cn,enumerable:!0,configurable:!0});}catch(_){}'
-        'try{if(t.addEventListener){const _oa=t.addEventListener;t.addEventListener=function(y,f,p){if(y==="offline")return;_oa.call(this,y,f,p);};}}catch(_){}'
-        'try{Object.defineProperty(t,"onoffline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
-        'try{Object.defineProperty(t,"ononline",{get:()=>null,set:()=>{},configurable:!0});}catch(_){}'
-        '}}catch(_){}})(),'
+        '}}'
+        '}catch(_){}})(),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"parent",'
         '{get:function(){return this===t||this===t.globalThis||this&&this.window===this?e.wrapfn(this.parent,!1):this.parent},set(e){this.parent=e},configurable:!1,enumerable:!1}),'
         '(0,o.pS)(t.Object.prototype,e.config.globals.wrappropertybase+"top",'
@@ -564,7 +551,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'if(A.pathname==="/tver/runtime/media-relay"&&(A.searchParams.has("k")||A.searchParams.has("url")))return t.prefix.origin+A.pathname+A.search;'
         'const _mh=A.hostname.toLowerCase().replace(/\\.$/,""),_mp=String(A.pathname||"");'
         'const _isImg=(_mh==="image-cdn.tver.jp"||(_mh==="statics.tver.jp"&&/\\.(jpg|jpeg|png|webp|gif|svg|avif|ico)(\\?|$)/i.test(_mp)));'
-        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(_mp)||/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(_mp)||((_mh.endsWith(".tver.jp")||_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp")||_mh.endsWith(".uliza.jp")||_mh.endsWith(".stream.ne.jp")||_mh.endsWith(".jstream.jp"))&&/\\.(mp4|m4a|m4v)(\\?|$)/i.test(_mp))));'
+        'const _isHls=(!_mh.endsWith(".api.streaks.jp")&&(/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(_mp)||((_mh.endsWith(".tver.jp")||_mh.endsWith(".cloudfront.net")||_mh.endsWith(".akamaized.net")||_mh.endsWith(".akamaihd.net")||_mh.endsWith(".fastly.net")||_mh.endsWith(".boltdns.net")||_mh.endsWith(".brightcove.com")||_mh.endsWith(".brightcove.net")||_mh.endsWith(".streaks.jp")||_mh.endsWith(".uliza.jp")||_mh.endsWith(".stream.ne.jp")||_mh.endsWith(".jstream.jp"))&&/\\.(mp4|m4a|m4v)(\\?|$)/i.test(_mp))));'
         'if((_isImg||_isHls)&&!o?.isModule&&o?.destination!=="script"&&o?.destination!=="worker"&&o?.destination!=="sharedworker"&&o?.destination!=="document"){'
         'return t.prefix.origin+"/tver/runtime/media-relay?k="+btoa(encodeURIComponent(A.href).split("").reverse().join("")).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"")'
         '}'
@@ -664,7 +651,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
         'const _rawUa=String(navigator.userAgent||"").replace(/HeadlessChrome\\//g,"Chrome/");'
         'let _tvUa=_rawUa,_tvPlat=navigator.platform||"Win32",_tvChPlat="Windows";'
-        'if(/(iPhone|iPad|iPod)/i.test(_rawUa)){'
+        'if(/(iPhone|iPad|iPod)/i.test(_rawUa)&&!/Chrome\\/|CriOS\\//i.test(_rawUa)){'
         '_tvUa="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";'
         '_tvPlat="MacIntel";_tvChPlat="macOS";'
         '}else if(!/Windows NT|Macintosh/i.test(_rawUa)||/Android|Mobile|CrOS|Linux/i.test(_rawUa)){'
@@ -682,23 +669,9 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'const _uad=navigator.userAgentData,_brands=_uad.brands||[];'
         'try{Object.defineProperty(_np,"userAgentData",{get:()=>({brands:_brands,mobile:false,platform:_tvChPlat,getHighEntropyValues:async()=>({brands:_brands,mobile:false,platform:_tvChPlat,platformVersion:"15.0.0",architecture:"x86",bitness:"64",model:"",uaFullVersion:"131.0.0.0"}),toJSON:()=>({brands:_brands,mobile:false,platform:_tvChPlat})}),enumerable:true,configurable:true})}catch(_){}'
         '}}}'
-        'if(typeof document!=="undefined"){'
-        'const _oGei=typeof Document!=="undefined"&&Document.prototype?Document.prototype.getElementById:null;'
-        'const _ensureTvAd=()=>{try{const existing=_oGei?_oGei.call(document,"chee4au4yieYohs9"):null;if(!existing){const d=document.createElement("div");d.id="chee4au4yieYohs9";d.style.display="none";(document.body||document.documentElement)?.appendChild(d);}}catch(_){}};'
-        '_ensureTvAd();'
-        'document.addEventListener("DOMContentLoaded",_ensureTvAd,{once:true});'
-        'document.addEventListener("readystatechange",_ensureTvAd);'
-        'if(_oGei&&typeof Document!=="undefined"&&Document.prototype){try{Document.prototype.getElementById=function(id){if(id==="chee4au4yieYohs9")_ensureTvAd();return _oGei.call(this,id);};}catch(_){}}'
-        'if(typeof Node!=="undefined"&&Node.prototype){'
-        'const _isDs=(n)=>{try{if(!n||n.nodeType!==1||String(n.tagName||"").toUpperCase()!=="SCRIPT")return false;const s=String(n.getAttribute?.("src")||n.src||"");return /doubleserve\\.js/i.test(s);}catch(_){return false;}};'
-        'const _shimDs=(n)=>{try{_ensureTvAd();n.removeAttribute("src");setTimeout(()=>{try{_ensureTvAd();n.dispatchEvent(new Event("load"));}catch(_){}},0);}catch(_){}};'
-        'const _oAp=Node.prototype.appendChild,_oIb=Node.prototype.insertBefore;'
-        'if(_oAp){Node.prototype.appendChild=function(c){if(_isDs(c)){_shimDs(c);}return _oAp.call(this,c);};}'
-        'if(_oIb){Node.prototype.insertBefore=function(c,r){if(_isDs(c)){_shimDs(c);}return _oIb.call(this,c,r);};}'
-        '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
-        'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
+        'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)&&!/Chrome\\\\//i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
         'globalThis.Blob=new Proxy(_OrigBlob,{construct(target,args,newTarget){try{const parts=args[0],opts=args[1];if(Array.isArray(parts)&&parts.length>0&&typeof parts[0]==="string"&&(String(opts?.type||"").includes("javascript")||parts[0].includes("onmessage")||parts[0].includes("onconnect"))){args=[[_wShim,...parts],opts];}}catch(_){}return Reflect.construct(target,args,newTarget);}});'
         '}}catch(_){}\n'
     )
@@ -716,30 +689,12 @@ async def _ensure_patched_runtime(asset_name: str, patcher) -> tuple[bytes, byte
     cached_gz = _PATCHED_RUNTIME_GZIP_CACHE.get(asset_name)
     if cached is not None and cached_gz is not None:
         return cached, cached_gz
-    raw_bytes = b""
-    try:
-        import app as host_app
+    import app as host_app
 
-        resp = await host_app.scramjet_asset(asset_name)
-        if getattr(resp, "status_code", 500) == 200:
-            raw_bytes = bytes(getattr(resp, "body", b"") or b"")
-            if not raw_bytes:
-                resp_path = getattr(resp, "path", None)
-                if resp_path:
-                    with open(resp_path, "rb") as fp:
-                        raw_bytes = fp.read()
-    except Exception:
-        raw_bytes = b""
-    if not raw_bytes and asset_name == "controller.sw.js":
-        try:
-            from florr_runtime_embedded import EMBEDDED_CONTROLLER_SW
-
-            raw_bytes = EMBEDDED_CONTROLLER_SW.replace("/florr/~/sj/", "/tver/~/sj/").encode("utf-8")
-        except Exception:
-            raw_bytes = b""
-    if not raw_bytes:
+    resp = await host_app.scramjet_asset(asset_name)
+    if getattr(resp, "status_code", 500) != 200 or not getattr(resp, "body", b""):
         return None
-    patched = patcher(raw_bytes)
+    patched = patcher(bytes(resp.body))
     gz = gzip.compress(patched, compresslevel=6)
     _PATCHED_RUNTIME_CACHE[asset_name] = patched
     _PATCHED_RUNTIME_GZIP_CACHE[asset_name] = gz
@@ -753,72 +708,53 @@ async def _serve_patched_runtime(asset_name: str, patcher, request: Request) -> 
 
         return await host_app.scramjet_asset(asset_name)
     patched, gz = pair
-    is_head = request.method == "HEAD"
     ae = (request.headers.get("accept-encoding") or "").lower()
     if "gzip" in ae:
         return Response(
-            b"" if is_head else gz,
+            gz,
             media_type="application/javascript",
             headers={
                 "Cache-Control": "public, max-age=86400, immutable",
                 "Content-Encoding": "gzip",
-                "Content-Length": str(len(gz)),
                 "Vary": "Accept-Encoding",
             },
         )
     return Response(
-        b"" if is_head else patched,
+        patched,
         media_type="application/javascript",
-        headers={
-            "Cache-Control": "public, max-age=86400, immutable",
-            "Content-Length": str(len(patched)),
-        },
+        headers={"Cache-Control": "public, max-age=86400, immutable"},
     )
 
 
-@router.api_route("/tver/runtime/scramjet.js", methods=["GET", "HEAD"], include_in_schema=False)
+@router.get("/tver/runtime/scramjet.js", include_in_schema=False)
 async def tver_scramjet_js(request: Request):
     return await _serve_patched_runtime("scramjet.js", _patch_scramjet_js, request)
 
 
-@router.api_route("/tver/runtime/controller.api.js", methods=["GET", "HEAD"], include_in_schema=False)
+@router.get("/tver/runtime/controller.api.js", include_in_schema=False)
 async def tver_controller_api(request: Request):
     return await _serve_patched_runtime("controller.api.js", _patch_controller_api, request)
 
 
-@router.api_route("/tver/runtime/controller.sw.js", methods=["GET", "HEAD"], include_in_schema=False)
+@router.get("/tver/runtime/controller.sw.js", include_in_schema=False)
 async def tver_controller_sw(request: Request):
     return await _serve_patched_runtime("controller.sw.js", _patch_controller_sw, request)
 
 
-@router.api_route("/tver/runtime/controller.inject.js", methods=["GET", "HEAD"], include_in_schema=False)
+@router.get("/tver/runtime/controller.inject.js", include_in_schema=False)
 async def tver_controller_inject(request: Request):
     return await _serve_patched_runtime("controller.inject.js", _patch_controller_inject, request)
 
 
 async def _tver_sw_override(request: Request) -> Response:
-    ctrl_sw_pair = await _ensure_patched_runtime("controller.sw.js", _patch_controller_sw)
-    if ctrl_sw_pair is not None:
-        ctrl_sw_code = ctrl_sw_pair[0].decode("utf-8", errors="replace")
-    else:
-        ctrl_sw_code = f"importScripts('/tver/runtime/controller.sw.js?v={RUNTIME_REV}');"
-    code = ctrl_sw_code + f"""
+    code = f"""
+importScripts('/tver/runtime/controller.sw.js?v={RUNTIME_REV}');
 const TVER_MEDIA_CACHE = 'sh-tver-media-{RUNTIME_REV}';
 const TVER_REWRITTEN_CACHE = 'sh-tver-rewritten-{RUNTIME_REV}';
 const EMPTY_VAST_XML = '<?xml version="1.0" encoding="UTF-8"?><VAST version="3.0"/>';
 const EMPTY_AFFINITY_JSON = '{{"api_version":"","code":0,"message":"","type":"hash","result":{{"exists":false,"customParams":""}}}}';
 const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
-const directBlockedHosts = new Map();
-function isDirectBlocked(host) {{
-  const exp = directBlockedHosts.get(host);
-  if (!exp) return false;
-  if (Date.now() < exp) return true;
-  directBlockedHosts.delete(host);
-  return false;
-}}
-function blockDirectHost(host, ttlMs = 60000) {{
-  if (host) directBlockedHosts.set(host, Date.now() + ttlMs);
-}}
+const blockedDirectHosts = new Set();
 function fetchWithFastTimeout(url, opts, ms) {{
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), ms);
@@ -874,7 +810,6 @@ function isStreamCdnTarget(target) {{
   if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
   if (h.endsWith('.api.streaks.jp')) return false;
   if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-  if (/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(p)) return true;
   if ((
       h.endsWith('.tver.jp') || h.endsWith('.cloudfront.net') || h.endsWith('.akamaized.net') ||
       h.endsWith('.akamaihd.net') || h.endsWith('.fastly.net') || h.endsWith('.boltdns.net') ||
@@ -1214,7 +1149,7 @@ self.addEventListener('fetch', event => {{
               if (hit) return asOut(hit, method);
             }} catch {{}}
           }}
-          if (!isTverDomain && !canCache && !isDirectBlocked(targetHost)) {{
+          if (!isTverDomain && !canCache && !blockedDirectHosts.has(targetHost)) {{
             try {{
               const cdnResp = await fetchWithFastTimeout(anyTarget.href, {{
                 method,
@@ -1225,11 +1160,11 @@ self.addEventListener('fetch', event => {{
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get('content-type') || '').toLowerCase();
                 if (ct.includes('text/html') || ct.includes('application/xhtml')) {{
-                  blockDirectHost(targetHost);
+                  blockedDirectHosts.add(targetHost);
                 }} else if ((isM3u8Path || ct.includes('mpegurl')) && method === 'GET') {{
                   const rawTxt = await cdnResp.text();
                   if (!rawTxt.trimStart().startsWith('#EXTM3U')) {{
-                    blockDirectHost(targetHost);
+                    blockedDirectHosts.add(targetHost);
                   }} else {{
                     const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || anyTarget.href, forNative);
                     return new Response(rewritten, {{
@@ -1253,10 +1188,10 @@ self.addEventListener('fetch', event => {{
                   }});
                 }}
               }} else {{
-                blockDirectHost(targetHost);
+                blockedDirectHosts.add(targetHost);
               }}
             }} catch {{
-              blockDirectHost(targetHost);
+              blockedDirectHosts.add(targetHost);
             }}
           }}
           const fetchRelayAsset = async () => {{
@@ -1432,6 +1367,7 @@ async def _get_relay_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=1,
                     limits=limits,
                 )
@@ -1467,6 +1403,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
                 )
             elif not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1767,7 +1704,7 @@ def _rewrite_hls_manifest(
             return f"{origin_prefix}/tver/runtime/media-relay?native=1&via=server&k={_encode_media_key(abs_url)}"
         if origin_prefix:
             return f"{origin_prefix}/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
-        return f"/tver/runtime/media-relay?k={_encode_media_key(abs_url)}"
+        return abs_url
 
     text = re.sub(
         r'URI="([^"]+)"',
@@ -2514,6 +2451,87 @@ def _schedule_tver_prewarm(target_url: str = TVER_HOME) -> None:
         pass
 
 
+@router.api_route(
+    "/tver/~/sj/{rest:path}",
+    methods=["GET", "HEAD", "POST", "OPTIONS"],
+    include_in_schema=False,
+)
+async def tver_sj_direct_fallback(rest: str, request: Request):
+    """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
+    fetches bypass the Service Worker and request /tver/~/sj/... directly."""
+    if request.method == "OPTIONS":
+        return Response(
+            b"",
+            status_code=204,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+                "Access-Control-Allow-Headers": "*",
+            },
+        )
+    if rest.endswith("scramjet.wasm.js"):
+        return await _serve_virtual_wasm_js()
+    decoded_rest = _decode_repeated_str(rest)
+    m_data = re.search(r"(data:([A-Za-z0-9.+/-]+);base64,([A-Za-z0-9+/=]+))", decoded_rest)
+    if m_data:
+        try:
+            raw_bytes = base64.b64decode(m_data.group(3))
+            return Response(
+                b"" if request.method == "HEAD" else raw_bytes,
+                media_type=m_data.group(2),
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
+            )
+        except Exception:
+            pass
+    m_raw_data = re.search(r"data:([A-Za-z0-9.+/-]+)?(?:;charset=[^,;]+)?,(.*)$", rest, re.S)
+    if m_raw_data:
+        try:
+            mime = (m_raw_data.group(1) or "text/plain").strip()
+            payload_bytes = unquote(m_raw_data.group(2)).encode("utf-8")
+            return Response(
+                b"" if request.method == "HEAD" else payload_bytes,
+                media_type=mime,
+                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
+            )
+        except Exception:
+            pass
+    virtual_url = _extract_sj_virtual_url(rest, request.url.query)
+    if not virtual_url:
+        return Response(b"invalid virtual url", status_code=404)
+    try:
+        parsed = urlparse(virtual_url)
+        if parsed.path == "/tver/runtime/media-relay":
+            qs = parse_qs(parsed.query)
+            k_nested = (qs.get("k") or [""])[0]
+            nested = _decode_media_key(k_nested) if k_nested else (qs.get("url") or [""])[0]
+            if nested:
+                return await _serve_tver_media_url(nested, request)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        path = (parsed.path or "").lower()
+        sc = _check_server_short_circuit(host, parsed.path or "")
+        if sc is not None:
+            sc_status, sc_ct, sc_body = sc
+            return Response(
+                b"" if request.method == "HEAD" else sc_body,
+                status_code=sc_status,
+                media_type=sc_ct,
+                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
+            )
+        if host == "image-cdn.tver.jp" or path.endswith(
+            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
+        ):
+            return await _serve_tver_media_url(virtual_url, request)
+    except Exception:
+        return Response(b"bad virtual url", status_code=400)
+    if request.method == "POST":
+        return Response(
+            b"{}",
+            status_code=200,
+            media_type="application/json",
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
+    return Response(b"Service Worker route required", status_code=404)
+
 
 def _normalize_tver_set_cookie(cookie_val: str, host: str) -> str:
     """Ensure cookies set on tver.jp / *.tver.jp share cleanly across TVer subdomains."""
@@ -2532,18 +2550,7 @@ def _normalize_tver_set_cookie(cookie_val: str, host: str) -> str:
                 cookie_val,
                 flags=re.I,
             )
-        if host in (
-            "tver.jp",
-            "www.tver.jp",
-            "s.tver.jp",
-            "id.tver.jp",
-            "auth.tver.jp",
-            "user.tver.jp",
-            "user-api.tver.jp",
-            "platform-api.tver.jp",
-            "service-api.tver.jp",
-            "member-api.tver.jp",
-        ):
+        if host in ("tver.jp", "www.tver.jp", "platform-api.tver.jp", "service-api.tver.jp", "member-api.tver.jp"):
             return cookie_val.rstrip("; ") + "; Domain=.tver.jp"
     if host == "google.com" or host.endswith(".google.com"):
         if re.search(r";\s*domain\s*=", cookie_val, re.I):
@@ -2582,14 +2589,25 @@ def _is_leaked_proxy_url(ref_val: str) -> bool:
     )
 
 
-async def _execute_tver_relay_core(
-    url: str,
-    method: str,
-    raw_headers: list | dict,
-    req_body: bytes,
-    proxy_origin: str = "",
-) -> tuple[int, str, list[list[str]], bytes, str, float]:
+@router.post("/tver/runtime/http-relay", include_in_schema=False)
+async def tver_http_relay(request: Request):
     global _CURL_DISABLED_UNTIL
+
+    raw = await request.body()
+    if len(raw) < 4:
+        return Response(b"invalid frame", status_code=400)
+    meta_len = struct.unpack(">I", raw[:4])[0]
+    if len(raw) < 4 + meta_len:
+        return Response(b"truncated frame", status_code=400)
+    try:
+        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
+    except Exception:
+        return Response(b"bad json", status_code=400)
+
+    req_body = raw[4 + meta_len :]
+    url = str(meta.get("url") or "").strip()
+    method = str(meta.get("method") or "GET").upper().strip()
+    raw_headers = meta.get("headers") or []
 
     try:
         for _ in range(3):
@@ -2605,20 +2623,20 @@ async def _execute_tver_relay_core(
         url = _strip_dollar_query(url)
         parsed = urlparse(url)
     except Exception:
-        return 400, "Bad Request", [["content-type", "text/plain"]], b"bad url", "", 0.0
+        return Response(b"bad url", status_code=400)
 
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        return 400, "Bad Request", [["content-type", "text/plain"]], b"unsupported scheme", "", 0.0
+        return Response(b"unsupported scheme", status_code=400)
 
     host = parsed.hostname.lower().rstrip(".")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     if port not in (80, 443):
-        return 403, "Forbidden", [["content-type", "text/plain"]], b"unsupported port", "", 0.0
+        return Response(b"unsupported port", status_code=403)
 
     sc = _check_server_short_circuit(host, parsed.path or "")
     if sc is not None:
         sc_status, sc_ct, sc_body = sc
-        return (
+        return _pack_relay_response(
             sc_status,
             "OK",
             [
@@ -2627,14 +2645,12 @@ async def _execute_tver_relay_core(
                 ["access-control-allow-credentials", "true"],
             ],
             b"" if method == "HEAD" else sc_body,
-            "",
-            0.0,
         )
 
     try:
         await _ensure_public_host(host, port)
     except Exception:
-        return 403, "Forbidden", [["content-type", "text/plain"]], b"blocked host", "", 0.0
+        return Response(b"blocked host", status_code=403)
 
     req_headers: list[tuple[str, str]] = []
     seen_ua = False
@@ -2740,7 +2756,7 @@ async def _execute_tver_relay_core(
         cached_img = _IMAGE_CACHE.get(url)
         if cached_img and (time.time() - cached_img[0]) < _IMAGE_CACHE_TTL:
             _, c_status, c_media_type, c_body, c_cc = cached_img
-            return (
+            return _pack_relay_response(
                 c_status,
                 "OK",
                 [
@@ -2750,8 +2766,7 @@ async def _execute_tver_relay_core(
                     ["cross-origin-resource-policy", "cross-origin"],
                 ],
                 b"" if method == "HEAD" else c_body,
-                "",
-                0.0,
+                request=request,
             )
 
     has_auth = any(k.lower() == "authorization" for k in header_dict)
@@ -2760,13 +2775,14 @@ async def _execute_tver_relay_core(
         cached_pub = _PUBLIC_API_CACHE.get(pub_cache_key)
         if cached_pub and (time.time() - cached_pub[0]) < cached_pub[1]:
             _, p_ttl, p_status, p_text, p_headers, p_body = cached_pub
-            return (
+            return _pack_relay_response(
                 p_status,
                 p_text,
                 p_headers,
                 b"" if method == "HEAD" else p_body,
-                pub_cache_key,
-                p_ttl,
+                request=request,
+                cache_key=pub_cache_key,
+                cache_ttl=p_ttl,
             )
 
     cacheable = (not has_range) and _is_cacheable_static_asset(method, url)
@@ -2775,13 +2791,14 @@ async def _execute_tver_relay_core(
         static_ttl = 300.0 if path_lower in ("/setting.js", "/setting.json") else _STATIC_ASSET_TTL
         if cached and (time.time() - cached[0]) < static_ttl:
             _, c_status, c_text, c_headers, c_body = cached
-            return (
+            return _pack_relay_response(
                 c_status,
                 c_text,
                 c_headers,
                 b"" if method == "HEAD" else c_body,
-                url,
-                static_ttl,
+                request=request,
+                cache_key=url,
+                cache_ttl=static_ttl,
             )
         header_dict.pop("Cookie", None)
 
@@ -2796,13 +2813,14 @@ async def _execute_tver_relay_core(
         cached_guest = _GUEST_HTML_CACHE.get(url)
         if cached_guest and (time.time() - cached_guest[0]) < _GUEST_HTML_TTL:
             _, g_status, g_text, g_headers, g_body = cached_guest
-            return (
+            return _pack_relay_response(
                 g_status,
                 g_text,
                 g_headers,
                 b"" if method == "HEAD" else g_body,
-                f"guesthtml:{url}",
-                _GUEST_HTML_TTL,
+                request=request,
+                cache_key=f"guesthtml:{url}",
+                cache_ttl=_GUEST_HTML_TTL,
             )
 
     impersonate_profile = _select_curl_impersonate(client_ua)
@@ -2898,13 +2916,11 @@ async def _execute_tver_relay_core(
                 pass
     except Exception as exc:
         err_msg = f"upstream error: {exc}".encode("utf-8", "ignore")
-        return (
+        return _pack_relay_response(
             502,
             "Bad Gateway",
             [["content-type", "text/plain; charset=utf-8"]],
             err_msg,
-            "",
-            0.0,
         )
 
     out_headers: list[list[str]] = []
@@ -2921,8 +2937,6 @@ async def _execute_tver_relay_core(
         if kl == "set-cookie":
             has_set_cookie = True
             v = _normalize_tver_set_cookie(v, host)
-        elif kl == "location":
-            v = urljoin(url, v)
         if kl == "content-type":
             resp_media_type = v
             vl = v.lower()
@@ -2954,6 +2968,9 @@ async def _execute_tver_relay_core(
         )
 
     if is_m3u8 and status in (200, 206) and resp_body:
+        req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
+        req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
+        proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
         resp_body = _rewrite_hls_manifest(resp_body, url, proxy_origin=proxy_origin)
         status = 200
         out_headers = [h for h in out_headers if h[0].lower() != "content-range"]
@@ -3049,145 +3066,6 @@ async def _execute_tver_relay_core(
         except Exception:
             pass
 
-    return status, status_text, out_headers, resp_body, out_cache_key, out_cache_ttl
-
-
-@router.api_route(
-    "/tver/~/sj/{rest:path}",
-    methods=["GET", "HEAD", "POST", "OPTIONS"],
-    include_in_schema=False,
-)
-async def tver_sj_direct_fallback(rest: str, request: Request):
-    """Server-side fallback when iOS/iPadOS WebKit AVFoundation or early resource
-    fetches bypass the Service Worker and request /tver/~/sj/... directly."""
-    if request.method == "OPTIONS":
-        return Response(
-            b"",
-            status_code=204,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
-                "Access-Control-Allow-Headers": "*",
-            },
-        )
-    if rest.endswith("scramjet.wasm.js"):
-        return await _serve_virtual_wasm_js()
-    decoded_rest = _decode_repeated_str(rest)
-    m_data = re.search(r"(data:([A-Za-z0-9.+/-]+);base64,([A-Za-z0-9+/=]+))", decoded_rest)
-    if m_data:
-        try:
-            raw_bytes = base64.b64decode(m_data.group(3))
-            return Response(
-                b"" if request.method == "HEAD" else raw_bytes,
-                media_type=m_data.group(2),
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
-            )
-        except Exception:
-            pass
-    m_raw_data = re.search(r"data:([A-Za-z0-9.+/-]+)?(?:;charset=[^,;]+)?,(.*)$", rest, re.S)
-    if m_raw_data:
-        try:
-            mime = (m_raw_data.group(1) or "text/plain").strip()
-            payload_bytes = unquote(m_raw_data.group(2)).encode("utf-8")
-            return Response(
-                b"" if request.method == "HEAD" else payload_bytes,
-                media_type=mime,
-                headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=86400"},
-            )
-        except Exception:
-            pass
-    virtual_url = _extract_sj_virtual_url(rest, request.url.query)
-    if not virtual_url:
-        return Response(b"invalid virtual url", status_code=404)
-    try:
-        parsed = urlparse(virtual_url)
-        if parsed.path == "/tver/runtime/media-relay":
-            qs = parse_qs(parsed.query)
-            k_nested = (qs.get("k") or [""])[0]
-            nested = _decode_media_key(k_nested) if k_nested else (qs.get("url") or [""])[0]
-            if nested:
-                return await _serve_tver_media_url(nested, request)
-        host = (parsed.hostname or "").lower().rstrip(".")
-        path = (parsed.path or "").lower()
-        sc = _check_server_short_circuit(host, parsed.path or "")
-        if sc is not None:
-            sc_status, sc_ct, sc_body = sc
-            return Response(
-                b"" if request.method == "HEAD" else sc_body,
-                status_code=sc_status,
-                media_type=sc_ct,
-                headers={"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"},
-            )
-        if host == "image-cdn.tver.jp" or path.endswith(
-            (".m3u8", ".ts", ".m4s", ".mp4", ".m4a", ".aac", ".vtt", ".key", ".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg")
-        ):
-            return await _serve_tver_media_url(virtual_url, request)
-    except Exception:
-        return Response(b"bad virtual url", status_code=400)
-    req_body = await request.body()
-    raw_headers = list(request.headers.items())
-    req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
-    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
-    proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
-    status, status_text, out_headers, resp_body, _, _ = await _execute_tver_relay_core(
-        virtual_url, request.method, raw_headers, req_body, proxy_origin=proxy_origin
-    )
-    if status in (301, 302, 303, 307, 308):
-        loc_header = next((hv for hk, hv in out_headers if hk.lower() == "location"), None)
-        if loc_header:
-            abs_loc = urljoin(virtual_url, loc_header)
-            loc_headers = [
-                ("Location", f"/tver/~/sj/{quote(abs_loc, safe='')}"),
-                ("Access-Control-Allow-Origin", "*"),
-                ("Access-Control-Allow-Credentials", "true"),
-            ]
-            for hk, hv in out_headers:
-                if hk.lower() == "set-cookie":
-                    loc_headers.append((hk, hv))
-            resp = Response(content=b"", status_code=status)
-            for hk, hv in loc_headers:
-                if hk.lower() == "set-cookie":
-                    resp.raw_headers.append((hk.encode("latin-1"), hv.encode("latin-1")))
-                else:
-                    resp.headers[hk] = hv
-            return resp
-    resp = Response(
-        content=b"" if request.method == "HEAD" else resp_body,
-        status_code=status,
-    )
-    for hk, hv in out_headers:
-        if hk.lower() == "set-cookie":
-            resp.raw_headers.append((hk.encode("latin-1"), hv.encode("latin-1")))
-        else:
-            resp.headers[hk] = hv
-    return resp
-
-
-@router.post("/tver/runtime/http-relay", include_in_schema=False)
-async def tver_http_relay(request: Request):
-    raw = await request.body()
-    if len(raw) < 4:
-        return Response(b"invalid frame", status_code=400)
-    meta_len = struct.unpack(">I", raw[:4])[0]
-    if len(raw) < 4 + meta_len:
-        return Response(b"truncated frame", status_code=400)
-    try:
-        meta = json.loads(raw[4 : 4 + meta_len].decode("utf-8"))
-    except Exception:
-        return Response(b"bad json", status_code=400)
-
-    req_body = raw[4 + meta_len :]
-    url = str(meta.get("url") or "").strip()
-    method = str(meta.get("method") or "GET").upper().strip()
-    raw_headers = meta.get("headers") or []
-
-    req_proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "https").split(",")[0].strip()
-    req_host = (request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc or "").split(",")[0].strip()
-    proxy_origin = f"{req_proto}://{req_host}" if req_host else ""
-
-    status, status_text, out_headers, resp_body, out_cache_key, out_cache_ttl = await _execute_tver_relay_core(
-        url, method, raw_headers, req_body, proxy_origin=proxy_origin
-    )
     return _pack_relay_response(
         status,
         status_text,
@@ -3206,169 +3084,19 @@ async def tver_wisp_route(websocket: WebSocket):
     await host_app.wisp_media_endpoint(websocket)
 
 
-async def _serve_tver_upstream_static(target_url: str, request: Request, default_media_type: str = "") -> Response:
-    cached = _STATIC_ASSET_CACHE.get(target_url)
-    if cached and (time.time() - cached[0]) < _STATIC_ASSET_TTL:
-        _, c_status, c_text, c_headers, c_body = cached
-        headers_dict = {h[0]: h[1] for h in c_headers}
-        headers_dict["Access-Control-Allow-Origin"] = "*"
-        headers_dict["Access-Control-Allow-Credentials"] = "true"
-        headers_dict["Cache-Control"] = "public, max-age=31536000, immutable"
-        ct = headers_dict.get("content-type") or default_media_type or "application/javascript"
-        return Response(b"" if request.method == "HEAD" else c_body, status_code=c_status, headers=headers_dict, media_type=ct)
-
-    try:
-        client = await _get_relay_http_client()
-        upstream = await client.get(
-            target_url,
-            headers={
-                "User-Agent": _DESKTOP_CHROME_UA,
-                "Accept": "*/*",
-                "Referer": "https://tver.jp/",
-            },
-            follow_redirects=True,
-            timeout=10,
-        )
-        body = bytes(upstream.content or b"")
-        ct = upstream.headers.get("content-type") or default_media_type or "application/javascript"
-        if upstream.status_code == 200 and body:
-            _STATIC_ASSET_CACHE[target_url] = (
-                time.time(),
-                200,
-                "OK",
-                [["content-type", ct]],
-                body,
-            )
-        return Response(
-            b"" if request.method == "HEAD" else body,
-            status_code=upstream.status_code,
-            media_type=ct,
-            headers={
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Credentials": "true",
-                "Cache-Control": "public, max-age=31536000, immutable" if upstream.status_code == 200 else "no-store",
-            },
-        )
-    except Exception as exc:
-        return Response(f"upstream static error: {exc}".encode("utf-8"), status_code=502)
-
-
-async def _tver_next_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://tver.jp/_next/{clean}"
-    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
-    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
-
-
-async def _tver_streaksplayer_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://player.tver.jp/streaksplayer/{clean}"
-    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
-    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
-
-
-async def _tver_player_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://player.tver.jp/player/{clean}"
-    ct = "text/css" if clean.endswith(".css") else ("application/json" if clean.endswith(".json") else "application/javascript")
-    return await _serve_tver_upstream_static(target_url, request, default_media_type=ct)
-
-
-async def _tver_config_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://player.tver.jp/config/{clean}"
-    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
-
-
-async def _tver_app_config_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://statics.tver.jp/app/config/{clean}"
-    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
-
-
-async def _tver_setting_js_asset(request: Request):
-    return await _serve_tver_upstream_static("https://s.tver.jp/setting.js", request, default_media_type="application/javascript")
-
-
-async def _tver_setting_json_asset(request: Request):
-    return await _serve_tver_upstream_static("https://s.tver.jp/setting.json", request, default_media_type="application/json")
-
-
-async def _tver_data_string_asset(request: Request, rest: str = ""):
-    param = rest or request.path_params.get("rest", "")
-    clean = param.lstrip("/")
-    target_url = f"https://s.tver.jp/data/string/{clean}"
-    return await _serve_tver_upstream_static(target_url, request, default_media_type="application/json")
-
-
-@router.api_route("/_next/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_next(request: Request, rest: str = ""):
-    return await _tver_next_asset(request, rest)
-
-
-@router.api_route("/streaksplayer/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_streaksplayer(request: Request, rest: str = ""):
-    return await _tver_streaksplayer_asset(request, rest)
-
-
-@router.api_route("/player/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_player(request: Request, rest: str = ""):
-    return await _tver_player_asset(request, rest)
-
-
-@router.api_route("/config/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_config(request: Request, rest: str = ""):
-    return await _tver_config_asset(request, rest)
-
-
-@router.api_route("/app/config/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_app_config(request: Request, rest: str = ""):
-    return await _tver_app_config_asset(request, rest)
-
-
-@router.api_route("/setting.js", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_setting_js(request: Request):
-    return await _tver_setting_js_asset(request)
-
-
-@router.api_route("/setting.json", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_setting_json(request: Request):
-    return await _tver_setting_json_asset(request)
-
-
-@router.api_route("/data/string/{rest:path}", methods=["GET", "HEAD"], include_in_schema=False)
-async def route_tver_data_string(request: Request, rest: str = ""):
-    return await _tver_data_string_asset(request, rest)
-
-
 def _install_tver_routes() -> None:
     try:
         import app as host_app
 
-        root_routes = [
-            ("/_next/{rest:path}", _tver_next_asset, ["GET", "HEAD"]),
-            ("/streaksplayer/{rest:path}", _tver_streaksplayer_asset, ["GET", "HEAD"]),
-            ("/player/{rest:path}", _tver_player_asset, ["GET", "HEAD"]),
-            ("/config/{rest:path}", _tver_config_asset, ["GET", "HEAD"]),
-            ("/app/config/{rest:path}", _tver_app_config_asset, ["GET", "HEAD"]),
-            ("/setting.js", _tver_setting_js_asset, ["GET", "HEAD"]),
-            ("/setting.json", _tver_setting_json_asset, ["GET", "HEAD"]),
-            ("/data/string/{rest:path}", _tver_data_string_asset, ["GET", "HEAD"]),
-            ("/tver/sw.js", _tver_sw_override, ["GET", "HEAD"]),
-        ]
-        for path_pattern, endpoint, methods in root_routes:
-            if not any(
-                isinstance(r, Route) and r.path == path_pattern
-                for r in host_app.app.router.routes
-            ):
-                host_app.app.router.routes.insert(
-                    0, Route(path_pattern, endpoint, methods=methods)
-                )
+        if not any(
+            isinstance(r, Route)
+            and r.path == "/tver/sw.js"
+            and r.endpoint is _tver_sw_override
+            for r in host_app.app.router.routes
+        ):
+            host_app.app.router.routes.insert(
+                0, Route("/tver/sw.js", _tver_sw_override, methods=["GET", "HEAD"])
+            )
         if not any(
             isinstance(r, WebSocketRoute)
             and r.path == "/tver/wisp/"
@@ -3446,7 +3174,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 <main class="stage">
   <div class="cover" id="cover">読み込み中…</div>
   <iframe id="frame" title="TVer"
-    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture; identity-credentials-get; publickey-credentials-get; web-share"
+    allow="autoplay; clipboard-read; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
     referrerpolicy="strict-origin-when-cross-origin"></iframe>
 </main>
 
@@ -3474,7 +3202,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   const SESSION_KEY = "schoolhub.tver.target.v1";
   const SW_GUARD = "schoolhub.tver.sw-reload.v1";
   const MAX_RECOVERY = 3;
-  const CONTROL_WAIT = 3500;
+  const CONTROL_WAIT = 12000;
   const HEALTH_DELAY = 22000;
   const DEFAULT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -3494,57 +3222,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
 
   const cover = document.getElementById("cover");
   const frameEl = document.getElementById("frame");
-
-  const LOG_ENDPOINT = "/_diag/tver";
-  let logSequence = 0;
-  const clientLog = (level, event, details = {{}}) => {{
-    const payload = {{
-      source: "tver-scramjet",
-      level: String(level || "info"),
-      event: String(event || "event"),
-      seq: ++logSequence,
-      ts: new Date().toISOString(),
-      transport: transportName || null,
-      details,
-    }};
-    try {{
-      const fn = level === "error" ? console.error : level === "warn" ? console.warn : console.debug;
-      fn.call(console, "[SchoolHub TVer]", event, details);
-    }} catch (_) {{}}
-    try {{
-      fetch(LOG_ENDPOINT, {{
-        method: "POST",
-        credentials: "omit",
-        cache: "no-store",
-        keepalive: true,
-        headers: {{ "content-type": "application/json" }},
-        body: JSON.stringify(payload),
-      }}).catch(() => {{}});
-    }} catch (_) {{}}
-  }};
-
-  function safeError(error) {{
-    if (!error) return {{}};
-    return {{
-      name: String(error.name || "Error"),
-      message: String(error.message || error),
-      stack: String(error.stack || "").slice(0, 12000),
-    }};
-  }}
-
-  window.addEventListener("error", (event) => {{
-    clientLog("error", "window-error", {{
-      message: String(event.message || ""),
-      source: String(event.filename || ""),
-      line: Number(event.lineno || 0),
-      column: Number(event.colno || 0),
-      error: safeError(event.error),
-    }});
-  }});
-
-  window.addEventListener("unhandledrejection", (event) => {{
-    clientLog("error", "unhandled-rejection", {{ reason: safeError(event.reason) }});
-  }});
 
   async function withTimeout(promise, ms, label) {{
     let timer = 0;
@@ -3575,12 +3252,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     try {{
       const u = new URL(urlStr);
       const h = u.hostname.toLowerCase().replace(/\\.$/, "");
-      return h === "id.tver.jp" || h === "tverid.tver.jp" || h === "auth.tver.jp" || h === "user.tver.jp" ||
-             h === "user-api.tver.jp" ||
-             h === "payments.id.tver.jp" || h === "payments.tverid.tver.jp" ||
-             (h === "s.tver.jp" && (u.pathname.includes("login") || u.pathname.includes("signup"))) ||
-             h === "accounts.google.com" || h.endsWith(".google.com") || h === "appleid.apple.com" ||
-             h.endsWith(".apple.com");
+      return h === "id.tver.jp" || h === "tverid.tver.jp" || h === "auth.tver.jp" ||
+             h === "accounts.google.com" || h.endsWith(".google.com") || h === "appleid.apple.com";
     }} catch (_) {{
       return false;
     }}
@@ -3658,7 +3331,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     if (/\\.(js|mjs|cjs|json|css|html|wasm)(\\?|$)/i.test(p)) return false;
     if (h.endsWith(".api.streaks.jp")) return false;
     if (/\\.(m3u8|ts|m4s|cmfv|cmfa|aac|vtt|webvtt|key)(\\?|$)/i.test(p)) return true;
-    if (/(?:^|\\/)(keys?|aes128|hlscrypt|license)(?:\\/|$|\\?)/i.test(p)) return true;
     if ((
         h.endsWith(".tver.jp") || h.endsWith(".cloudfront.net") || h.endsWith(".akamaized.net") ||
         h.endsWith(".akamaihd.net") || h.endsWith(".fastly.net") || h.endsWith(".boltdns.net") ||
@@ -3762,17 +3434,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }}
 
   const DOUBLESERVE_JS = '(()=>{{try{{var d=document,add=function(){{if(!d.getElementById("chee4au4yieYohs9")){{var e=d.createElement("div");e.id="chee4au4yieYohs9";e.style.display="none";(d.body||d.documentElement).appendChild(e);}}}};add();if(!d.body)d.addEventListener("DOMContentLoaded",add,{{once:true}});}}catch(_){{}}}})();';
-  const directBlockedHosts = new Map();
-  function isDirectBlocked(host) {{
-    const exp = directBlockedHosts.get(host);
-    if (!exp) return false;
-    if (Date.now() < exp) return true;
-    directBlockedHosts.delete(host);
-    return false;
-  }}
-  function blockDirectHost(host, ttlMs = 60000) {{
-    if (host) directBlockedHosts.set(host, Date.now() + ttlMs);
-  }}
+  const blockedDirectHosts = new Set();
 
   function fetchDirectWithTimeout(url, init, timeoutMs, outerSignal) {{
     const ac = new AbortController();
@@ -3999,7 +3661,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const canCache = m === "GET" && !rangeEntry && isCacheableImageTarget(unwrapped);
         const isM3u8Path = /\\.m3u8(\\?|$)/i.test(unwrapped.pathname || "");
         try {{
-          if (!isTverHost && !canCache && !isDirectBlocked(uHost)) {{
+          if (!isTverHost && !canCache && !blockedDirectHosts.has(uHost)) {{
             try {{
               const cdnHdrs = {{}};
               if (rangeEntry && rangeEntry[1] && !isM3u8Path) cdnHdrs["Range"] = rangeEntry[1];
@@ -4008,15 +3670,15 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                 headers: cdnHdrs,
                 mode: "cors",
                 credentials: "omit",
-              }}, 6000, signal);
+              }}, 2500, signal);
               if (cdnResp && (cdnResp.ok || cdnResp.status === 206)) {{
                 const ct = String(cdnResp.headers.get("content-type") || "").toLowerCase();
                 if (ct.includes("text/html") || ct.includes("application/xhtml")) {{
-                  blockDirectHost(uHost);
+                  blockedDirectHosts.add(uHost);
                 }} else if ((isM3u8Path || ct.includes("mpegurl")) && m === "GET") {{
                   const rawTxt = await cdnResp.text();
                   if (!rawTxt.trimStart().startsWith("#EXTM3U")) {{
-                    blockDirectHost(uHost);
+                    blockedDirectHosts.add(uHost);
                   }} else {{
                     const rewritten = rewriteM3u8Text(rawTxt, cdnResp.url || unwrapped.href);
                     return {{
@@ -4040,10 +3702,10 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                   }};
                 }}
               }} else {{
-                blockDirectHost(uHost);
+                blockedDirectHosts.add(uHost);
               }}
             }} catch (_) {{
-              if (!signal?.aborted) blockDirectHost(uHost);
+              if (!signal?.aborted) blockedDirectHosts.add(uHost);
             }}
           }}
           if (canCache && typeof caches !== "undefined") {{
@@ -4090,7 +3752,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         const apiHost = (() => {{
           try {{ return new URL(urlStr).hostname.toLowerCase().replace(/\\.$/, ""); }} catch (_) {{ return ""; }}
         }})();
-        if (apiHost && !isDirectBlocked(apiHost)) {{
+        if (apiHost && !blockedDirectHosts.has(apiHost)) {{
           try {{
             const isSsai = apiHost === "ssai.api.streaks.jp";
             const corsHeaders = {{}};
@@ -4113,20 +3775,21 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               mode: "cors",
               credentials: "omit",
               cache: "no-store",
-            }}, 7000, signal);
+            }}, 3000, signal);
             const apiCt = String(apiResp?.headers?.get("content-type") || "").toLowerCase();
             if (apiCt.includes("text/html") || apiCt.includes("application/xhtml")) {{
-              blockDirectHost(apiHost);
+              blockedDirectHosts.add(apiHost);
             }} else if (apiResp && apiResp.status >= 200 && apiResp.status < 400) {{
               let outBuf = m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer();
-              if (apiHost === "playback.api.streaks.jp" && m === "GET" && outBuf.byteLength > 0) {{
-                try {{
-                  const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
-                  if (parsedPb && typeof parsedPb === "object" && "ads" in parsedPb) {{
-                    delete parsedPb.ads;
-                    outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
-                  }}
-                }} catch (_) {{}}
+              if (m === "GET" && outBuf.byteLength > 0) {{
+                const parsedPb = JSON.parse(new TextDecoder().decode(outBuf));
+                if (!parsedPb || typeof parsedPb !== "object") {{
+                  throw new Error("invalid streaks json");
+                }}
+                if (apiHost === "playback.api.streaks.jp" && "ads" in parsedPb) {{
+                  delete parsedPb.ads;
+                  outBuf = new TextEncoder().encode(JSON.stringify(parsedPb)).buffer;
+                }}
               }}
               return {{
                 body: outBuf,
@@ -4136,7 +3799,7 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
               }};
             }}
           }} catch (_) {{
-            if (!signal?.aborted) blockDirectHost(apiHost);
+            if (!signal?.aborted) blockedDirectHosts.add(apiHost);
           }}
         }}
       }}
@@ -4367,37 +4030,22 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   function currentDocumentHealthy() {{
     try {{
       const win = frameEl.contentWindow;
-      let href = "";
-      try {{ href = String(win?.location?.href || ""); }} catch (_) {{}}
-      const frameSrc = String(frameEl.src || "");
-      if (!href && !frameSrc) {{
+      const href = String(win?.location?.href || "");
+      const doc = frameEl.contentDocument;
+      if (!doc || href === "about:blank") {{
         return {{ healthy: false, loading: false }};
       }}
-      if (href === "about:blank" && !frameSrc) {{
-        return {{ healthy: false, loading: false }};
-      }}
-      let doc = null;
-      try {{ doc = frameEl.contentDocument; }} catch (_) {{}}
-
-      if (!doc) {{
-        const isTargetSrc = frameSrc.includes(PREFIX) || frameSrc.includes("tver.jp") || frameSrc.includes("id.tver.jp");
-        return {{ healthy: Boolean(isTargetSrc), loading: false }};
-      }}
-
       const body = doc.body;
       const text = String(body?.innerText || "").replace(/\\s+/g, " ").trim();
-      const title = String(doc.title || "").trim();
       const hasTVerRoot = Boolean(
-        doc.querySelector("#__next > *, #__next, header, main, nav, video, form, input, button, [class*='Header'], [class*='header'], [class*='Layout'], [class*='layout'], [class*='Top_'], [class*='episode'], [class*='player']")
+        doc.querySelector("#__next > *, header, main, nav, video, [class*='Header'], [class*='Layout']")
       );
-      const isProxied = href.includes(PREFIX) || frameSrc.includes(PREFIX) || href.includes("tver.jp") || href.includes("id.tver.jp");
+      const isProxied = href.includes(PREFIX);
       const loading = isProxied && (doc.readyState === "loading" || doc.readyState === "interactive");
-      const healthy = Boolean(isProxied && (hasTVerRoot || text.length > 15 || title.length > 0 || (body && body.children.length > 0)));
+      const healthy = Boolean(isProxied && (hasTVerRoot || text.length > 20));
       return {{ healthy, loading }};
     }} catch (_) {{
-      const frameSrc = String(frameEl.src || "");
-      const isTarget = frameSrc.includes(PREFIX) || frameSrc.includes("tver.jp") || frameSrc.includes("id.tver.jp");
-      return {{ healthy: Boolean(isTarget), loading: false }};
+      return {{ healthy: false, loading: false }};
     }}
   }}
 
@@ -4410,7 +4058,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     const detected = url || readFrameTarget();
     if (detected) observeUrl(detected);
     ensurePageMedia();
-    clientLog("info", "show-healthy", {{ target: detected || lastUrl }});
   }}
 
   function armHealthCheck(token, waitMs = HEALTH_DELAY) {{
@@ -4444,34 +4091,27 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       }},
     }};
 
-    let instance = null;
-    try {{
-      instance = new C({{
-        serviceworker: navigator.serviceWorker.controller,
-        transport: client,
-        config: {{
-          prefix: PREFIX,
-          scramjetPath: "/tver/runtime/scramjet.js?v={RUNTIME_REV}",
-          injectPath: "/tver/runtime/controller.inject.js?v={RUNTIME_REV}",
-          wasmPath: "/scramjet/scramjet.wasm",
-          virtualWasmPath: "scramjet.wasm.js",
-          codec: {{
-            encode: (value) => value ? encodeURIComponent(value) : value,
-            decode: (value) => value ? decodeURIComponent(value) : value,
-          }},
+    const instance = new C({{
+      serviceworker: navigator.serviceWorker.controller,
+      transport: client,
+      config: {{
+        prefix: PREFIX,
+        scramjetPath: "/tver/runtime/scramjet.js?v={RUNTIME_REV}",
+        injectPath: "/tver/runtime/controller.inject.js?v={RUNTIME_REV}",
+        wasmPath: "/scramjet/scramjet.wasm",
+        virtualWasmPath: "scramjet.wasm.js",
+        codec: {{
+          encode: (value) => value ? encodeURIComponent(value) : value,
+          decode: (value) => value ? decodeURIComponent(value) : value,
         }},
-        scramjetConfig,
-      }});
-      await withTimeout(instance.wait(), 20000, "Scramjet Controller");
-      return {{ instance, client }};
-    }} catch (error) {{
-      try {{ client?.destroy?.(); }} catch (_) {{}}
-      try {{ client?.close?.(); }} catch (_) {{}}
-      throw error;
-    }}
+      }},
+      scramjetConfig,
+    }});
+    await withTimeout(instance.wait(), 20000, "Scramjet Controller");
+    return {{ instance, client }};
   }}
 
-  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes("/tver/sw.js"));
+  const isOurSw = (c) => Boolean(c && String(c.scriptURL || "").includes(SW));
 
   async function waitForWorkerControl(reg) {{
     if (isOurSw(navigator.serviceWorker.controller)) {{
@@ -4535,9 +4175,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     if (!reloaded) {{
       try {{ sessionStorage.setItem(SW_GUARD, "1"); }} catch (_) {{}}
       location.reload();
-      return;
+      throw new Error("Service Worker control reload scheduled");
     }}
-    console.warn("[SchoolHub TVer] SW controller not active, proceeding with direct transport fallback");
+    throw new Error("TVer Service Worker did not take control");
   }}
 
   async function recover(reason) {{
@@ -4568,11 +4208,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
         remember(target);
         frame.go(target);
         armHealthCheck(recoveryToken, HEALTH_DELAY);
-        setTimeout(() => {{
-          if (!cover.classList.contains("hidden")) {{
-            showHealthy();
-          }}
-        }}, 3500);
       }} catch (_) {{}}
     }}, attempt * 1000);
   }}
@@ -4600,14 +4235,8 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     frameEl.addEventListener("load", () => {{
       const token = navigationToken;
       const snap = currentDocumentHealthy();
-      clientLog("info", "frame-load", {{ healthy: snap.healthy, src: frameEl.src }});
-      if (snap.healthy) {{
-        showHealthy();
-      }} else {{
-        setTimeout(() => {{
-          showHealthy();
-        }}, 800);
-      }}
+      if (snap.healthy) showHealthy();
+      else armHealthCheck(token, 12000);
     }});
     frameEl.addEventListener("error", () => {{ recover("iframe-error"); }});
     startFrameMonitor();
@@ -4623,7 +4252,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }}
 
   async function boot() {{
-    clientLog("info", "boot-start", {{ target: INITIAL }});
     if (!("serviceWorker" in navigator)) throw new Error("Service Worker unavailable");
     try {{
       const revKey = "sh:tver:rev";
@@ -4647,7 +4275,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
       ).catch(async () => await navigator.serviceWorker.getRegistration(SW_SCOPE));
       await waitForWorkerControl(registration);
     }}
-    clientLog("info", "sw-controlled", {{ controller: Boolean(navigator.serviceWorker.controller) }});
     navigator.serviceWorker.addEventListener("controllerchange", () => {{
       try {{ controller?.setupMessagePort?.(); }} catch (_) {{}}
     }});
@@ -4657,13 +4284,11 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     try {{
       created = await createController("hybrid");
       transportName = "hybrid";
-    }} catch (hybridErr) {{
-      clientLog("warn", "hybrid-failed", {{ error: safeError(hybridErr) }});
+    }} catch (_) {{
       try {{
         created = await createController("libcurl");
         transportName = "libcurl";
-      }} catch (curlErr) {{
-        clientLog("warn", "libcurl-failed", {{ error: safeError(curlErr) }});
+      }} catch (_) {{
         created = await createController("epoxy");
         transportName = "epoxy";
       }}
@@ -4675,21 +4300,13 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
     frame = controller.createFrame(frameEl, {{ plugins: buildPlugins() }});
     bindFrame();
     ready = true;
-    clientLog("info", "controller-ready", {{ transport: transportName }});
 
     const stored = restore();
     navigationToken += 1;
     lastUrl = stored;
     remember(stored);
     frame.go(stored);
-    clientLog("info", "frame-go", {{ target: stored }});
     armHealthCheck(navigationToken, HEALTH_DELAY);
-    setTimeout(() => {{
-      if (!cover.classList.contains("hidden")) {{
-        clientLog("info", "safety-reveal-fallback", {{ target: stored }});
-        showHealthy(stored);
-      }}
-    }}, 1800);
   }}
 
   window.addEventListener("beforeunload", () => {{
@@ -4699,9 +4316,9 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
   }});
 
   boot().catch((error) => {{
-    clientLog("error", "boot-failed", {{ error: safeError(error) }});
     console.error("[SchoolHub TVer] boot failed", error);
-    showHealthy();
+    cover.classList.remove("hidden");
+    cover.textContent = "ページを読み込めませんでした。再読み込みしてください。";
   }});
 }})();
 </script>
@@ -4718,29 +4335,15 @@ async def _prewarm_tver_on_startup() -> None:
     _schedule_tver_prewarm(TVER_HOME)
 
 
-@router.api_route("/tver", methods=["GET", "HEAD"], include_in_schema=False)
-async def tver_redirect(request: Request):
-    if request.method == "HEAD":
-        return Response(b"", status_code=307, headers={"Location": "/tver/"})
+@router.get("/tver", include_in_schema=False)
+async def tver_redirect():
     return RedirectResponse("/tver/", status_code=307)
 
 
-@router.api_route("/tver/", methods=["GET", "HEAD"], response_class=HTMLResponse, include_in_schema=False)
-async def tver_home(request: Request, q: str = "", url: str = ""):
+@router.get("/tver/", response_class=HTMLResponse, include_in_schema=False)
+async def tver_home(q: str = "", url: str = ""):
     target = _target_from_input(url or q)
     _schedule_tver_prewarm(target)
-    if request.method == "HEAD":
-        return Response(
-            b"",
-            status_code=200,
-            media_type="text/html; charset=utf-8",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-                "Referrer-Policy": "strict-origin-when-cross-origin",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
@@ -4749,10 +4352,8 @@ async def tver_home(request: Request, q: str = "", url: str = ""):
     return response
 
 
-@router.api_route("/tver/health", methods=["GET", "HEAD"], include_in_schema=False)
-async def tver_health(request: Request):
-    if request.method == "HEAD":
-        return Response(b"", status_code=200, media_type="application/json")
+@router.get("/tver/health", include_in_schema=False)
+async def tver_health():
     return {
         "ok": True,
         "service": SERVICE_NAME,
@@ -4765,37 +4366,14 @@ async def tver_health(request: Request):
     }
 
 
-@router.api_route("/tver/{subpath:path}", methods=["GET", "HEAD"], response_class=HTMLResponse, include_in_schema=False)
+@router.get("/tver/{subpath:path}", response_class=HTMLResponse, include_in_schema=False)
 async def tver_deep_link(subpath: str, request: Request):
     clean = (subpath or "").lstrip("/")
     if clean in ("sw.js", "wisp", "wisp/") or clean.startswith(("runtime/", "~/sj/", "openchat/")):
         return Response(b"not found", status_code=404)
     q = f"?{request.url.query}" if request.url.query else ""
-    if clean.startswith(("http://", "https://")):
-        target = _target_from_input(clean + q)
-    elif clean.startswith(("id.tver.jp", "tverid.tver.jp", "auth.tver.jp", "user.tver.jp", "s.tver.jp")):
-        target = _target_from_input("https://" + clean + q)
-    elif clean == "login" or clean.startswith("login/"):
-        target = f"https://id.tver.jp/{clean}{q}"
-    elif clean == "login.html" or clean.startswith("login.html"):
-        target = f"https://s.tver.jp/{clean}{q}"
-    elif clean == "signup" or clean.startswith("signup/"):
-        target = f"https://id.tver.jp/{clean}{q}"
-    else:
-        target = f"https://tver.jp/{clean}{q}"
+    target = f"https://tver.jp/{clean}{q}"
     _schedule_tver_prewarm(target)
-    if request.method == "HEAD":
-        return Response(
-            b"",
-            status_code=200,
-            media_type="text/html; charset=utf-8",
-            headers={
-                "Cache-Control": "no-store, no-cache, must-revalidate",
-                "Pragma": "no-cache",
-                "Referrer-Policy": "strict-origin-when-cross-origin",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
     response = HTMLResponse(_shell_html(target))
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"

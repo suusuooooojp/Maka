@@ -330,7 +330,7 @@ async def _get_avatar_client() -> httpx.AsyncClient:
             transport=(
                 None
                 if _has_proxy
-                else httpx.AsyncHTTPTransport(retries=1, limits=_limits)
+                else httpx.AsyncHTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
             ),
             follow_redirects=True,
             limits=_limits,

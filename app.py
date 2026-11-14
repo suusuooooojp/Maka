@@ -58,6 +58,7 @@ CORE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_CORE_LIMITS,
@@ -78,6 +79,7 @@ ASSET_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
             retries=2,
             limits=_ASSET_LIMITS,
@@ -125,6 +127,7 @@ YOUTUBE_IMAGE_CLIENT = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=True,
             retries=1,
             limits=_YT_IMG_LIMITS,
@@ -1660,19 +1663,18 @@ def _load_admin_config() -> dict:
         merged.update(best)
         if not isinstance(merged.get("pausedServices"), list):
             merged["pausedServices"] = []
-        merged["pausedServices"] = [
-            s for s in merged["pausedServices"]
-            if str(s).strip().lower() not in ("tver", "/tver", "/tver/")
-        ]
-        merged["unpausedTverFixV1"] = True
-        merged["unpausedTverFixV2"] = True
-        merged["updatedAt"] = 9999999999999
-        for p in _ADMIN_CONFIG_PATHS:
-            try:
-                with open(p, "w", encoding="utf-8") as f:
-                    _json.dump(merged, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
+        if not best.get("unpausedTverFixV1"):
+            merged["pausedServices"] = [
+                s for s in merged["pausedServices"]
+                if str(s).strip().lower() not in ("tver", "/tver", "/tver/")
+            ]
+            merged["unpausedTverFixV1"] = True
+            for p in _ADMIN_CONFIG_PATHS:
+                try:
+                    with open(p, "w", encoding="utf-8") as f:
+                        _json.dump(merged, f, ensure_ascii=False, indent=2)
+                except Exception:
+                    pass
         _ADMIN_CONFIG = merged
     return _ADMIN_CONFIG
 
@@ -1758,7 +1760,6 @@ def _match_paused_service(req_path: str) -> tuple[bool, str]:
         or "/~/sj/" in req_path
         or "/runtime/" in req_path
         or req_path.endswith(("/sw.js", "/health"))
-        or req_path.lower().startswith(("/tver/", "/tver"))
     ):
         return False, ""
     cfg = _ADMIN_CONFIG
@@ -2048,12 +2049,11 @@ async def openchat_global_middleware(request: Request, call_next):
     if set_bypass_cookie:
         response.set_cookie("sh_admin_bypass", "1", max_age=43200, path="/", httponly=True, samesite="lax")
 
-    if "/~/sj/" in req_path or "/runtime/" in req_path or req_path.startswith(("/activity/", "/wisp")):
-        return response
-
     if (
         req_path in ("/", "", "/minecraft", "/minecraft/", "/eagler", "/eagler/", "/openchat", "/openchat/", "/taiko", "/taiko/")
         or req_path.startswith(("/src/views/", "/taiko/src/views/", "/api/", "/scramjet/", "/design-system/"))
+        or "/~/sj/" in req_path
+        or "/runtime/" in req_path
     ):
         return await _maybe_gzip_buffered_response(request, response, req_path)
 
@@ -2146,7 +2146,7 @@ async def _background_prewarm_runtime_assets() -> None:
             return_exceptions=True,
         )
         warm_tasks = []
-        for mod_name in ("instagram_proxy", "youtube_scramjet_proxy", "x_proxy", "tver_proxy", "kazwire_proxy", "wakame_plus", "twitch_proxy", "tiktok_proxy", "florr_proxy"):
+        for mod_name in ("instagram_proxy", "youtube_scramjet_proxy", "x_proxy", "tver_proxy", "kazwire_proxy", "wakame_plus", "twitch_proxy", "tiktok_proxy"):
             mod = sys.modules.get(mod_name)
             fn = getattr(mod, "prewarm_service_cache", None) if mod else None
             if callable(fn):

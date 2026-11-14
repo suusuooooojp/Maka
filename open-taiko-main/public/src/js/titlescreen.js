@@ -1,7 +1,6 @@
 class Titlescreen{
 	constructor(songId){
 		this.songId = songId
-		this.touched = Boolean("ontouchstart" in window || (navigator && navigator.maxTouchPoints > 0))
 		db.getItem("customFolder").then(folder => this.customFolder = folder)
 		
 		if(!songId){
@@ -21,13 +20,13 @@ class Titlescreen{
 		}else{
 			pageEvents.add(this.titleScreen, ["mousedown", "touchstart"], event => {
 				if(event.type === "touchstart"){
-					if(event.cancelable) event.preventDefault()
+					event.preventDefault()
 					this.touched = true
 				}else if(event.type === "mousedown" && event.which !== 1){
 					return
 				}
 				this.onPressed(true)
-			}, undefined, { passive: false })
+			})
 			
 			assets.sounds["v_title"].play()
 			this.keyboard = new Keyboard({

@@ -358,7 +358,26 @@ class Game{
 							circle = circles[this.currentCircle]
 						}
 					}
-					this.lastSmallHit = null
+					if(this.lastSmallHit && ev.color === this.lastSmallHit.color && ev.side !== this.lastSmallHit.side && (ev.ms - this.lastSmallHit.ms) <= 18){
+						var coalesce = false
+						if(!circle || circle.isPlayed){
+							coalesce = true
+						}else{
+							var cType = circle.type
+							var isNote = cType === "don" || cType === "ka" || cType === "daiDon" || cType === "daiKa"
+							if(isNote){
+								var relNext = ev.ms - circle.ms - this.controller.audioLatency
+								var matchesNext = ev.color === "don" ? (cType === "don" || cType === "daiDon") : (cType === "ka" || cType === "daiKa")
+								if(!(Math.abs(relNext) < this.rules.ok && matchesNext)){
+									coalesce = true
+								}
+							}
+						}
+						this.lastSmallHit = null
+						if(coalesce){
+							continue
+						}
+					}
 					if(circle && !circle.isPlayed){
 						this.checkScore(circle, ev.color, ev.ms, ev.side)
 					}

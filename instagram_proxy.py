@@ -49,6 +49,22 @@ def _scrub_curl_cookies(curl, *, fresh: bool = False) -> None:
     try:
         curl.setopt(CurlOpt.COOKIELIST, "ALL")
         curl.setopt(CurlOpt.COOKIELIST, "SESS")
+        if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
+            ipresolve = getattr(CurlOpt, "IPRESOLVE", None)
+            if ipresolve is not None:
+                curl.setopt(ipresolve, 1)  # CURL_IPRESOLVE_V4
+            resolve_opt = getattr(CurlOpt, "RESOLVE", None)
+            if resolve_opt is not None and _DNS_RESOLVE_MAP:
+                curl.setopt(resolve_opt, list(_DNS_RESOLVE_MAP.values()))
+        connect_timeout_ms = getattr(CurlOpt, "CONNECTTIMEOUT_MS", None)
+        if connect_timeout_ms is not None:
+            curl.setopt(connect_timeout_ms, 3500)
+        happy_eyeballs_ms = getattr(CurlOpt, "HAPPY_EYEBALLS_TIMEOUT_MS", None)
+        if happy_eyeballs_ms is not None:
+            curl.setopt(happy_eyeballs_ms, 300)
+        dns_cache_timeout = getattr(CurlOpt, "DNS_CACHE_TIMEOUT", None)
+        if dns_cache_timeout is not None:
+            curl.setopt(dns_cache_timeout, 600)
         tcp_keepalive = getattr(CurlOpt, "TCP_KEEPALIVE", None)
         if tcp_keepalive is not None:
             curl.setopt(tcp_keepalive, 1)
@@ -345,7 +361,7 @@ def _patch_controller_sw(source: bytes) -> bytes:
         'r=setTimeout(()=>{if(!n){let r=s.filter(e=>void 0!==t[e]);'
         'console.error(`timed out waiting for set cookie response (deadlock?): cookies=${e.length} clients=${o.length} pending=${r.length}/${s.length} clientUrls=${o.map(e=>e.url).join(",")}`)}i()},1e3)'
     )
-    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},350)", 1)
+    text = text.replace(old_cookie_wait, "r=setTimeout(()=>{i()},50)", 1)
     return text.encode("utf-8")
 
 
@@ -457,8 +473,8 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'deleteProperty:(t,r)=>(t.removeItem(_pfx()+r),!0)},'
         "n=new Proxy(t.localStorage,r),s=new Proxy(t.sessionStorage,r);"
         "delete t.localStorage,delete t.sessionStorage,"
-        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!0,enumerable:!0}),'
-        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!0,enumerable:!0})}'
+        'Object.defineProperty(t,"localStorage",{get:()=>n,set:()=>{},configurable:!1,enumerable:!0}),'
+        'Object.defineProperty(t,"sessionStorage",{get:()=>s,set:()=>{},configurable:!1,enumerable:!0})}'
     )
     if old_storage_mod in text:
         text = text.replace(old_storage_mod, new_storage_mod, 1)
@@ -1224,6 +1240,7 @@ async def _get_media_http_client() -> httpx.AsyncClient:
             timeout = httpx.Timeout(connect=10.0, read=45.0, write=15.0, pool=15.0)
             if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
                 transport = httpx.AsyncHTTPTransport(
+                    local_address="0.0.0.0",
                     retries=2,
                     limits=limits,
                 )
@@ -1295,9 +1312,40 @@ async def _ensure_public_host(hostname: str, port: int) -> None:
         "cdn-apple.com",
     )
     is_trusted = any(host == sfx or host.endswith("." + sfx) for sfx in _trusted_suffixes)
-    if is_trusted:
-        _PUBLIC_HOST_CACHE[key] = now
-        return
+    if not (os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or os.getenv("https_proxy") or os.getenv("http_proxy")):
+        loop = asyncio.get_running_loop()
+        infos = []
+        try:
+            infos = await loop.run_in_executor(
+                None, lambda: socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+            )
+        except Exception:
+            if not is_trusted:
+                infos = await loop.run_in_executor(
+                    None, lambda: socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+                )
+        ipv4_addrs: list[str] = []
+        for _, _, _, _, sockaddr in infos:
+            ip_text = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_text)
+            except ValueError:
+                continue
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+            ):
+                if not is_trusted:
+                    raise PermissionError(f"non-public address {ip_text}")
+                continue
+            if isinstance(ip, ipaddress.IPv4Address) and ip_text not in ipv4_addrs:
+                ipv4_addrs.append(ip_text)
+        if ipv4_addrs:
+            if len(_DNS_RESOLVE_MAP) > 256:
+                _DNS_RESOLVE_MAP.clear()
+            _DNS_RESOLVE_MAP[f"{host}:{port}"] = f"{host}:{port}:{','.join(ipv4_addrs[:6])}".encode("ascii")
     _PUBLIC_HOST_CACHE[key] = now
 
 
@@ -4410,8 +4458,6 @@ async def ig_deeplink(subpath: str, request: Request):
     low = clean.lower()
     if low.startswith(("runtime/", "~/sj/", "wisp")) or low in ("sw.js", "health"):
         return Response("Not found", status_code=404, media_type="text/plain; charset=utf-8")
-    if low == "youtube" or low.startswith("youtube/"):
-        return RedirectResponse("/youtube/", status_code=307)
     raw_qs = request.url.query
     target = _strip_dollar_query(f"https://www.instagram.com/{clean}" + (f"?{raw_qs}" if raw_qs else ""))
     response = HTMLResponse(_shell_html(target))

@@ -237,7 +237,7 @@ def _get_http_client() -> httpx.Client:
                 transport=(
                     None
                     if _has_proxy
-                    else httpx.HTTPTransport(retries=1, limits=_limits)
+                    else httpx.HTTPTransport(local_address="0.0.0.0", retries=1, limits=_limits)
                 ),
                 timeout=4.0,
                 follow_redirects=True,

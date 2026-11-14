@@ -31,6 +31,7 @@ client = httpx.AsyncClient(
         None
         if _HAS_PROXY_ENV
         else httpx.AsyncHTTPTransport(
+            local_address="0.0.0.0",
             verify=False,
             retries=2,
             limits=_TWITCH_LIMITS,

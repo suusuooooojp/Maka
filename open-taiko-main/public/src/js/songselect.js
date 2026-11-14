@@ -1,11 +1,6 @@
 class SongSelect {
   constructor(fromTutorial, fadeIn, touchEnabled, songId, showWarning) {
-    this.touchEnabled = Boolean(
-      touchEnabled ||
-        "ontouchstart" in window ||
-        (navigator && navigator.maxTouchPoints > 0)
-    );
-    this.lastTouchTime = 0;
+    this.touchEnabled = touchEnabled;
 
     loader.changePage("songselect", false);
     this.canvas = document.getElementById("song-sel-canvas");
@@ -490,64 +485,34 @@ class SongSelect {
   }
 
   mouseDown(event) {
-    try {
-      if (window.getSelection) {
-        var sel = window.getSelection();
-        if (sel && sel.rangeCount > 0) sel.removeAllRanges();
-      }
-      if (this.selectable) {
-        this.selectable.blur();
-      }
-    } catch (e) {}
-    if (!this.redrawRunning || !this.canvas) {
-      return;
-    }
-    var tgt = event.target;
     if (
-      tgt !== this.canvas &&
-      tgt !== this.songSelect &&
-      tgt !== this.selectable &&
-      !(this.selectable && this.selectable.contains(tgt))
+      event.target === this.selectable ||
+      event.target.parentNode === this.selectable
     ) {
+      this.selectable.focus();
+    } else {
+      getSelection().removeAllRanges();
+      this.selectable.blur();
+    }
+    if (event.target !== this.canvas || !this.redrawRunning) {
       return;
     }
-    var rect = this.canvas.getBoundingClientRect();
     if (event.type === "mousedown") {
       if (event.which !== 1) {
         return;
       }
-      if (Date.now() - (this.lastTouchTime || 0) < 600) {
-        return;
-      }
-      var x = event.clientX - rect.left;
-      var y = event.clientY - rect.top;
-      var mouse = this.mouseOffset(x, y);
+      var mouse = this.mouseOffset(event.offsetX, event.offsetY);
       var shift = event.shiftKey;
       var ctrl = event.ctrlKey;
-      var touch = Boolean(this.touchEnabled);
+      var touch = false;
     } else {
-      if (event.cancelable) {
-        event.preventDefault();
-      }
-      this.touchEnabled = true;
-      this.lastTouchTime = Date.now();
-      var touchObj =
-        (event.changedTouches && event.changedTouches[0]) ||
-        (event.touches && event.touches[0]) ||
-        event;
-      var x = touchObj.clientX - rect.left;
-      var y = touchObj.clientY - rect.top;
+      event.preventDefault();
+      var x = event.touches[0].pageX - this.canvas.offsetLeft;
+      var y = event.touches[0].pageY - this.canvas.offsetTop;
       var mouse = this.mouseOffset(x, y);
       var shift = false;
       var ctrl = false;
       var touch = true;
-    }
-    if (
-      this.state.screen === "title" ||
-      this.state.screen === "titleFadeIn"
-    ) {
-      this.state.screen = "song";
-      this.state.locked = 0;
     }
     if (this.state.showWarning) {
       if (408 < mouse.x && mouse.x < 872 && 470 < mouse.y && mouse.y < 550) {
@@ -584,7 +549,6 @@ class SongSelect {
         !p2.session &&
         mouse.x > 641 &&
         mouse.y > 603 &&
-        p2.socket &&
         p2.socket.readyState === 1 &&
         !assets.customSongs
       ) {
@@ -626,18 +590,12 @@ class SongSelect {
     }
   }
   touchEnd(event) {
-    if (event.cancelable) {
-      event.preventDefault();
-    }
-    this.lastTouchTime = Date.now();
-    if (this.state.screen === "song" && this.redrawRunning && this.canvas) {
+    event.preventDefault();
+    if (this.state.screen === "song" && this.redrawRunning) {
       var currentSong = this.songs[this.selectedSong];
-      if (currentSong && currentSong.action === "customSongs") {
-        var rect = this.canvas.getBoundingClientRect();
-        var touchObj =
-          (event.changedTouches && event.changedTouches[0]) || event;
-        var x = touchObj.clientX - rect.left;
-        var y = touchObj.clientY - rect.top;
+      if (currentSong.action === "customSongs") {
+        var x = event.changedTouches[0].pageX - this.canvas.offsetLeft;
+        var y = event.changedTouches[0].pageY - this.canvas.offsetTop;
         var mouse = this.mouseOffset(x, y);
         var moveBy = this.songSelMouse(mouse.x, mouse.y);
         if (moveBy === 0) {
@@ -751,7 +709,7 @@ class SongSelect {
 
   songSelMouse(x, y) {
     if (
-      this.state.locked !== 1 &&
+      this.state.locked === 0 &&
       this.songAsset.marginTop <= y &&
       y <= this.songAsset.marginTop + this.songAsset.height
     ) {
@@ -776,7 +734,7 @@ class SongSelect {
     return null;
   }
   diffSelMouse(x, y) {
-    if (this.state.locked !== 1) {
+    if (this.state.locked === 0) {
       if (223 < x && x < 223 + this.diffOptions.length * 72 && 132 < y && y < 436) {
         return Math.floor((x - 223) / 72);
       } else if (
@@ -893,7 +851,7 @@ class SongSelect {
           });
         }
       }
-    } else if (this.state.locked !== 1 || fromP2) {
+    } else if (this.state.locked === 0 || fromP2) {
       if (currentSong.courses) {
         if (currentSong.unloaded) {
           return;
@@ -1242,10 +1200,7 @@ class SongSelect {
     if (winW / 32 > winH / 9) {
       winW = (winH / 9) * 32;
     }
-    this.pixelRatio = Math.min(
-      window.devicePixelRatio || 1,
-      this.touchEnabled ? 1.25 : 1.5
-    );
+    this.pixelRatio = window.devicePixelRatio || 1;
     var resolution = this.cachedResolution || (this.cachedResolution = settings.getItem("resolution"));
     if (resolution === "medium") {
       this.pixelRatio *= 0.75;
@@ -2523,17 +2478,28 @@ class SongSelect {
             verticalTitle
           );
         }
-        if (this.selectable && this.selectable.style.display !== "none") {
-          this.selectable.style.display = "none";
+        if (!songSel && this.selectableText !== currentTitleText) {
+          this.draw.verticalText({
+            ctx: ctx,
+            text: currentTitleText,
+            x: x + textX + textW / 2,
+            y: y + textY,
+            width: textW,
+            height: textH - 35,
+            fontSize: 40,
+            fontFamily: this.font,
+            selectable: this.selectable,
+            selectableScale: this.ratio / this.pixelRatio,
+          });
+          this.selectable.style.display = "";
+          this.selectableText = currentTitleText;
         }
       },
     });
 
-    if (this.selectableText) {
+    if (screen !== "difficulty" && this.selectableText) {
       this.selectableText = "";
-      if (this.selectable) {
-        this.selectable.style.display = "none";
-      }
+      this.selectable.style.display = "none";
     }
 
     if (songSelMoving) {
