@@ -126,7 +126,7 @@ html, body {{
 </head>
 <body>
 <iframe id="florr-frame" allow="autoplay; fullscreen; gamepad; clipboard-read; clipboard-write" allowfullscreen></iframe>
-<script src="/scramjet/scramjet.js?v={sj_ver}"></script>
+<script src="/florr/scramjet.js?v={sj_ver}"></script>
 <script src="/scramjet/controller.api.js?v={ctrl_ver}"></script>
 <script>
 (function () {{
@@ -141,9 +141,11 @@ html, body {{
     if (!('serviceWorker' in navigator)) {{
       throw new Error('ServiceWorker is not supported');
     }}
-    const reg = await navigator.serviceWorker.register('/florr/sw-florr.js', {{
-      scope: '/florr/'
+    const reg = await navigator.serviceWorker.register('/florr/sw-florr.js?v=rebuilt-v2', {{
+      scope: '/florr/',
+      updateViaCache: 'none'
     }});
+    try {{ await reg.update(); }} catch (_) {{}}
     await navigator.serviceWorker.ready;
 
     let sw = reg.active || reg.waiting || reg.installing;
@@ -270,15 +272,21 @@ html, body {{
     try {{
       const sw = await ensureServiceWorker();
       const transport = await createTransport(getWispUrl());
-      const controller = new $scramjetController.ScramjetController({{
+      const controller = new $scramjetController.Controller({{
         serviceworker: sw,
         transport: transport,
         config: {{
           prefix: '/florr/~/sj/',
-          scramjetPath: '/scramjet/scramjet.js?v={sj_ver}',
+          scramjetPath: '/florr/scramjet.js?v={sj_ver}',
           injectPath: '/florr/inject.js',
           wasmPath: '/scramjet/scramjet.wasm?v={sj_ver}',
           virtualWasmPath: 'scramjet.wasm.js'
+        }},
+        scramjetConfig: {{
+          flags: {{
+            sourcemaps: false,
+            allowFailedIntercepts: true
+          }}
         }}
       }});
       await controller.wait();
@@ -488,17 +496,41 @@ _INJECT_HOOK_JS = r"""
   }
 
   if (typeof $scramjetController !== 'undefined' && typeof $scramjetController.load === 'function') {
-    const origLoad = $scramjetController.load.bind($scramjetController);
-    $scramjetController.load = function (opts) {
-      const res = origLoad(opts);
-      installRuntimeHooks();
-      return res;
-    };
+    const origCtrl = $scramjetController;
+    const origLoad = origCtrl.load.bind(origCtrl);
+    $scramjetController = Object.assign({}, origCtrl, {
+      load: function (opts) {
+        const res = origLoad(opts);
+        installRuntimeHooks();
+        return res;
+      }
+    });
   } else {
     installRuntimeHooks();
   }
 })();
 """
+
+_PATCHED_SCRAMJET_JS: bytes | None = None
+
+
+@router.get("/florr/scramjet.js", include_in_schema=False)
+async def florr_scramjet_js():
+    global _PATCHED_SCRAMJET_JS
+    if _PATCHED_SCRAMJET_JS is None:
+        import app as host_app
+        base_resp = await host_app.scramjet_asset("scramjet.js")
+        if base_resp.status_code != 200:
+            return base_resp
+        text = base_resp.body.decode("utf-8", errors="replace")
+        # iPadOS / Safari WebKit throws SyntaxError on (?i:url)
+        text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
+        _PATCHED_SCRAMJET_JS = text.encode("utf-8")
+    return Response(
+        _PATCHED_SCRAMJET_JS,
+        media_type="application/javascript",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
 
 
 @router.get("/florr/inject.js", include_in_schema=False)
