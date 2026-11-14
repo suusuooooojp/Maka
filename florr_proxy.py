@@ -108,7 +108,7 @@ EPOXY_VERSION = "3.0.1"
 RUNTIME_BASE = "/florr-runtime"
 # Bump whenever the SW bootstrap logic changes so iOS/WebKit cannot retain an
 # older broken registration under the same script URL.
-FLORR_SW_REVISION = "2026-11-14-ws-v74"
+FLORR_SW_REVISION = "2026-11-14-ws-v75"
 CONTROLLER_CDN_URLS = [
     f"https://cdn.jsdelivr.net/npm/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
     f"https://unpkg.com/@mercuryworkshop/scramjet-controller@{CONTROLLER_VERSION}/dist/",
@@ -4506,7 +4506,12 @@ async def florr_ws_bridge(websocket: WebSocket):
         upstream_origin = ticket_headers.get("origin", UPSTREAM_ORIGIN)
         upstream_ua = ticket_headers.get("user-agent", DEFAULT_UA)
         upstream_referer = ticket_headers.get("referer", UPSTREAM_ORIGIN + "/")
-        cookie = ticket_headers.get("cookie", "")
+        raw_cookie = ticket_headers.get("cookie", "")
+        cookie = "; ".join(
+            part.strip()
+            for part in raw_cookie.split(";")
+            if part.strip() and not part.strip().split("=", 1)[0].strip().startswith("sh_")
+        )
         is_discord_ws = _host_is_discord_ws(parsed.hostname)
 
         if is_discord_ws:
@@ -4552,7 +4557,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     close_timeout=5,
                     max_size=None,
                     max_queue=1024,
-                    compression=None,
+                    compression="deflate",
                     ssl=tls_context,
                     open_timeout=4,
                 ) as upstream:
@@ -4607,7 +4612,7 @@ async def florr_ws_bridge(websocket: WebSocket):
                     close_timeout=5,
                     max_size=None,
                     max_queue=1024,
-                    compression=None,
+                    compression="deflate",
                     proxy=proxy_url,
                     ssl=tls_context,
                     open_timeout=4,
@@ -4769,7 +4774,7 @@ async def florr_ws_bridge(websocket: WebSocket):
             close_timeout=5,
             max_size=None,
             max_queue=256,
-            compression=None,
+            compression="deflate",
             ssl=tls_context,
         ) as upstream:
             await _run_bridge(upstream, "websockets")
