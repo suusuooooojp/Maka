@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import secrets
+import socket
 import ssl
 from urllib.parse import urlparse
 
@@ -540,6 +543,249 @@ async def florr_http_relay(url: str = ""):
         )
 
 
+_WISP_ENDPOINTS = (
+    "wss://wisp.mercurywork.shop/",
+    "wss://anura.pro/",
+)
+
+
+class _WispV1Stream:
+    def __init__(self, conn: "_WispV1Connection", stream_id: int, queue: asyncio.Queue[bytes | None]):
+        self.conn = conn
+        self.stream_id = stream_id
+        self.queue = queue
+
+    async def send(self, data: bytes) -> None:
+        await self.conn.send(self.stream_id, data)
+
+    async def recv(self) -> bytes | None:
+        return await self.queue.get()
+
+    async def close(self) -> None:
+        await self.conn.close_stream(self.stream_id)
+
+
+class _WispV1Connection:
+    def __init__(self, wisp_url: str):
+        self.wisp_url = wisp_url
+        self.ws = None
+        self.reader_task: asyncio.Task | None = None
+        self.streams: dict[int, asyncio.Queue[bytes | None]] = {}
+        self._closed = False
+        self.ready_event = asyncio.Event()
+
+    async def start(self) -> None:
+        self.ws = await websockets.connect(
+            self.wisp_url,
+            max_size=None,
+            compression=None,
+            ping_interval=20,
+            ping_timeout=20,
+            open_timeout=5,
+            proxy=None,
+            ssl=_TLS_NO_VERIFY,
+        )
+        self.reader_task = asyncio.create_task(self._reader())
+        await asyncio.wait_for(self.ready_event.wait(), 5)
+
+    async def _reader(self) -> None:
+        try:
+            async for message in self.ws:
+                if isinstance(message, str):
+                    continue
+                data = bytes(message)
+                if len(data) < 5:
+                    continue
+                packet_type = data[0]
+                stream_id = int.from_bytes(data[1:5], "little")
+                payload = data[5:]
+                if stream_id == 0:
+                    if packet_type == 0x03 and len(payload) >= 4:
+                        self.ready_event.set()
+                    elif packet_type == 0x05:
+                        try:
+                            info = bytes([0x05]) + (0).to_bytes(4, "little") + bytes([2, 1])
+                            await self.ws.send(info)
+                        except Exception:
+                            pass
+                    elif packet_type == 0x04:
+                        break
+                    continue
+                q = self.streams.get(stream_id)
+                if q is None:
+                    continue
+                if packet_type == 0x02:
+                    await q.put(payload)
+                elif packet_type == 0x04:
+                    await q.put(None)
+        except Exception:
+            pass
+        finally:
+            self._closed = True
+            for q in list(self.streams.values()):
+                try:
+                    await q.put(None)
+                except Exception:
+                    pass
+
+    async def open_stream(self, host: str, port: int) -> _WispV1Stream:
+        if self.ws is None or self._closed:
+            raise RuntimeError("Wisp connection is not open")
+        stream_id = secrets.randbits(32) or 1
+        while stream_id in self.streams:
+            stream_id = secrets.randbits(32) or 1
+        q: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self.streams[stream_id] = q
+        payload = bytes([0x01]) + int(port).to_bytes(2, "little") + host.encode("utf-8")
+        packet = bytes([0x01]) + stream_id.to_bytes(4, "little") + payload
+        try:
+            await self.ws.send(packet)
+            return _WispV1Stream(self, stream_id, q)
+        except Exception:
+            self.streams.pop(stream_id, None)
+            raise
+
+    async def send(self, stream_id: int, payload: bytes) -> None:
+        if not payload or self.ws is None or self._closed:
+            return
+        packet = bytes([0x02]) + stream_id.to_bytes(4, "little") + payload
+        await self.ws.send(packet)
+
+    async def close_stream(self, stream_id: int, reason: int = 0x02) -> None:
+        if self.ws is not None and not self._closed:
+            try:
+                packet = bytes([0x04]) + stream_id.to_bytes(4, "little") + bytes([reason])
+                await self.ws.send(packet)
+            except Exception:
+                pass
+        self.streams.pop(stream_id, None)
+
+    async def close(self) -> None:
+        self._closed = True
+        for sid in list(self.streams):
+            await self.close_stream(sid)
+        if self.reader_task:
+            self.reader_task.cancel()
+        if self.ws:
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+
+
+_SHARED_WISP_CONNS: dict[str, _WispV1Connection] = {}
+_SHARED_WISP_LOCKS: dict[str, asyncio.Lock] = {}
+_LOCAL_WISP_HTTP_PROXY_SERVERS: dict[str, tuple[asyncio.AbstractServer, int]] = {}
+_LOCAL_WISP_HTTP_PROXY_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+async def _get_shared_wisp_conn(wisp_url: str) -> _WispV1Connection:
+    lock = _SHARED_WISP_LOCKS.setdefault(wisp_url, asyncio.Lock())
+    async with lock:
+        conn = _SHARED_WISP_CONNS.get(wisp_url)
+        if conn is not None and conn.ws is not None and not conn._closed:
+            return conn
+        conn = _WispV1Connection(wisp_url)
+        await conn.start()
+        _SHARED_WISP_CONNS[wisp_url] = conn
+        return conn
+
+
+async def _evict_shared_wisp_conn(wisp_url: str) -> None:
+    lock = _SHARED_WISP_LOCKS.setdefault(wisp_url, asyncio.Lock())
+    async with lock:
+        cur = _SHARED_WISP_CONNS.pop(wisp_url, None)
+        if cur is not None:
+            try:
+                await cur.close()
+            except Exception:
+                pass
+
+
+async def _get_local_wisp_http_proxy(wisp_url: str) -> str:
+    """Return a persistent local http://127.0.0.1:<port> CONNECT proxy backed by Wisp."""
+    lock = _LOCAL_WISP_HTTP_PROXY_LOCKS.setdefault(wisp_url, asyncio.Lock())
+    async with lock:
+        existing = _LOCAL_WISP_HTTP_PROXY_SERVERS.get(wisp_url)
+        if existing is not None and existing[0].is_serving():
+            return f"http://127.0.0.1:{existing[1]}"
+
+        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            stream: _WispV1Stream | None = None
+            try:
+                sock = writer.get_extra_info("socket")
+                if sock is not None:
+                    try:
+                        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    except Exception:
+                        pass
+                header = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 10)
+                lines = header.decode("latin-1", "replace").split("\r\n")
+                if not lines or not lines[0].startswith("CONNECT "):
+                    writer.write(b"HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    return
+                parts = lines[0].split()
+                if len(parts) < 2 or ":" not in parts[1]:
+                    writer.write(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    return
+                host_part, port_part = parts[1].rsplit(":", 1)
+                host_clean = host_part.strip().lower().rstrip(".")
+                if (
+                    port_part != "443"
+                    or not re.fullmatch(r"[a-z0-9.-]+", host_clean)
+                    or not _is_allowed_host(host_clean, _ALLOWED_WS_SUFFIXES)
+                ):
+                    writer.write(b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n")
+                    await writer.drain()
+                    return
+
+                conn = await _get_shared_wisp_conn(wisp_url)
+                stream = await conn.open_stream(host_clean, 443)
+                writer.write(b"HTTP/1.1 200 Connection Established\r\nProxy-Agent: florr-wisp\r\n\r\n")
+                await writer.drain()
+
+                async def c2w():
+                    while True:
+                        data = await reader.read(65536)
+                        if not data:
+                            return
+                        await stream.send(data)
+
+                async def w2c():
+                    while True:
+                        data = await stream.recv()
+                        if data is None:
+                            return
+                        writer.write(data)
+                        await writer.drain()
+
+                tasks = [asyncio.create_task(c2w()), asyncio.create_task(w2c())]
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            except Exception as exc:
+                print(f"[florr_wisp_proxy] error ({wisp_url}): {type(exc).__name__}: {exc}")
+            finally:
+                if stream is not None:
+                    try:
+                        await stream.close()
+                    except Exception:
+                        pass
+                try:
+                    writer.close()
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+
+        server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        _LOCAL_WISP_HTTP_PROXY_SERVERS[wisp_url] = (server, port)
+        return f"http://127.0.0.1:{port}"
+
+
 @router.websocket("/florr_ws_bridge")
 async def florr_ws_bridge(websocket: WebSocket):
     """WebSocket bridge for wss://*.s.m28n.net/ setting Origin: https://florr.io."""
@@ -549,65 +795,122 @@ async def florr_ws_bridge(websocket: WebSocket):
         await websocket.close(code=1008, reason="Disallowed WebSocket target")
         return
 
-    await websocket.accept()
-    print(f"[florr_ws_bridge] connecting -> {target}")
+    requested_protocols = [
+        p.strip()
+        for p in websocket.headers.get("sec-websocket-protocol", "").split(",")
+        if p.strip()
+    ]
 
+    base_kwargs: dict = {
+        "origin": "https://florr.io",
+        "user_agent_header": _USER_AGENT,
+        "max_size": None,
+    }
+    if requested_protocols:
+        base_kwargs["subprotocols"] = requested_protocols
+    if parsed.scheme == "wss":
+        base_kwargs["ssl"] = _TLS_NO_VERIFY
+
+    upstream = None
+    via = "direct"
+    last_exc: Exception | None = None
+
+    # 1) Fast direct attempt (3s)
     try:
-        connect_kwargs = {
-            "origin": "https://florr.io",
-            "user_agent_header": _USER_AGENT,
-            "open_timeout": 10,
-            "max_size": None,
-        }
-        if parsed.scheme == "wss":
-            connect_kwargs["ssl"] = _TLS_NO_VERIFY
-
-        async with websockets.connect(target, **connect_kwargs) as upstream:
-            print(f"[florr_ws_bridge] connected -> {target}")
-
-            async def client_to_upstream():
-                try:
-                    while True:
-                        msg = await websocket.receive()
-                        msg_type = msg.get("type")
-                        if msg_type == "websocket.disconnect":
-                            break
-                        if msg.get("bytes") is not None:
-                            await upstream.send(msg["bytes"])
-                        elif msg.get("text") is not None:
-                            await upstream.send(msg["text"])
-                except WebSocketDisconnect:
-                    pass
-                except Exception:
-                    pass
-
-            async def upstream_to_client():
-                try:
-                    async for data in upstream:
-                        if isinstance(data, (bytes, bytearray)):
-                            await websocket.send_bytes(bytes(data))
-                        else:
-                            await websocket.send_text(str(data))
-                except Exception:
-                    pass
-
-            t1 = asyncio.create_task(client_to_upstream())
-            t2 = asyncio.create_task(upstream_to_client())
-            done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
-            for p in pending:
-                p.cancel()
-            for d in done:
-                try:
-                    d.result()
-                except Exception:
-                    pass
+        upstream = await websockets.connect(
+            target,
+            **base_kwargs,
+            proxy=None,
+            open_timeout=3,
+        )
     except Exception as exc:
-        print(f"[florr_ws_bridge] error ({target}): {exc!r}")
+        last_exc = exc
+        print(f"[florr_ws_bridge] direct failed ({target}): {type(exc).__name__}: {exc}")
+
+    # 2) Wisp HTTP CONNECT tunnel fallback (bypasses Cloud Run IP blocks)
+    if upstream is None and parsed.scheme == "wss":
+        for wisp_url in _WISP_ENDPOINTS:
+            try:
+                proxy_url = await _get_local_wisp_http_proxy(wisp_url)
+                upstream = await websockets.connect(
+                    target,
+                    **base_kwargs,
+                    proxy=proxy_url,
+                    open_timeout=6,
+                )
+                via = f"wisp:{wisp_url}"
+                break
+            except Exception as exc:
+                last_exc = exc
+                print(f"[florr_ws_bridge] wisp failed ({wisp_url} -> {target}): {type(exc).__name__}: {exc}")
+                await _evict_shared_wisp_conn(wisp_url)
+
+    if upstream is None:
+        err_reason = f"{type(last_exc).__name__}: {last_exc}"[:110] if last_exc else "Upstream WebSocket error"
+        print(f"[florr_ws_bridge] all paths failed ({target}): {err_reason}")
         try:
-            await websocket.close(code=1011, reason="Upstream WebSocket error")
+            await websocket.accept()
+            await websocket.close(code=1011, reason=err_reason)
         except Exception:
             pass
+        return
+
+    c2u_count = 0
+    u2c_count = 0
+    try:
+        await websocket.accept(subprotocol=upstream.subprotocol)
+        print(f"[florr_ws_bridge] connected ({via}) -> {target}")
+
+        async def client_to_upstream():
+            nonlocal c2u_count
+            try:
+                while True:
+                    msg = await websocket.receive()
+                    msg_type = msg.get("type")
+                    if msg_type == "websocket.disconnect":
+                        break
+                    if msg.get("bytes") is not None:
+                        c2u_count += 1
+                        await upstream.send(msg["bytes"])
+                    elif msg.get("text") is not None:
+                        c2u_count += 1
+                        await upstream.send(msg["text"])
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+
+        async def upstream_to_client():
+            nonlocal u2c_count
+            try:
+                async for data in upstream:
+                    u2c_count += 1
+                    if isinstance(data, (bytes, bytearray)):
+                        await websocket.send_bytes(bytes(data))
+                    else:
+                        await websocket.send_text(str(data))
+            except Exception:
+                pass
+
+        t1 = asyncio.create_task(client_to_upstream())
+        t2 = asyncio.create_task(upstream_to_client())
+        done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+        for p in pending:
+            p.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        for d in done:
+            try:
+                d.result()
+            except Exception:
+                pass
+    except Exception as exc:
+        print(f"[florr_ws_bridge] relay error ({via} -> {target}): {type(exc).__name__}: {exc}")
     finally:
+        print(f"[florr_ws_bridge] closed ({via} -> {target}) c2u={c2u_count} u2c={u2c_count}")
+        try:
+            await upstream.close()
+        except Exception:
+            pass
         try:
             await websocket.close()
         except Exception:
@@ -622,7 +925,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v7"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v8"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
