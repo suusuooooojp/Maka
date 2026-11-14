@@ -277,7 +277,7 @@ def _get_config_payload() -> dict:
             "project_number": "",
         },
         "_version": {
-            "commit_short": "20261110v2",
+            "commit_short": "20261114v2",
             "version": "1.0",
             "url": "https://github.com/sammwyy/open-taiko",
         },
@@ -788,6 +788,32 @@ async def _proxy_taiko_song(rest: str) -> Response:
     _INFLIGHT_SONGS[safe_key] = fut
     try:
         status_code, content, content_type = await _fetch_song_file_from_upstream(clean_rest, cached_file)
+        if status_code == 404 and lower.endswith(".mp3") and shutil.which("ffmpeg"):
+            ogg_rest = clean_rest[:-4] + ".ogg"
+            ogg_key = re.sub(r"[^a-zA-Z0-9._-]", "_", ogg_rest)
+            ogg_file = SONGS_CACHE_DIR / ogg_key
+            if not (ogg_file.is_file() and ogg_file.stat().st_size > 0):
+                await _proxy_taiko_song(ogg_rest)
+            if ogg_file.is_file() and ogg_file.stat().st_size > 0:
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-v", "error", "-i", str(ogg_file),
+                        "-vn", "-acodec", "libmp3lame", "-q:a", "4", str(cached_file),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(proc.wait(), 15.0)
+                    if cached_file.is_file() and cached_file.stat().st_size > 0:
+                        mp3_bytes = cached_file.read_bytes()
+                        if not fut.done():
+                            fut.set_result((200, mp3_bytes, "audio/mpeg"))
+                        return FileResponse(
+                            cached_file,
+                            media_type="audio/mpeg",
+                            headers=_cors_headers({"Cache-Control": "public, max-age=86400"}),
+                        )
+                except Exception:
+                    pass
         if not fut.done():
             fut.set_result((status_code, content, content_type))
         if status_code == 200 and content:
@@ -824,6 +850,21 @@ async def taiko_songs_prefixed(rest: str):
 @router.api_route("/songs/{rest:path}", methods=["GET", "HEAD", "OPTIONS"], include_in_schema=False)
 async def taiko_songs_root(rest: str):
     return await _proxy_taiko_song(rest)
+
+
+@router.on_event("startup")
+async def _prewarm_taiko_on_startup():
+    async def _warm():
+        try:
+            await asyncio.gather(
+                _ensure_api_categories_cached(),
+                _ensure_api_songs_cached(),
+                return_exceptions=True,
+            )
+        except Exception:
+            pass
+
+    asyncio.create_task(_warm())
 
 
 # ---------------------------------------------------------------------------

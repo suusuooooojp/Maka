@@ -105,7 +105,7 @@ CONTROLLER_VERSION = "0.0.14"
 UTILS_VERSION = "0.0.3"
 LIBCURL_VERSION = "2.0.5"
 EPOXY_VERSION = "3.0.1"
-RUNTIME_REV = "20261114-tver19"
+RUNTIME_REV = "20261114-tver20"
 
 SCRAMJET_WISP_URL = os.getenv("SCRAMJET_WISP_URL", "").strip()
 TVER_UPSTREAM_PROXY = (
@@ -664,7 +664,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         'if(navigator.webdriver&&_np){Object.defineProperty(_np,"webdriver",{get:()=>false,enumerable:true,configurable:true});}'
         'const _rawUa=String(navigator.userAgent||"").replace(/HeadlessChrome\\//g,"Chrome/");'
         'let _tvUa=_rawUa,_tvPlat=navigator.platform||"Win32",_tvChPlat="Windows";'
-        'if(/(iPhone|iPad|iPod)/i.test(_rawUa)&&!/Chrome\\/|CriOS\\//i.test(_rawUa)){'
+        'if(/(iPhone|iPad|iPod)/i.test(_rawUa)){'
         '_tvUa="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15";'
         '_tvPlat="MacIntel";_tvChPlat="macOS";'
         '}else if(!/Windows NT|Macintosh/i.test(_rawUa)||/Android|Mobile|CrOS|Linux/i.test(_rawUa)){'
@@ -698,7 +698,7 @@ def _patch_scramjet_js(source: bytes) -> bytes:
         '}}'
         'if(typeof Blob!=="undefined"){'
         'const _OrigBlob=Blob;'
-        'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)&&!/Chrome\\\\//i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
+        'const _wShim=`(()=>{try{const _shOrig=(()=>{try{if(self.location&&self.location.origin&&self.location.origin!=="null")return self.location.origin;const m=String(self.location&&self.location.href||"").replace(/^blob:/i,"").match(/^(https?:\\\\/\\\\/[^\\\\/?#]+)/i);return m?m[1]:"";}catch(_){return "";}})();const _fixWUrl=(u)=>{if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&_shOrig)return _shOrig+u;return u;};if(typeof window==="undefined"&&typeof self!=="undefined"){if(typeof self.fetch==="function"){const _of=self.fetch.bind(self);self.fetch=globalThis.fetch=function(inp,init){try{if(typeof inp==="string")inp=_fixWUrl(inp);else if(inp&&typeof URL!=="undefined"&&inp instanceof URL)inp=_fixWUrl(inp.href);}catch(_){}return _of(inp,init);};}if(typeof XMLHttpRequest!=="undefined"&&XMLHttpRequest.prototype&&XMLHttpRequest.prototype.open){const _xo=XMLHttpRequest.prototype.open;XMLHttpRequest.prototype.open=function(m,u){try{if(typeof u==="string")arguments[1]=_fixWUrl(u);}catch(_){}return _xo.apply(this,arguments);};}}if(typeof navigator!=="undefined"){if(navigator.webdriver){Object.defineProperty(navigator,"webdriver",{get:()=>false,configurable:true});}const _ru=String(navigator.userAgent||"").replace(/HeadlessChrome\\\\//g,"Chrome/");if(_ru!==navigator.userAgent||/CrOS|Linux|Android|iPhone|iPad/i.test(_ru)){const _cm=_ru.match(/Chrome\\\\/([\\\\d.]+)/);const _u=/(iPhone|iPad|iPod)/i.test(_ru)?"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15":("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/"+(_cm?_cm[1]:"131.0.0.0")+" Safari/537.36");Object.defineProperty(navigator,"userAgent",{get:()=>_u,configurable:true});Object.defineProperty(navigator,"appVersion",{get:()=>_u.replace(/^Mozilla\\\\//,""),configurable:true});}}if(typeof MessageEvent!=="undefined"){const _d=Object.getOwnPropertyDescriptor(MessageEvent.prototype,"data");if(_d&&_d.get){Object.defineProperty(MessageEvent.prototype,"data",{get(){const v=_d.get.call(this);return(v&&typeof v==="object"&&"$scramjet$data"in v)?v.$scramjet$data:v;},configurable:true});}}if(typeof MessagePort!=="undefined"&&MessagePort.prototype.postMessage){const _mp=MessagePort.prototype.postMessage;MessagePort.prototype.postMessage=function(d,t){return arguments.length>1?_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d},t):_mp.call(this,{$scramjet$messagetype:"worker",$scramjet$data:d});};}if(typeof self!=="undefined"&&typeof self.postMessage==="function"&&typeof window==="undefined"){const _sp=self.postMessage.bind(self);self.postMessage=globalThis.postMessage=function(d,t){return arguments.length>1?_sp({$scramjet$messagetype:"worker",$scramjet$data:d},t):_sp({$scramjet$messagetype:"worker",$scramjet$data:d});};}}catch(_){}})();\\n`;'
         'globalThis.Blob=new Proxy(_OrigBlob,{construct(target,args,newTarget){try{const parts=args[0],opts=args[1];if(Array.isArray(parts)&&parts.length>0&&typeof parts[0]==="string"&&(String(opts?.type||"").includes("javascript")||parts[0].includes("onmessage")||parts[0].includes("onconnect"))){args=[[_wShim,...parts],opts];}}catch(_){}return Reflect.construct(target,args,newTarget);}});'
         '}}catch(_){}\n'
     )
@@ -4133,13 +4133,6 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:#ffffff;co
                 headers: [...apiResp.headers.entries()],
                 status: apiResp.status,
                 statusText: apiResp.statusText || "OK",
-              }};
-            }} else if (apiResp && apiResp.status >= 400 && apiResp.status < 500 && apiCt.includes("json") && apiHost === "playback.api.streaks.jp") {{
-              return {{
-                body: m === "HEAD" ? new ArrayBuffer(0) : await apiResp.arrayBuffer(),
-                headers: [...apiResp.headers.entries()],
-                status: apiResp.status,
-                statusText: apiResp.statusText || "Error",
               }};
             }}
           }} catch (_) {{

@@ -68,11 +68,17 @@ class SoundBuffer{
 				throw err2
 			}).catch(err3 => {
 				if (file.url && file.url.endsWith(".ogg")) {
+					var mp3Url = file.url.slice(0, -4) + ".mp3"
 					var wavUrl = file.url.slice(0, -4) + ".wav"
-					return fetch(wavUrl).then(r => {
-						if (!r.ok) throw err3
+					return fetch(mp3Url).then(r => {
+						if (!r.ok) throw new Error("mp3 fallback status " + r.status)
 						return r.arrayBuffer()
-					}).then(wavBuf => tryDecode(wavBuf, this.audioDecoder))
+					}).then(mp3Buf => tryDecode(mp3Buf, this.audioDecoder)).catch(() => {
+						return fetch(wavUrl).then(r => {
+							if (!r.ok) throw err3
+							return r.arrayBuffer()
+						}).then(wavBuf => tryDecode(wavBuf, this.audioDecoder))
+					})
 				}
 				throw err3
 			}).catch(error => {
@@ -166,20 +172,26 @@ class SoundBuffer{
 				}
 			})
 		}
-		this._oggmentedPromise.then(oggmented => {
-			try {
-				oggmented.decodeOggData(buffer, resolve, err => {
+		const runDecode = () => new Promise((res, rej) => {
+			this._oggmentedPromise.then(oggmented => {
+				try {
+					oggmented.decodeOggData(buffer, res, err => {
+						this._oggmentedPromise = null
+						rej(err)
+					})
+				} catch (e) {
 					this._oggmentedPromise = null
-					reject(err)
-				})
-			} catch (e) {
+					rej(e)
+				}
+			}, err => {
 				this._oggmentedPromise = null
-				reject(e)
-			}
-		}, err => {
-			this._oggmentedPromise = null
-			reject(err)
+				rej(err)
+			})
 		})
+		const prev = this._oggQueue || Promise.resolve()
+		const next = prev.catch(() => {}).then(runDecode)
+		this._oggQueue = next
+		next.then(resolve, reject)
 	}
 }
 class SoundGain{
