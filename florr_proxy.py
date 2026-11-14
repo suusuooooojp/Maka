@@ -622,7 +622,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v6"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v7"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -1041,15 +1041,37 @@ async def florr_launcher(request: Request):
             ws.binaryType = 'arraybuffer';
             var settled = false;
             var opened = false;
-            var firstPacketLogged = false;
+            var sendCount = 0;
+            var recvCount = 0;
+            var silentTimer = null;
             var pendingQueue = [];
+
+            function dataByteLen(d) {{
+              if (!d) return 0;
+              if (typeof d.byteLength === 'number') return d.byteLength;
+              if (typeof d.size === 'number') return d.size;
+              if (typeof d === 'string') return d.length;
+              return 0;
+            }}
+
+            function clearSilentTimer() {{
+              if (silentTimer) {{
+                clearTimeout(silentTimer);
+                silentTimer = null;
+              }}
+            }}
 
             ws.onopen = function () {{
               opened = true;
               addLog('ok', '[TOP-WS-BRIDGE] open ' + u.href + (ws.protocol ? ' proto=' + ws.protocol : ''));
               while (pendingQueue.length > 0) {{
+                var qItem = pendingQueue.shift();
+                sendCount++;
+                if (sendCount <= 5) {{
+                  addLog('info', '[TOP-WS-BRIDGE] send #' + sendCount + ' bytes=' + dataByteLen(qItem) + ' ' + u.host);
+                }}
                 try {{
-                  ws.send(pendingQueue.shift());
+                  ws.send(qItem);
                 }} catch (_) {{}}
               }}
               if (!settled) {{
@@ -1062,10 +1084,12 @@ async def florr_launcher(request: Request):
 
             ws.onmessage = function (ev) {{
               var data = ev.data;
-              if (!firstPacketLogged) {{
-                firstPacketLogged = true;
-                var size = data instanceof ArrayBuffer ? data.byteLength : (typeof data === 'string' ? data.length : 0);
-                addLog('ok', '[TOP-WS-BRIDGE] first packet bytes=' + size + ' ' + u.href);
+              recvCount++;
+              if (recvCount >= 2) {{
+                clearSilentTimer();
+              }}
+              if (recvCount <= 5) {{
+                addLog('ok', '[TOP-WS-BRIDGE] recv #' + recvCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
               }}
               if (data instanceof Blob) {{
                 data.arrayBuffer().then(function (ab) {{
@@ -1081,9 +1105,10 @@ async def florr_launcher(request: Request):
             }};
 
             ws.onclose = function (ev) {{
+              clearSilentTimer();
               var code = ev && typeof ev.code === 'number' ? ev.code : 1000;
               var reason = ev && ev.reason ? ev.reason : '';
-              addLog(code === 1000 || code === 1005 ? 'info' : 'warn', '[TOP-WS-BRIDGE] close code=' + code + (reason ? ' reason=' + reason : '') + ' ' + u.href);
+              addLog(code === 1000 || code === 1005 ? 'info' : 'warn', '[TOP-WS-BRIDGE] close code=' + code + (reason ? ' reason=' + reason : '') + ' sent=' + sendCount + ' recv=' + recvCount + ' ' + u.href);
               if (!settled) {{
                 settled = true;
                 try {{
@@ -1097,6 +1122,7 @@ async def florr_launcher(request: Request):
             }};
 
             ws.onerror = function () {{
+              clearSilentTimer();
               addLog('error', '[TOP-WS-BRIDGE] error ' + u.href);
               if (!settled) {{
                 settled = true;
@@ -1108,6 +1134,17 @@ async def florr_launcher(request: Request):
 
             var sendFn = function (data) {{
               if (ws.readyState === WebSocket.OPEN) {{
+                sendCount++;
+                if (sendCount <= 5) {{
+                  addLog('info', '[TOP-WS-BRIDGE] send #' + sendCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
+                }}
+                if (sendCount === 2 && recvCount <= 1 && !silentTimer) {{
+                  silentTimer = setTimeout(function () {{
+                    if (ws.readyState === WebSocket.OPEN && recvCount <= 1) {{
+                      addLog('warn', '[TOP-WS-BRIDGE] upstream silent 4s after send#2 (sent=' + sendCount + ', recv=' + recvCount + ') ' + u.host);
+                    }}
+                  }}, 4000);
+                }}
                 ws.send(data);
               }} else if (ws.readyState === WebSocket.CONNECTING) {{
                 pendingQueue.push(data);
