@@ -1,16 +1,19 @@
 """Florr.io proxy rebuilt cleanly from scratch.
 
-Zero custom UI: renders only a fullscreen iframe running native florr.io via
-Scramjet 2.x + Wisp for HTTP assets, direct/relay fetch for api.n.m28.io,
-a native WebSocket bridge (/florr_ws_bridge) with Origin: https://florr.io
-for wss://*.s.m28n.net/ game traffic, and same-frame fallback for blocked
-window.open popups (Discord OAuth on iPadOS WebKit).
+Features:
+- Fullscreen native florr.io iframe via Scramjet 2.x + Wisp
+- Patched /florr/scramjet.js for iPadOS WebKit regex compatibility ((?i:url) -> (?:[uU][rR][lL]))
+- Patched /florr/controller.api.js with IndexedDB timeout/blocked guard so controller.wait() never stalls
+- Multi-Wisp probing (external Wisp fallback -> same-origin /wisp/) + Epoxy/Libcurl transport fallback
+- Native WebSocket bridge (/florr_ws_bridge) setting Origin: https://florr.io for wss://*.s.m28n.net/
+- Direct CORS fetch + /florr/http-relay fallback for api.n.m28.io
+- Same-frame popup fallback for blocked window.open (Discord OAuth on iPadOS WebKit)
+- Collapsible bottom diagnostic log panel (#florr-log-panel) with copy/clear/collapse controls
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import ssl
 from urllib.parse import urlparse
 
@@ -49,6 +52,23 @@ _USER_AGENT = (
     "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15"
 )
 
+_INDEXEDDB_ORIG = (
+    'function g(){return p||(p=new Promise((e,t)=>{let r=indexedDB.open("__scramjet_controller",1);'
+    'r.onupgradeneeded=()=>{let e=r.result;e.objectStoreNames.contains(h)||e.createObjectStore(h)},'
+    'r.onsuccess=()=>e(r.result),r.onerror=()=>t(r.error??Error("Failed to open cookie database"))}))}'
+)
+
+_INDEXEDDB_PATCHED = (
+    'function g(){return p||(p=new Promise((e,t)=>{try{let o=!1,'
+    'n=setTimeout(()=>{o||(o=!0,t(Error("IndexedDB timeout")))},1500),'
+    'r=indexedDB.open("__scramjet_controller",1);'
+    'r.onupgradeneeded=()=>{let e=r.result;e.objectStoreNames.contains(h)||e.createObjectStore(h)},'
+    'r.onsuccess=()=>{o||(o=!0,clearTimeout(n),e(r.result))},'
+    'r.onerror=()=>{o||(o=!0,clearTimeout(n),t(r.error??Error("Failed to open cookie database")))},'
+    'r.onblocked=()=>{o||(o=!0,clearTimeout(n),t(Error("IndexedDB blocked")))}'
+    '}catch(e){t(e)}}))}'
+)
+
 
 def _is_allowed_host(host: str, suffixes: tuple[str, ...]) -> bool:
     h = (host or "").lower().rstrip(".")
@@ -80,244 +100,66 @@ def _scramjet_versions() -> tuple[str, str]:
 
 
 async def prewarm_service_cache() -> None:
-    """Warm relay client on startup without blocking."""
     try:
-        _get_relay_client()
-    except Exception:
-        pass
+        import app as host_app
+        await asyncio.gather(
+            host_app.scramjet_asset("scramjet.js"),
+            host_app.scramjet_asset("scramjet.wasm"),
+            host_app.scramjet_asset("scramjet-utils.js"),
+            host_app.scramjet_asset("controller.api.js"),
+            host_app.scramjet_asset("controller.inject.js"),
+            host_app.scramjet_asset("controller.sw.js"),
+            host_app.scramjet_transport_asset("epoxy", "index.mjs"),
+            host_app.scramjet_transport_asset("libcurl", "index.mjs"),
+            return_exceptions=True,
+        )
+    except Exception as exc:
+        print(f"[florr_proxy] prewarm error: {exc!r}")
 
 
-@router.get("/florr", include_in_schema=False)
-async def florr_redirect():
-    return RedirectResponse("/florr/", status_code=307)
+@router.get("/florr/scramjet.js", include_in_schema=False)
+async def florr_scramjet_js():
+    """Serve scramjet.js patched for iPadOS WebKit (replaces (?i:url) inline flag)."""
+    import app as host_app
+
+    resp = await host_app.scramjet_asset("scramjet.js")
+    if resp.status_code != 200:
+        return resp
+    text = bytes(resp.body).decode("utf-8", errors="replace")
+    text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=300"},
+    )
 
 
-@router.get("/florr/", include_in_schema=False)
-async def florr_launcher():
-    sj_ver, ctrl_ver = _scramjet_versions()
-    html = f"""<!doctype html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<title>florr.io</title>
-<style>
-html, body {{
-  margin: 0;
-  padding: 0;
-  width: 100%;
-  height: 100%;
-  background: #000;
-  overflow: hidden;
-  overscroll-behavior: none;
-  -webkit-user-select: none;
-  user-select: none;
-}}
-#florr-frame {{
-  position: fixed;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  display: block;
-  background: #000;
-}}
-</style>
-</head>
-<body>
-<iframe id="florr-frame" allow="autoplay; fullscreen; gamepad; clipboard-read; clipboard-write" allowfullscreen></iframe>
-<script src="/florr/scramjet.js?v={sj_ver}"></script>
-<script src="/scramjet/controller.api.js?v={ctrl_ver}"></script>
-<script>
-(function () {{
-  'use strict';
+@router.get("/florr/controller.api.js", include_in_schema=False)
+async def florr_controller_api_js():
+    """Serve controller.api.js with an IndexedDB timeout guard for iPadOS WebKit."""
+    import app as host_app
 
-  function getWispUrl() {{
-    const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-    return proto + location.host + '/wisp/';
-  }}
-
-  async function ensureServiceWorker() {{
-    if (!('serviceWorker' in navigator)) {{
-      throw new Error('ServiceWorker is not supported');
-    }}
-    const reg = await navigator.serviceWorker.register('/florr/sw-florr.js?v=rebuilt-v2', {{
-      scope: '/florr/',
-      updateViaCache: 'none'
-    }});
-    try {{ await reg.update(); }} catch (_) {{}}
-    await navigator.serviceWorker.ready;
-
-    let sw = reg.active || reg.waiting || reg.installing;
-    if (sw && sw.state !== 'activated') {{
-      await new Promise((resolve) => {{
-        const onChange = () => {{
-          if (sw.state === 'activated' || sw.state === 'redundant') {{
-            sw.removeEventListener('statechange', onChange);
-            resolve();
-          }}
-        }};
-        sw.addEventListener('statechange', onChange);
-        setTimeout(resolve, 2500);
-      }});
-    }}
-
-    sw = reg.active || navigator.serviceWorker.controller;
-    if (!navigator.serviceWorker.controller && sw) {{
-      try {{ sw.postMessage('claim'); }} catch (_) {{}}
-      await new Promise((resolve) => {{
-        const onCtrl = () => {{
-          navigator.serviceWorker.removeEventListener('controllerchange', onCtrl);
-          resolve();
-        }};
-        navigator.serviceWorker.addEventListener('controllerchange', onCtrl);
-        setTimeout(resolve, 1000);
-      }});
-    }}
-    return reg.active || navigator.serviceWorker.controller;
-  }}
-
-  async function createTransport(wispUrl) {{
-    try {{
-      const mod = await import('/scramjet/epoxy/index.mjs');
-      const EpoxyTransport = mod.default;
-      const t = new EpoxyTransport({{ wisp: wispUrl }});
-      if (typeof t.init === 'function') await t.init();
-      return wrapTransport(t);
-    }} catch (err) {{
-      console.warn('[florr] EpoxyTransport failed, falling back to LibcurlClient:', err);
-      const mod = await import('/scramjet/libcurl/index.mjs');
-      const LibcurlClient = mod.default;
-      const t = new LibcurlClient({{ wisp: wispUrl }});
-      if (typeof t.init === 'function') await t.init();
-      return wrapTransport(t);
-    }}
-  }}
-
-  function isGameWsHost(hostname) {{
-    const h = String(hostname || '').toLowerCase();
-    return h.endsWith('.s.m28n.net') || h === 's.m28n.net' || h.endsWith('.m28.io');
-  }}
-
-  function isM28ApiHost(hostname) {{
-    const h = String(hostname || '').toLowerCase();
-    return h === 'api.n.m28.io' || h.endsWith('.m28.io');
-  }}
-
-  function wrapTransport(base) {{
-    return {{
-      get ready() {{ return base.ready; }},
-      async init() {{
-        if (!base.ready && typeof base.init === 'function') await base.init();
-      }},
-      async meta() {{
-        return typeof base.meta === 'function' ? base.meta() : undefined;
-      }},
-      async request(remote, method, body, headers, signal) {{
-        if (remote && isM28ApiHost(remote.hostname) && (method === 'GET' || method === 'HEAD')) {{
-          try {{
-            const direct = await fetch(remote.href, {{ method, signal, mode: 'cors', credentials: 'omit' }});
-            if (direct.ok) {{
-              const buf = await direct.arrayBuffer();
-              return {{
-                body: buf,
-                headers: Array.from(direct.headers.entries()),
-                status: direct.status,
-                statusText: direct.statusText || 'OK'
-              }};
-            }}
-          }} catch (_) {{}}
-          try {{
-            const relayUrl = '/florr/http-relay?url=' + encodeURIComponent(remote.href);
-            const relayed = await fetch(relayUrl, {{ method, signal, credentials: 'same-origin' }});
-            if (relayed.ok) {{
-              const buf = await relayed.arrayBuffer();
-              return {{
-                body: buf,
-                headers: Array.from(relayed.headers.entries()),
-                status: relayed.status,
-                statusText: relayed.statusText || 'OK'
-              }};
-            }}
-          }} catch (_) {{}}
-        }}
-        return base.request(remote, method, body, headers, signal);
-      }},
-      connect(url, protocols, requestHeaders, onopen, onmessage, onclose, onerror) {{
-        if (url && isGameWsHost(url.hostname)) {{
-          const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-          const bridgeUrl = wsProto + location.host + '/florr_ws_bridge?target=' + encodeURIComponent(url.href);
-          const ws = protocols && protocols.length ? new WebSocket(bridgeUrl, protocols) : new WebSocket(bridgeUrl);
-          ws.binaryType = 'arraybuffer';
-          ws.onopen = () => onopen(ws.protocol || '', ws.extensions || '');
-          ws.onmessage = (ev) => onmessage(ev.data);
-          ws.onclose = (ev) => onclose(ev.code || 1000, ev.reason || '');
-          ws.onerror = () => onerror('WebSocket error');
-          return [
-            async (data) => {{
-              if (data instanceof Blob) data = await data.arrayBuffer();
-              if (ws.readyState === WebSocket.OPEN) ws.send(data);
-            }},
-            (code, reason) => {{
-              try {{ ws.close(code || 1000, reason || ''); }} catch (_) {{}}
-            }}
-          ];
-        }}
-        return base.connect(url, protocols, requestHeaders, onopen, onmessage, onclose, onerror);
-      }}
-    }};
-  }}
-
-  async function boot() {{
-    try {{
-      const sw = await ensureServiceWorker();
-      const transport = await createTransport(getWispUrl());
-      const controller = new $scramjetController.Controller({{
-        serviceworker: sw,
-        transport: transport,
-        config: {{
-          prefix: '/florr/~/sj/',
-          scramjetPath: '/florr/scramjet.js?v={sj_ver}',
-          injectPath: '/florr/inject.js',
-          wasmPath: '/scramjet/scramjet.wasm?v={sj_ver}',
-          virtualWasmPath: 'scramjet.wasm.js'
-        }},
-        scramjetConfig: {{
-          flags: {{
-            sourcemaps: false,
-            allowFailedIntercepts: true
-          }}
-        }}
-      }});
-      await controller.wait();
-      const frame = controller.createFrame(document.getElementById('florr-frame'));
-      frame.go('https://florr.io/');
-    }} catch (err) {{
-      console.error('[florr] boot failed:', err);
-    }}
-  }}
-
-  boot();
-}})();
-</script>
-</body>
-</html>
-"""
-    return HTMLResponse(
-        html,
-        headers={
-            "Cache-Control": "no-store, no-cache, must-revalidate",
-        },
+    resp = await host_app.scramjet_asset("controller.api.js")
+    if resp.status_code != 200:
+        return resp
+    text = bytes(resp.body).decode("utf-8", errors="replace")
+    if _INDEXEDDB_ORIG in text:
+        text = text.replace(_INDEXEDDB_ORIG, _INDEXEDDB_PATCHED, 1)
+    return Response(
+        content=text.encode("utf-8"),
+        media_type="application/javascript; charset=utf-8",
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
 @router.get("/florr/sw-florr.js", include_in_schema=False)
 async def florr_service_worker():
-    sj_ver, ctrl_ver = _scramjet_versions()
+    """Dedicated Service Worker for /florr/."""
+    _, ctrl_ver = _scramjet_versions()
     code = f"""importScripts('/scramjet/controller.sw.js?v={ctrl_ver}');
 
-self.addEventListener('install', () => {{
-  self.skipWaiting();
+self.addEventListener('install', (event) => {{
+  event.waitUntil(self.skipWaiting());
 }});
 
 self.addEventListener('activate', (event) => {{
@@ -325,348 +167,814 @@ self.addEventListener('activate', (event) => {{
 }});
 
 self.addEventListener('message', (event) => {{
-  if (event.data === 'claim') {{
-    event.waitUntil(self.clients.claim());
+  if (event.data && event.data.type === 'SKIP_WAITING') {{
+    self.skipWaiting();
   }}
 }});
 
 self.addEventListener('fetch', (event) => {{
   try {{
+    const url = new URL(event.request.url);
+    if (url.origin === self.location.origin) {{
+      if (
+        url.pathname.startsWith('/florr/') ||
+        url.pathname === '/florr' ||
+        url.pathname.startsWith('/florr_ws_bridge') ||
+        url.pathname.startsWith('/scramjet/') ||
+        url.pathname.startsWith('/wisp/')
+      ) {{
+        return;
+      }}
+    }}
     if (typeof $scramjetController !== 'undefined' && $scramjetController.shouldRoute(event)) {{
-      event.respondWith($scramjetController.route(event));
-      return;
+      event.respondWith(
+        Promise.resolve($scramjetController.route(event)).catch((err) => {{
+          return new Response(
+            'Scramjet route error: ' + (err && err.message ? err.message : String(err)),
+            {{ status: 502, headers: {{ 'Content-Type': 'text/plain; charset=utf-8' }} }}
+          );
+        }})
+      );
     }}
   }} catch (err) {{
-    console.error('[florr SW]', err);
-    event.respondWith(new Response('SW Error: ' + (err && err.message ? err.message : String(err)), {{ status: 500 }}));
+    // Fall through to browser default fetch
   }}
 }});
 """
     return Response(
-        code,
-        media_type="application/javascript",
+        content=code,
+        media_type="application/javascript; charset=utf-8",
         headers={
             "Cache-Control": "no-store, no-cache, must-revalidate",
-            "Service-Worker-Allowed": "/florr/",
+            "Service-Worker-Allowed": "/",
         },
-    )
-
-
-_INJECT_HOOK_JS = r"""
-;(function () {
-  'use strict';
-  if (window.__florrHooksInstalled) return;
-  window.__florrHooksInstalled = true;
-
-  const NativeWebSocket = window.WebSocket;
-  const NativeFetch = window.fetch ? window.fetch.bind(window) : null;
-  const NativeOpen = window.open ? window.open.bind(window) : null;
-
-  function isGameWsTarget(rawUrl) {
-    try {
-      const u = new URL(String(rawUrl), location.href);
-      const h = (u.hostname || '').toLowerCase();
-      return (
-        (u.protocol === 'wss:' || u.protocol === 'ws:') &&
-        (h.endsWith('.s.m28n.net') || h === 's.m28n.net' || h.endsWith('.m28.io'))
-      );
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function extractRealUrlFromProxied(rawUrl) {
-    try {
-      const s = String(rawUrl || '');
-      const m = s.match(/\/florr\/~\/sj\/[^/]+\/(.+)$/);
-      if (m) {
-        const decoded = decodeURIComponent(m[1]);
-        if (/^https?:\/\//i.test(decoded)) return decoded;
-      }
-      if (/^wss?:\/\//i.test(s) || /^https?:\/\//i.test(s)) return s;
-    } catch (_) {}
-    return String(rawUrl || '');
-  }
-
-  function getFramePrefix() {
-    const m = location.pathname.match(/^(\/florr\/~\/sj\/[^/]+\/)/);
-    return m ? m[1] : '/florr/~/sj/';
-  }
-
-  function toProxiedUrl(rawUrl) {
-    const s = String(rawUrl || '');
-    if (!s) return s;
-    if (s.startsWith('/florr/~/sj/') || s.startsWith(location.origin + '/florr/~/sj/')) {
-      return s;
-    }
-    try {
-      const resolved = new URL(s, getRealBaseHref()).href;
-      if (/^https?:\/\//i.test(resolved)) {
-        return getFramePrefix() + encodeURIComponent(resolved);
-      }
-    } catch (_) {}
-    return s;
-  }
-
-  function getRealBaseHref() {
-    const extracted = extractRealUrlFromProxied(location.href);
-    if (/^https?:\/\//i.test(extracted)) return extracted;
-    return 'https://florr.io/';
-  }
-
-  function installRuntimeHooks() {
-    const ScramjetWS = window.WebSocket;
-    function FlorrWebSocket(url, protocols) {
-      const realUrl = extractRealUrlFromProxied(url);
-      if (isGameWsTarget(realUrl)) {
-        const wsProto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-        const bridgeUrl = wsProto + location.host + '/florr_ws_bridge?target=' + encodeURIComponent(realUrl);
-        const ws = protocols !== undefined
-          ? new NativeWebSocket(bridgeUrl, protocols)
-          : new NativeWebSocket(bridgeUrl);
-        try {
-          Object.defineProperty(ws, 'url', {
-            get: () => realUrl,
-            configurable: true
-          });
-        } catch (_) {}
-        return ws;
-      }
-      return protocols !== undefined
-        ? new ScramjetWS(url, protocols)
-        : new ScramjetWS(url);
-    }
-    FlorrWebSocket.prototype = NativeWebSocket.prototype;
-    FlorrWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
-    FlorrWebSocket.OPEN = NativeWebSocket.OPEN;
-    FlorrWebSocket.CLOSING = NativeWebSocket.CLOSING;
-    FlorrWebSocket.CLOSED = NativeWebSocket.CLOSED;
-    try {
-      window.WebSocket = FlorrWebSocket;
-    } catch (_) {}
-
-    const ScramjetFetch = window.fetch ? window.fetch.bind(window) : NativeFetch;
-    if (NativeFetch && ScramjetFetch) {
-      window.fetch = async function (input, init) {
-        try {
-          const raw = typeof input === 'string' ? input : (input && input.url ? input.url : '');
-          const real = extractRealUrlFromProxied(raw);
-          const u = new URL(real, getRealBaseHref());
-          const method = ((init && init.method) || (input && input.method) || 'GET').toUpperCase();
-          if (u.hostname === 'api.n.m28.io' && (method === 'GET' || method === 'HEAD')) {
-            try {
-              const direct = await NativeFetch(u.href, { method, mode: 'cors', credentials: 'omit' });
-              if (direct.ok) return direct;
-            } catch (_) {}
-            try {
-              const relay = await NativeFetch('/florr/http-relay?url=' + encodeURIComponent(u.href), { method, credentials: 'same-origin' });
-              if (relay.ok) return relay;
-            } catch (_) {}
-          }
-        } catch (_) {}
-        return ScramjetFetch(input, init);
-      };
-    }
-
-    const ScramjetOpen = window.open ? window.open.bind(window) : NativeOpen;
-    window.open = function (url, target, features) {
-      if (!url) {
-        return ScramjetOpen ? ScramjetOpen(url, target, features) : null;
-      }
-      const proxied = toProxiedUrl(url);
-      let win = null;
-      try {
-        if (NativeOpen) {
-          win = NativeOpen(proxied, target || '_blank');
-        }
-      } catch (_) {
-        win = null;
-      }
-      if (win && !win.closed) {
-        return win;
-      }
-      // iPadOS WebKit blocks iframe/async window.open: navigate in-frame without custom UI
-      try {
-        window.location.assign(proxied);
-      } catch (_) {
-        window.location.href = proxied;
-      }
-      return null;
-    };
-  }
-
-  if (typeof $scramjetController !== 'undefined' && typeof $scramjetController.load === 'function') {
-    const origCtrl = $scramjetController;
-    const origLoad = origCtrl.load.bind(origCtrl);
-    $scramjetController = Object.assign({}, origCtrl, {
-      load: function (opts) {
-        const res = origLoad(opts);
-        installRuntimeHooks();
-        return res;
-      }
-    });
-  } else {
-    installRuntimeHooks();
-  }
-})();
-"""
-
-_PATCHED_SCRAMJET_JS: bytes | None = None
-
-
-@router.get("/florr/scramjet.js", include_in_schema=False)
-async def florr_scramjet_js():
-    global _PATCHED_SCRAMJET_JS
-    if _PATCHED_SCRAMJET_JS is None:
-        import app as host_app
-        base_resp = await host_app.scramjet_asset("scramjet.js")
-        if base_resp.status_code != 200:
-            return base_resp
-        text = base_resp.body.decode("utf-8", errors="replace")
-        # iPadOS / Safari WebKit throws SyntaxError on (?i:url)
-        text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
-        _PATCHED_SCRAMJET_JS = text.encode("utf-8")
-    return Response(
-        _PATCHED_SCRAMJET_JS,
-        media_type="application/javascript",
-        headers={"Cache-Control": "public, max-age=3600"},
     )
 
 
 @router.get("/florr/inject.js", include_in_schema=False)
 async def florr_inject_js():
+    """Serve Scramjet controller.inject.js with Florr.io hooks and parent log forwarding."""
     import app as host_app
-    base_resp = await host_app.scramjet_asset("controller.inject.js")
-    if base_resp.status_code != 200:
-        return base_resp
-    combined = base_resp.body + b"\n" + _INJECT_HOOK_JS.encode("utf-8")
+
+    resp = await host_app.scramjet_asset("controller.inject.js")
+    if resp.status_code != 200:
+        return resp
+    base_code = bytes(resp.body).decode("utf-8", errors="replace")
+
+    hook_code = """
+;(function () {
+  if (window.__florrInjectApplied) return;
+  window.__florrInjectApplied = true;
+
+  var WS_HOSTS = ['s.m28n.net', 'm28n.net', 'm28.io', 'florr.io'];
+  var RELAY_HOSTS = ['api.n.m28.io', 'm28.io'];
+
+  function postLog(level, msg) {
+    try {
+      if (window.parent && window.parent !== window) {
+        window.parent.postMessage({
+          __florr_log: {
+            level: level || 'info',
+            msg: String(msg || '')
+          }
+        }, '*');
+      }
+    } catch (_) {}
+  }
+
+  function matchHost(rawUrl, suffixes) {
+    try {
+      var u = new URL(String(rawUrl), window.location.href);
+      var h = (u.hostname || '').toLowerCase();
+      for (var i = 0; i < suffixes.length; i++) {
+        var s = suffixes[i];
+        if (h === s || h.endsWith('.' + s)) return u;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function unwrapScramjetUrl(rawUrl) {
+    try {
+      var s = String(rawUrl || '');
+      var idx = s.indexOf('/~/sj/');
+      if (idx !== -1) {
+        return decodeURIComponent(s.slice(idx + 6));
+      }
+      return s;
+    } catch (_) {
+      return String(rawUrl || '');
+    }
+  }
+
+  window.addEventListener('error', function (ev) {
+    var detail = ev && ev.message ? ev.message : 'Script/Resource error';
+    if (ev && ev.filename) detail += ' @ ' + ev.filename + ':' + (ev.lineno || 0);
+    postLog('error', '[IFRAME-ERR] ' + detail);
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (ev) {
+    var r = ev && ev.reason;
+    var msg = r && r.message ? r.message : String(r || 'unknown rejection');
+    postLog('error', '[IFRAME-REJ] ' + msg);
+  });
+
+  try {
+    var origErr = console.error;
+    console.error = function () {
+      try {
+        var parts = [];
+        for (var i = 0; i < arguments.length; i++) {
+          parts.push(typeof arguments[i] === 'string' ? arguments[i] : String(arguments[i]));
+        }
+        postLog('error', '[console.error] ' + parts.join(' '));
+      } catch (_) {}
+      return origErr.apply(console, arguments);
+    };
+  } catch (_) {}
+
+  var NativeWS = window.WebSocket;
+  var NativeFetch = window.fetch ? window.fetch.bind(window) : null;
+  var NativeOpen = window.open ? window.open.bind(window) : null;
+
+  function makeProxiedUrl(targetUrl) {
+    try {
+      if (typeof $scramjetController !== 'undefined' && typeof $scramjetController.encodeUrl === 'function') {
+        return $scramjetController.encodeUrl(targetUrl);
+      }
+    } catch (_) {}
+    return '/~/sj/' + encodeURIComponent(targetUrl);
+  }
+
+  function installRuntimeHooks(win) {
+    if (!win || win.__florrHooksDone) return;
+    win.__florrHooksDone = true;
+
+    try {
+      var OrigWS = win.WebSocket || NativeWS;
+      if (OrigWS) {
+        var HookedWS = function (url, protocols) {
+          var targetStr = unwrapScramjetUrl(url);
+          var parsed = matchHost(targetStr, WS_HOSTS);
+          if (parsed && (parsed.protocol === 'wss:' || parsed.protocol === 'ws:')) {
+            var wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            var bridgeUrl = wsProto + '//' + window.location.host + '/florr_ws_bridge?target=' + encodeURIComponent(parsed.href);
+            postLog('info', '[WS-BRIDGE] connect ' + parsed.href);
+            var ws = protocols !== undefined ? new OrigWS(bridgeUrl, protocols) : new OrigWS(bridgeUrl);
+            var loggedFirst = false;
+            ws.addEventListener('open', function () {
+              postLog('ok', '[WS-BRIDGE] open ' + parsed.host);
+            });
+            ws.addEventListener('message', function (ev) {
+              if (!loggedFirst) {
+                loggedFirst = true;
+                var size = ev.data && ev.data.byteLength !== undefined ? ev.data.byteLength : (ev.data ? String(ev.data).length : 0);
+                postLog('ok', '[WS-BRIDGE] first packet bytes=' + size);
+              }
+            });
+            ws.addEventListener('close', function (ev) {
+              postLog('warn', '[WS-BRIDGE] close code=' + ev.code + ' reason=' + (ev.reason || '-'));
+            });
+            ws.addEventListener('error', function () {
+              postLog('error', '[WS-BRIDGE] error ' + parsed.host);
+            });
+            return ws;
+          }
+          return protocols !== undefined ? new OrigWS(url, protocols) : new OrigWS(url);
+        };
+        HookedWS.prototype = OrigWS.prototype;
+        HookedWS.CONNECTING = OrigWS.CONNECTING;
+        HookedWS.OPEN = OrigWS.OPEN;
+        HookedWS.CLOSING = OrigWS.CLOSING;
+        HookedWS.CLOSED = OrigWS.CLOSED;
+        win.WebSocket = HookedWS;
+      }
+    } catch (e) {
+      postLog('error', '[HOOK-WS] ' + (e && e.message ? e.message : String(e)));
+    }
+
+    try {
+      var origFetch = win.fetch ? win.fetch.bind(win) : NativeFetch;
+      if (origFetch) {
+        win.fetch = function (input, init) {
+          var rawUrl = typeof input === 'string' ? input : (input && input.url ? input.url : '');
+          var targetStr = unwrapScramjetUrl(rawUrl);
+          var parsed = matchHost(targetStr, RELAY_HOSTS);
+          if (parsed && (!init || !init.method || String(init.method).toUpperCase() === 'GET')) {
+            postLog('info', '[FETCH] direct ' + parsed.href);
+            return origFetch(parsed.href, {
+              method: 'GET',
+              mode: 'cors',
+              credentials: 'omit',
+              cache: 'no-store'
+            }).then(function (resp) {
+              if (resp && resp.ok) {
+                postLog('ok', '[FETCH] direct OK ' + resp.status + ' ' + parsed.host);
+                return resp;
+              }
+              throw new Error('HTTP ' + (resp ? resp.status : 0));
+            }).catch(function (err) {
+              postLog('warn', '[FETCH] direct failed (' + (err && err.message ? err.message : err) + '), using relay');
+              var relayUrl = '/florr/http-relay?url=' + encodeURIComponent(parsed.href);
+              return origFetch(relayUrl, { credentials: 'same-origin' });
+            });
+          }
+          return origFetch(input, init);
+        };
+      }
+    } catch (e) {
+      postLog('error', '[HOOK-FETCH] ' + (e && e.message ? e.message : String(e)));
+    }
+
+    try {
+      var origOpen = win.open ? win.open.bind(win) : NativeOpen;
+      win.open = function (url, target, features) {
+        var targetStr = unwrapScramjetUrl(url || '');
+        postLog('info', '[OPEN] ' + targetStr + ' target=' + (target || '_blank'));
+        var popup = null;
+        try {
+          if (origOpen) {
+            popup = origOpen(url, target, features);
+          }
+        } catch (err) {
+          postLog('warn', '[OPEN] native error: ' + (err && err.message ? err.message : String(err)));
+        }
+        if (!popup && targetStr) {
+          postLog('warn', '[OPEN] popup blocked, navigating in-frame -> ' + targetStr);
+          try {
+            win.location.assign(makeProxiedUrl(targetStr));
+          } catch (_) {}
+        }
+        return popup;
+      };
+    } catch (e) {
+      postLog('error', '[HOOK-OPEN] ' + (e && e.message ? e.message : String(e)));
+    }
+  }
+
+  installRuntimeHooks(window);
+
+  try {
+    if (typeof $scramjetController !== 'undefined' && $scramjetController && typeof $scramjetController.load === 'function') {
+      var origCtrl = $scramjetController;
+      var origLoad = origCtrl.load.bind(origCtrl);
+      $scramjetController = Object.assign({}, origCtrl, {
+        load: async function (ctx) {
+          postLog('info', '[SJ] $scramjetController.load start ' + window.location.href);
+          var res = await origLoad(ctx);
+          installRuntimeHooks(window);
+          postLog('ok', '[SJ] $scramjetController.load complete');
+          return res;
+        }
+      });
+    }
+  } catch (e) {
+    postLog('error', '[SJ-WRAP] ' + (e && e.message ? e.message : String(e)));
+  }
+
+  postLog('ok', '[INJECT] ready at ' + window.location.href);
+})();
+"""
+    combined = base_code + "\n" + hook_code
     return Response(
-        combined,
-        media_type="application/javascript",
+        content=combined.encode("utf-8"),
+        media_type="application/javascript; charset=utf-8",
         headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
     )
 
 
-@router.api_route("/florr/http-relay", methods=["GET", "HEAD"], include_in_schema=False)
-async def florr_http_relay(request: Request, url: str = ""):
+@router.get("/florr/http-relay", include_in_schema=False)
+async def florr_http_relay(url: str = ""):
+    """HTTP GET relay for api.n.m28.io / florr.io when direct browser fetch fails."""
+    if not url:
+        return Response(content="Missing url", status_code=400, media_type="text/plain")
     parsed = urlparse(url)
-    if parsed.scheme not in ("http", "https") or not _is_allowed_host(
-        parsed.hostname or "", _ALLOWED_RELAY_SUFFIXES
-    ):
-        return Response("forbidden target", status_code=403)
+    if parsed.scheme not in ("http", "https") or not _is_allowed_host(parsed.hostname or "", _ALLOWED_RELAY_SUFFIXES):
+        return Response(content="Forbidden target host", status_code=403, media_type="text/plain")
 
-    client = _get_relay_client()
     try:
-        resp = await client.request(
-            request.method,
+        client = _get_relay_client()
+        resp = await client.get(
             url,
             headers={
                 "User-Agent": _USER_AGENT,
                 "Origin": "https://florr.io",
                 "Referer": "https://florr.io/",
+                "Accept": "*/*",
+            },
+        )
+        content_type = resp.headers.get("content-type", "application/octet-stream")
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=content_type,
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-store",
             },
         )
     except Exception as exc:
-        return Response(f"relay error: {exc}", status_code=502)
-
-    out_headers = {
-        "Access-Control-Allow-Origin": "*",
-        "Cache-Control": "no-store",
-    }
-    ct = resp.headers.get("content-type")
-    if ct:
-        out_headers["Content-Type"] = ct
-    return Response(
-        b"" if request.method == "HEAD" else resp.content,
-        status_code=resp.status_code,
-        headers=out_headers,
-    )
+        return Response(
+            content=f"Relay error: {exc!r}",
+            status_code=502,
+            media_type="text/plain",
+            headers={"Access-Control-Allow-Origin": "*"},
+        )
 
 
 @router.websocket("/florr_ws_bridge")
 async def florr_ws_bridge(websocket: WebSocket):
-    target = (websocket.query_params.get("target") or "").strip()
+    """WebSocket bridge for wss://*.s.m28n.net/ setting Origin: https://florr.io."""
+    target = websocket.query_params.get("target", "")
     parsed = urlparse(target)
-    if parsed.scheme not in ("ws", "wss") or not _is_allowed_host(
-        parsed.hostname or "", _ALLOWED_WS_SUFFIXES
-    ):
-        await websocket.close(code=1008, reason="forbidden target")
+    if parsed.scheme not in ("ws", "wss") or not _is_allowed_host(parsed.hostname or "", _ALLOWED_WS_SUFFIXES):
+        await websocket.close(code=1008, reason="Disallowed WebSocket target")
         return
 
-    requested_protocols = [
-        p.strip()
-        for p in websocket.headers.get("sec-websocket-protocol", "").split(",")
-        if p.strip()
-    ]
+    await websocket.accept()
+    print(f"[florr_ws_bridge] connecting -> {target}")
 
     try:
-        upstream = await websockets.connect(
-            target,
-            origin="https://florr.io",
-            subprotocols=requested_protocols or None,
-            additional_headers={"User-Agent": _USER_AGENT},
-            ssl=_TLS_NO_VERIFY if parsed.scheme == "wss" else None,
-            compression="deflate",
-            open_timeout=10,
-            ping_interval=20,
-            ping_timeout=20,
-            max_size=None,
-        )
+        connect_kwargs = {
+            "origin": "https://florr.io",
+            "user_agent_header": _USER_AGENT,
+            "open_timeout": 10,
+            "max_size": None,
+        }
+        if parsed.scheme == "wss":
+            connect_kwargs["ssl"] = _TLS_NO_VERIFY
+
+        async with websockets.connect(target, **connect_kwargs) as upstream:
+            print(f"[florr_ws_bridge] connected -> {target}")
+
+            async def client_to_upstream():
+                try:
+                    while True:
+                        msg = await websocket.receive()
+                        msg_type = msg.get("type")
+                        if msg_type == "websocket.disconnect":
+                            break
+                        if msg.get("bytes") is not None:
+                            await upstream.send(msg["bytes"])
+                        elif msg.get("text") is not None:
+                            await upstream.send(msg["text"])
+                except WebSocketDisconnect:
+                    pass
+                except Exception:
+                    pass
+
+            async def upstream_to_client():
+                try:
+                    async for data in upstream:
+                        if isinstance(data, (bytes, bytearray)):
+                            await websocket.send_bytes(bytes(data))
+                        else:
+                            await websocket.send_text(str(data))
+                except Exception:
+                    pass
+
+            t1 = asyncio.create_task(client_to_upstream())
+            t2 = asyncio.create_task(upstream_to_client())
+            done, pending = await asyncio.wait({t1, t2}, return_when=asyncio.FIRST_COMPLETED)
+            for p in pending:
+                p.cancel()
+            for d in done:
+                try:
+                    d.result()
+                except Exception:
+                    pass
     except Exception as exc:
-        print(f"[florr_ws_bridge] upstream connect failed ({target}): {exc}", flush=True)
-        await websocket.close(code=1011, reason="upstream connect failed")
-        return
-
-    try:
-        await websocket.accept(subprotocol=upstream.subprotocol)
-    except Exception:
-        await upstream.close()
-        return
-
-    async def client_to_upstream():
+        print(f"[florr_ws_bridge] error ({target}): {exc!r}")
         try:
-            while True:
-                msg = await websocket.receive()
-                msg_type = msg.get("type")
-                if msg_type == "websocket.disconnect":
-                    break
-                data_bytes = msg.get("bytes")
-                if data_bytes is not None:
-                    await upstream.send(data_bytes)
-                else:
-                    data_text = msg.get("text")
-                    if data_text is not None:
-                        await upstream.send(data_text)
-        except WebSocketDisconnect:
-            pass
+            await websocket.close(code=1011, reason="Upstream WebSocket error")
         except Exception:
             pass
-
-    async def upstream_to_client():
-        try:
-            async for data in upstream:
-                if isinstance(data, (bytes, bytearray, memoryview)):
-                    await websocket.send_bytes(bytes(data))
-                else:
-                    await websocket.send_text(str(data))
-        except Exception:
-            pass
-
-    t1 = asyncio.create_task(client_to_upstream())
-    t2 = asyncio.create_task(upstream_to_client())
-    try:
-        done, pending = await asyncio.wait(
-            {t1, t2}, return_when=asyncio.FIRST_COMPLETED
-        )
-        for p in pending:
-            p.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
     finally:
-        try:
-            await upstream.close()
-        except Exception:
-            pass
         try:
             await websocket.close()
         except Exception:
             pass
+
+
+@router.get("/florr", include_in_schema=False)
+async def florr_redirect():
+    return RedirectResponse(url="/florr/", status_code=302)
+
+
+@router.get("/florr/", include_in_schema=False)
+async def florr_launcher(request: Request):
+    sj_ver, ctrl_ver = _scramjet_versions()
+    v_tag = f"{sj_ver}-{ctrl_ver}-v1"
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>Florr.io</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    html, body {{
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }}
+    #florr-frame {{
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+      background: #000;
+      display: block;
+    }}
+    #florr-log-panel {{
+      position: fixed;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 2147483647;
+      background: rgba(14, 16, 22, 0.92);
+      color: #e5e7eb;
+      border-top: 1px solid rgba(255, 255, 255, 0.16);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+      transition: all 0.18s ease;
+    }}
+    #florr-log-panel[data-collapsed="1"] {{
+      left: auto;
+      right: 10px;
+      bottom: max(10px, env(safe-area-inset-bottom, 10px));
+      width: auto;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      border-radius: 999px;
+      padding-bottom: 0;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    }}
+    #florr-log-panel[data-collapsed="1"] #florr-log-body,
+    #florr-log-panel[data-collapsed="1"] .log-extra-btn {{
+      display: none;
+    }}
+    #florr-log-header {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 6px 10px;
+      min-height: 34px;
+      font-size: 12px;
+      user-select: none;
+      -webkit-user-select: none;
+    }}
+    .log-title-wrap {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+    }}
+    .log-dot {{
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #f59e0b;
+      flex-shrink: 0;
+    }}
+    .log-dot.ok {{ background: #10b981; }}
+    .log-dot.err {{ background: #ef4444; }}
+    #florr-log-status {{
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 600;
+      color: #f3f4f6;
+    }}
+    .log-actions {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }}
+    .log-btn {{
+      appearance: none;
+      -webkit-appearance: none;
+      border: 1px solid rgba(255, 255, 255, 0.22);
+      background: rgba(255, 255, 255, 0.08);
+      color: #f9fafb;
+      border-radius: 6px;
+      padding: 3px 8px;
+      font-size: 11px;
+      line-height: 1.3;
+      cursor: pointer;
+    }}
+    .log-btn:active {{
+      background: rgba(255, 255, 255, 0.2);
+    }}
+    #florr-log-panel[data-collapsed="1"] #florr-log-toggle {{
+      border: 0;
+      background: transparent;
+      padding: 2px 4px;
+    }}
+    #florr-log-body {{
+      height: 190px;
+      max-height: 34vh;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 6px 10px 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }}
+    .log-line {{ margin: 0 0 2px; }}
+    .log-line.info {{ color: #d1d5db; }}
+    .log-line.ok {{ color: #6ee7b7; }}
+    .log-line.warn {{ color: #fcd34d; }}
+    .log-line.error {{ color: #fca5a5; }}
+  </style>
+</head>
+<body>
+  <iframe id="florr-frame" allow="fullscreen; autoplay; clipboard-read; clipboard-write; gamepad" allowfullscreen></iframe>
+
+  <div id="florr-log-panel" data-collapsed="0">
+    <div id="florr-log-header">
+      <div class="log-title-wrap">
+        <span id="florr-log-dot" class="log-dot"></span>
+        <span id="florr-log-status">Florr.io 起動中...</span>
+      </div>
+      <div class="log-actions">
+        <button id="florr-log-copy" class="log-btn log-extra-btn" type="button">コピー</button>
+        <button id="florr-log-clear" class="log-btn log-extra-btn" type="button">クリア</button>
+        <button id="florr-log-toggle" class="log-btn" type="button">▼ 収納</button>
+      </div>
+    </div>
+    <div id="florr-log-body"></div>
+  </div>
+
+  <script src="/florr/controller.api.js?v={v_tag}"></script>
+  <script>
+  (function () {{
+    var V_TAG = {json.dumps(v_tag)};
+    var TARGET_URL = 'https://florr.io/';
+    var START_MS = Date.now();
+
+    var frame = document.getElementById('florr-frame');
+    var panel = document.getElementById('florr-log-panel');
+    var logBody = document.getElementById('florr-log-body');
+    var statusEl = document.getElementById('florr-log-status');
+    var dotEl = document.getElementById('florr-log-dot');
+    var toggleBtn = document.getElementById('florr-log-toggle');
+    var copyBtn = document.getElementById('florr-log-copy');
+    var clearBtn = document.getElementById('florr-log-clear');
+
+    var logLines = [];
+    var MAX_LINES = 300;
+
+    function updateToggleText() {{
+      var collapsed = panel.getAttribute('data-collapsed') === '1';
+      toggleBtn.textContent = collapsed ? '▲ ログ (' + logLines.length + ')' : '▼ 収納';
+    }}
+
+    function addLog(level, msg) {{
+      var dt = ((Date.now() - START_MS) / 1000).toFixed(2) + 's';
+      var text = '[' + dt + '] ' + String(msg || '');
+      logLines.push(text);
+      if (logLines.length > MAX_LINES) {{
+        logLines.shift();
+        if (logBody.firstChild) logBody.removeChild(logBody.firstChild);
+      }}
+      var div = document.createElement('div');
+      div.className = 'log-line ' + (level || 'info');
+      div.textContent = text;
+      logBody.appendChild(div);
+      logBody.scrollTop = logBody.scrollHeight;
+      updateToggleText();
+    }}
+
+    function setStatus(text, state) {{
+      statusEl.textContent = text;
+      dotEl.className = 'log-dot' + (state ? ' ' + state : '');
+    }}
+
+    toggleBtn.addEventListener('click', function () {{
+      var collapsed = panel.getAttribute('data-collapsed') === '1';
+      panel.setAttribute('data-collapsed', collapsed ? '0' : '1');
+      updateToggleText();
+    }});
+
+    clearBtn.addEventListener('click', function () {{
+      logLines = [];
+      logBody.textContent = '';
+      updateToggleText();
+    }});
+
+    copyBtn.addEventListener('click', function () {{
+      var full = logLines.join('\\n');
+      if (navigator.clipboard && navigator.clipboard.writeText) {{
+        navigator.clipboard.writeText(full).then(function () {{
+          copyBtn.textContent = 'コピー済';
+          setTimeout(function () {{ copyBtn.textContent = 'コピー'; }}, 1200);
+        }}).catch(function () {{
+          copyBtn.textContent = '失敗';
+          setTimeout(function () {{ copyBtn.textContent = 'コピー'; }}, 1200);
+        }});
+      }}
+    }});
+
+    window.addEventListener('message', function (ev) {{
+      if (ev && ev.data && ev.data.__florr_log) {{
+        var item = ev.data.__florr_log;
+        addLog(item.level || 'info', item.msg || '');
+      }}
+    }});
+
+    window.addEventListener('error', function (ev) {{
+      addLog('error', '[TOP-ERR] ' + (ev && ev.message ? ev.message : 'unknown error'));
+    }});
+
+    window.addEventListener('unhandledrejection', function (ev) {{
+      var r = ev && ev.reason;
+      addLog('error', '[TOP-REJ] ' + (r && r.message ? r.message : String(r)));
+    }});
+
+    function probeWisp(wispUrl, timeoutMs) {{
+      return new Promise(function (resolve) {{
+        var done = false;
+        var ws = null;
+        var timer = setTimeout(function () {{
+          if (done) return;
+          done = true;
+          try {{ if (ws) ws.close(); }} catch (_) {{}}
+          addLog('warn', '[WISP] timeout ' + wispUrl);
+          resolve(false);
+        }}, timeoutMs);
+
+        try {{
+          addLog('info', '[WISP] probing ' + wispUrl);
+          ws = new WebSocket(wispUrl);
+          ws.onopen = function () {{
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            try {{ ws.close(); }} catch (_) {{}}
+            addLog('ok', '[WISP] open OK ' + wispUrl);
+            resolve(true);
+          }};
+          ws.onerror = function () {{
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            addLog('warn', '[WISP] error ' + wispUrl);
+            resolve(false);
+          }};
+        }} catch (e) {{
+          if (!done) {{
+            done = true;
+            clearTimeout(timer);
+            addLog('warn', '[WISP] exception ' + wispUrl + ': ' + (e && e.message ? e.message : String(e)));
+            resolve(false);
+          }}
+        }}
+      }});
+    }}
+
+    async function registerSw() {{
+      if (!('serviceWorker' in navigator)) {{
+        throw new Error('ServiceWorker is not supported in this browser');
+      }}
+      var swUrl = '/florr/sw-florr.js?v=' + encodeURIComponent(V_TAG);
+      addLog('info', '[SW] registering ' + swUrl);
+      var reg = await navigator.serviceWorker.register(swUrl, {{ scope: '/' }});
+      if (reg.waiting) {{
+        try {{ reg.waiting.postMessage({{ type: 'SKIP_WAITING' }}); }} catch (_) {{}}
+      }}
+      var sw = reg.active || reg.installing || reg.waiting;
+      if (sw && sw.state !== 'activated') {{
+        addLog('info', '[SW] waiting activation (state=' + sw.state + ')');
+        await new Promise(function (resolve) {{
+          var t = setTimeout(function () {{
+            addLog('warn', '[SW] activation wait timeout, continuing');
+            resolve();
+          }}, 4000);
+          sw.addEventListener('statechange', function () {{
+            addLog('info', '[SW] state -> ' + sw.state);
+            if (sw.state === 'activated') {{
+              clearTimeout(t);
+              resolve();
+            }}
+          }});
+        }});
+      }}
+      addLog('ok', '[SW] ready scope=' + (reg.scope || '/'));
+      return swUrl;
+    }}
+
+    async function selectTransport() {{
+      var wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      var sameOriginWisp = wsProto + '//' + location.host + '/wisp/';
+      var candidates = [
+        'wss://wisp.mercurywork.shop/',
+        'wss://anura.pro/',
+        sameOriginWisp
+      ];
+
+      var chosenWisp = null;
+      for (var i = 0; i < candidates.length; i++) {{
+        var ok = await probeWisp(candidates[i], i < 2 ? 2500 : 4000);
+        if (ok) {{
+          chosenWisp = candidates[i];
+          break;
+        }}
+      }}
+      if (!chosenWisp) {{
+        chosenWisp = sameOriginWisp;
+        addLog('warn', '[WISP] all probes failed, forcing ' + chosenWisp);
+      }}
+
+      var transportMods = [
+        {{ name: 'EpoxyTransport', path: '/scramjet/epoxy/index.mjs?v=' + encodeURIComponent(V_TAG) }},
+        {{ name: 'LibcurlClient', path: '/scramjet/libcurl/index.mjs?v=' + encodeURIComponent(V_TAG) }}
+      ];
+
+      for (var j = 0; j < transportMods.length; j++) {{
+        var item = transportMods[j];
+        try {{
+          addLog('info', '[TRANSPORT] loading ' + item.name);
+          var mod = await import(item.path);
+          var Cls = mod.default || mod[item.name] || mod.EpoxyTransport || mod.LibcurlClient;
+          if (!Cls) throw new Error('Export not found in ' + item.path);
+          var transport = new Cls({{ wisp: chosenWisp }});
+          addLog('ok', '[TRANSPORT] ' + item.name + ' ready -> ' + chosenWisp);
+          return transport;
+        }} catch (e) {{
+          addLog('error', '[TRANSPORT] ' + item.name + ' failed: ' + (e && e.message ? e.message : String(e)));
+        }}
+      }}
+      throw new Error('No Scramjet transport could be initialized');
+    }}
+
+    async function boot() {{
+      try {{
+        addLog('info', '[BOOT] UA=' + navigator.userAgent);
+        addLog('info', '[BOOT] crossOriginIsolated=' + String(window.crossOriginIsolated) + ' indexedDB=' + String(!!window.indexedDB));
+
+        if (!window.$scramjetController || typeof window.$scramjetController.Controller !== 'function') {{
+          throw new Error('$scramjetController.Controller is missing');
+        }}
+
+        var swUrl = await registerSw();
+        var transport = await selectTransport();
+
+        addLog('info', '[CTRL] creating Controller');
+        var controller = new window.$scramjetController.Controller({{
+          serviceworker: swUrl,
+          transport: transport,
+          config: {{
+            prefix: '/~/sj/',
+            scramjetPath: '/florr/scramjet.js?v=' + encodeURIComponent(V_TAG),
+            injectPath: '/florr/inject.js?v=' + encodeURIComponent(V_TAG),
+            wasmPath: '/scramjet/scramjet.wasm?v=' + encodeURIComponent(V_TAG),
+            virtualWasmPath: '/scramjet/scramjet.wasm?v=' + encodeURIComponent(V_TAG)
+          }}
+        }});
+
+        addLog('info', '[CTRL] waiting controller.wait()');
+        await controller.wait();
+        addLog('ok', '[CTRL] controller.wait() resolved');
+
+        frame.addEventListener('load', function () {{
+          var href = '';
+          try {{ href = frame.contentWindow ? frame.contentWindow.location.href : ''; }} catch (_) {{ href = '(cross-origin)'; }}
+          addLog('ok', '[FRAME] load event -> ' + href);
+          setStatus('Florr.io 接続中 / 稼働中', 'ok');
+        }});
+
+        addLog('info', '[FRAME] createFrame & go -> ' + TARGET_URL);
+        var sjFrame = controller.createFrame(frame);
+        sjFrame.go(TARGET_URL);
+        setStatus('Florr.io 読み込み中...', '');
+      }} catch (err) {{
+        var msg = err && err.stack ? err.stack : (err && err.message ? err.message : String(err));
+        addLog('error', '[FATAL] ' + msg);
+        setStatus('エラー発生 (ログを確認)', 'err');
+      }}
+    }}
+
+    boot();
+  }})();
+  </script>
+</body>
+</html>
+"""
+    return HTMLResponse(
+        content=html,
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+    )
