@@ -136,7 +136,7 @@ async def prewarm_service_cache() -> None:
 
 @router.get("/florr/scramjet.js", include_in_schema=False)
 async def florr_scramjet_js():
-    """Serve scramjet.js patched for iPadOS WebKit (replaces (?i:url) inline flag)."""
+    """Serve scramjet.js patched for iPadOS WebKit (replaces (?i:url) inline flag) and Florr.io."""
     import app as host_app
 
     resp = await host_app.scramjet_asset("scramjet.js")
@@ -144,6 +144,47 @@ async def florr_scramjet_js():
         return resp
     text = bytes(resp.body).decode("utf-8", errors="replace")
     text = text.replace("(?i:url)", "(?:[uU][rR][lL])")
+
+    old_script_case = (
+        'case"script":if(o.ok){let t=o.headers.get("content-type");'
+        'if(r.isModule&&t&&!(0,i.QU)(t))return o.body;'
+        'let n=(0,i.on)(new Uint8Array(await o.arrayBuffer()),o.url,e.context,r.meta,r.isModule);'
+    )
+    new_script_case = (
+        'case"script":if(o.ok){'
+        'const _uHost=r.url?.hostname||"";'
+        'let t=o.headers.get("content-type");'
+        'if(r.isModule&&t&&!(0,i.QU)(t))return o.body;'
+        'let n=(0,i.on)(new Uint8Array(await o.arrayBuffer()),o.url,e.context,r.meta,r.isModule);'
+        'if(_uHost==="static.florr.io"){'
+        'try{'
+        'let _s=n instanceof Uint8Array?new TextDecoder().decode(n):String(n);'
+        '_s=_s.replace(/\\$scramjet\\$prop\\(\\(([^()]*>>[0-9]+)\\)\\)/g,"($1)")'
+        '.replace(/=l\\.asm\\.([A-Za-z0-9_$]+)\\)\\.apply\\(null,arguments\\)/g,"=l.asm?.$1)?.apply(null,arguments)");'
+        'n=new TextEncoder().encode(_s);'
+        '}catch(_){}'
+        '}'
+    )
+    if old_script_case in text:
+        text = text.replace(old_script_case, new_script_case, 1)
+
+    old_ws_msg = (
+        'function c(e){l["on"+e.type]?.(new Proxy(e,{get:(e,t)=>"isTrusted"===t||(0,i.rF)(e,t)})),s.dispatchEvent(e)}'
+        'A.addEventListener("open",()=>{c(new Event("open"))}),'
+        'A.addEventListener("close",e=>{c(new CloseEvent("close",e))}),'
+        'A.addEventListener("message",async e=>{let t=e.data;"string"==typeof t||("byteLength"in t?"blob"===l.binaryType?t=new Blob([t]):(0,i.Cu)(t,ArrayBuffer.prototype):"arrayBuffer"in t&&"arraybuffer"===l.binaryType&&(t=await t.arrayBuffer(),(0,i.Cu)(t,ArrayBuffer.prototype))),c(new MessageEvent("message",{data:t,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})'
+    )
+    new_ws_msg = (
+        'function c(e){l["on"+e.type]?.(e),s.dispatchEvent(e)}'
+        'A.addEventListener("open",()=>{c(new Event("open"))}),'
+        'A.addEventListener("close",e=>{c(new CloseEvent("close",e))}),'
+        'A.addEventListener("message",e=>{let t=e.data;'
+        'if("string"!=typeof t){if("byteLength"in t){"blob"===l.binaryType?t=new Blob([t]):t instanceof ArrayBuffer||(t=new Uint8Array(t).slice().buffer)}else if("arrayBuffer"in t&&"arraybuffer"===l.binaryType)return void t.arrayBuffer().then(b=>{b instanceof ArrayBuffer||(b=new Uint8Array(b).slice().buffer),c(new MessageEvent("message",{data:b,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})}'
+        'c(new MessageEvent("message",{data:t,origin:e.origin,lastEventId:e.lastEventId,source:e.source,ports:e.ports}))})'
+    )
+    if old_ws_msg in text:
+        text = text.replace(old_ws_msg, new_ws_msg, 1)
+
     return Response(
         content=text.encode("utf-8"),
         media_type="application/javascript; charset=utf-8",
@@ -786,6 +827,26 @@ async def _get_local_wisp_http_proxy(wisp_url: str) -> str:
         return f"http://127.0.0.1:{port}"
 
 
+_WS_DIAG_EVENTS: list[dict] = []
+
+
+def _record_ws_diag(entry: dict) -> dict:
+    _WS_DIAG_EVENTS.append(entry)
+    if len(_WS_DIAG_EVENTS) > 20:
+        del _WS_DIAG_EVENTS[:-20]
+    return entry
+
+
+@router.get("/florr/ws-diag", include_in_schema=False)
+async def florr_ws_diag(target: str = ""):
+    items = [e for e in _WS_DIAG_EVENTS if not target or e.get("target") == target]
+    return Response(
+        content=json.dumps(items[-5:]),
+        media_type="application/json; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.websocket("/florr_ws_bridge")
 async def florr_ws_bridge(websocket: WebSocket):
     """WebSocket bridge for wss://*.s.m28n.net/ setting Origin: https://florr.io."""
@@ -800,10 +861,11 @@ async def florr_ws_bridge(websocket: WebSocket):
         for p in websocket.headers.get("sec-websocket-protocol", "").split(",")
         if p.strip()
     ]
+    client_ua = websocket.headers.get("user-agent") or _USER_AGENT
 
     base_kwargs: dict = {
         "origin": "https://florr.io",
-        "user_agent_header": _USER_AGENT,
+        "user_agent_header": client_ua,
         "max_size": None,
     }
     if requested_protocols:
@@ -813,18 +875,31 @@ async def florr_ws_bridge(websocket: WebSocket):
 
     upstream = None
     via = "direct"
+    direct_err = ""
     last_exc: Exception | None = None
+    diag = _record_ws_diag({
+        "target": target,
+        "via": "connecting",
+        "direct_err": "",
+        "c2u_count": 0,
+        "u2c_count": 0,
+        "c2u_bytes": 0,
+        "u2c_bytes": 0,
+        "status": "connecting",
+    })
 
-    # 1) Fast direct attempt (3s)
+    # 1) Fast direct attempt (1.5s)
     try:
         upstream = await websockets.connect(
             target,
             **base_kwargs,
             proxy=None,
-            open_timeout=3,
+            open_timeout=1.5,
         )
     except Exception as exc:
         last_exc = exc
+        direct_err = f"{type(exc).__name__}: {exc}"[:120]
+        diag["direct_err"] = direct_err
         print(f"[florr_ws_bridge] direct failed ({target}): {type(exc).__name__}: {exc}")
 
     # 2) Wisp HTTP CONNECT tunnel fallback (bypasses Cloud Run IP blocks)
@@ -847,6 +922,8 @@ async def florr_ws_bridge(websocket: WebSocket):
 
     if upstream is None:
         err_reason = f"{type(last_exc).__name__}: {last_exc}"[:110] if last_exc else "Upstream WebSocket error"
+        diag["via"] = "failed"
+        diag["status"] = err_reason
         print(f"[florr_ws_bridge] all paths failed ({target}): {err_reason}")
         try:
             await websocket.accept()
@@ -855,6 +932,8 @@ async def florr_ws_bridge(websocket: WebSocket):
             pass
         return
 
+    diag["via"] = via
+    diag["status"] = "open"
     c2u_count = 0
     u2c_count = 0
     try:
@@ -870,11 +949,17 @@ async def florr_ws_bridge(websocket: WebSocket):
                     if msg_type == "websocket.disconnect":
                         break
                     if msg.get("bytes") is not None:
+                        b = msg["bytes"]
                         c2u_count += 1
-                        await upstream.send(msg["bytes"])
+                        diag["c2u_count"] = c2u_count
+                        diag["c2u_bytes"] += len(b)
+                        await upstream.send(b)
                     elif msg.get("text") is not None:
+                        t = msg["text"]
                         c2u_count += 1
-                        await upstream.send(msg["text"])
+                        diag["c2u_count"] = c2u_count
+                        diag["c2u_bytes"] += len(t)
+                        await upstream.send(t)
             except WebSocketDisconnect:
                 pass
             except Exception:
@@ -885,10 +970,15 @@ async def florr_ws_bridge(websocket: WebSocket):
             try:
                 async for data in upstream:
                     u2c_count += 1
+                    diag["u2c_count"] = u2c_count
                     if isinstance(data, (bytes, bytearray)):
-                        await websocket.send_bytes(bytes(data))
+                        b = bytes(data)
+                        diag["u2c_bytes"] += len(b)
+                        await websocket.send_bytes(b)
                     else:
-                        await websocket.send_text(str(data))
+                        s = str(data)
+                        diag["u2c_bytes"] += len(s)
+                        await websocket.send_text(s)
             except Exception:
                 pass
 
@@ -904,8 +994,11 @@ async def florr_ws_bridge(websocket: WebSocket):
             except Exception:
                 pass
     except Exception as exc:
+        diag["status"] = f"relay_err: {type(exc).__name__}: {exc}"[:110]
         print(f"[florr_ws_bridge] relay error ({via} -> {target}): {type(exc).__name__}: {exc}")
     finally:
+        if diag.get("status") == "open":
+            diag["status"] = "closed"
         print(f"[florr_ws_bridge] closed ({via} -> {target}) c2u={c2u_count} u2c={u2c_count}")
         try:
             await upstream.close()
@@ -925,7 +1018,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v9"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v10"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -1361,6 +1454,25 @@ async def florr_launcher(request: Request):
               return 0;
             }}
 
+            function hexPreview(d, maxBytes) {{
+              try {{
+                var u8 = null;
+                if (d instanceof ArrayBuffer) u8 = new Uint8Array(d);
+                else if (ArrayBuffer.isView(d)) u8 = new Uint8Array(d.buffer, d.byteOffset, d.byteLength);
+                else if (typeof d === 'string') return 'str:' + d.slice(0, 24);
+                if (!u8) return '';
+                var n = Math.min(u8.length, maxBytes || 16);
+                var out = [];
+                for (var i = 0; i < n; i++) {{
+                  var h = u8[i].toString(16);
+                  out.push(h.length < 2 ? '0' + h : h);
+                }}
+                return out.join('');
+              }} catch (_) {{
+                return '';
+              }}
+            }}
+
             function clearSilentTimer() {{
               if (silentTimer) {{
                 clearTimeout(silentTimer);
@@ -1405,6 +1517,14 @@ async def florr_launcher(request: Request):
                 silentTimer = setTimeout(function () {{
                   if (sock && sock.readyState === WebSocket.OPEN && recvCount <= 1) {{
                     addLog('warn', '[' + label + '] upstream silent 4s after send#2 (sent=' + sendCount + ', recv=' + recvCount + ') ' + u.host);
+                    fetch('/florr/ws-diag?target=' + encodeURIComponent(u.href), {{ credentials: 'same-origin' }})
+                      .then(function (r) {{ return r.ok ? r.json() : []; }})
+                      .then(function (items) {{
+                        if (Array.isArray(items) && items.length > 0) {{
+                          var d = items[items.length - 1];
+                          addLog('warn', '[BRIDGE-DIAG] via=' + d.via + ' status=' + d.status + ' c2u=' + d.c2u_count + '(' + d.c2u_bytes + 'B) u2c=' + d.u2c_count + '(' + d.u2c_bytes + 'B)' + (d.direct_err ? ' direct_err=' + d.direct_err : ''));
+                        }}
+                      }}).catch(function () {{}});
                   }}
                 }}, 4000);
               }}
@@ -1424,7 +1544,7 @@ async def florr_launcher(request: Request):
                 var qItem = pendingQueue.shift();
                 sendCount++;
                 if (sendCount <= 5) {{
-                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(qItem) + ' ' + u.host);
+                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(qItem) + (sendCount <= 2 ? ' hex=' + hexPreview(qItem, 16) : '') + ' ' + u.host);
                 }}
                 scheduleSilentCheck(ws, label);
                 try {{
@@ -1460,7 +1580,7 @@ async def florr_launcher(request: Request):
                   clearSilentTimer();
                 }}
                 if (recvCount <= 5) {{
-                  addLog('ok', '[' + label + '] recv #' + recvCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
+                  addLog('ok', '[' + label + '] recv #' + recvCount + ' bytes=' + dataByteLen(data) + (recvCount <= 2 ? ' hex=' + hexPreview(data, 16) : '') + ' ' + u.host);
                 }}
                 if (data instanceof Blob) {{
                   data.arrayBuffer().then(function (ab) {{
@@ -1555,7 +1675,7 @@ async def florr_launcher(request: Request):
                 var label = winner === 'direct' ? 'TOP-WS-DIRECT' : 'TOP-WS-BRIDGE';
                 sendCount++;
                 if (sendCount <= 5) {{
-                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(data) + ' ' + u.host);
+                  addLog('info', '[' + label + '] send #' + sendCount + ' bytes=' + dataByteLen(data) + (sendCount <= 2 ? ' hex=' + hexPreview(data, 16) : '') + ' ' + u.host);
                 }}
                 scheduleSilentCheck(winnerWs, label);
                 winnerWs.send(data);
