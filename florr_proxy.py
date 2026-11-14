@@ -275,7 +275,10 @@ async def florr_inject_js():
       var s = String(rawUrl || '');
       var idx = s.indexOf('/~/sj/');
       if (idx !== -1) {
-        return decodeURIComponent(s.slice(idx + 6));
+        var rest = s.slice(idx + 6);
+        var m = rest.match(/^[^/]+\\/[^/]+\\/((?:https?|wss?)(?::|%3A).*)$/i);
+        if (m) rest = m[1];
+        return decodeURIComponent(rest);
       }
       return s;
     } catch (_) {
@@ -619,7 +622,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v4"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v5"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
@@ -943,6 +946,185 @@ async def florr_launcher(request: Request):
       return activeSw;
     }}
 
+    function isGameWsHost(hostname) {{
+      var h = String(hostname || '').toLowerCase();
+      return h === 's.m28n.net' || h.endsWith('.s.m28n.net') ||
+             h === 'm28n.net' || h.endsWith('.m28n.net') ||
+             h === 'm28.io' || h.endsWith('.m28.io') ||
+             h === 'florr.io' || h.endsWith('.florr.io');
+    }}
+
+    function isM28ApiHost(hostname) {{
+      var h = String(hostname || '').toLowerCase();
+      return h === 'api.n.m28.io' || h === 'm28.io' || h.endsWith('.m28.io');
+    }}
+
+    function wrapTransport(base) {{
+      var wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return {{
+        ready: base.ready,
+        meta: base.meta,
+        init: function () {{
+          return typeof base.init === 'function' ? base.init() : Promise.resolve();
+        }},
+        request: async function (remote, method, body, headers, signal) {{
+          try {{
+            var u = remote instanceof URL ? remote : new URL(String(remote));
+            var m = String(method || 'GET').toUpperCase();
+            if (isM28ApiHost(u.hostname) && (m === 'GET' || m === 'HEAD')) {{
+              try {{
+                var directResp = await fetch(u.href, {{
+                  method: m,
+                  signal: signal,
+                  mode: 'cors',
+                  credentials: 'omit'
+                }});
+                if (directResp && directResp.ok) {{
+                  var dHeaders = {{}};
+                  directResp.headers.forEach(function (v, k) {{ dHeaders[k] = v; }});
+                  var dBuf = m === 'HEAD' ? new ArrayBuffer(0) : await directResp.arrayBuffer();
+                  addLog('info', '[TOP-API] direct ' + directResp.status + ' ' + u.href);
+                  return {{
+                    status: directResp.status,
+                    statusText: directResp.statusText || 'OK',
+                    headers: dHeaders,
+                    body: dBuf
+                  }};
+                }}
+              }} catch (_) {{}}
+              try {{
+                var relayUrl = '/florr/http-relay?url=' + encodeURIComponent(u.href);
+                var relayResp = await fetch(relayUrl, {{
+                  method: m,
+                  signal: signal,
+                  credentials: 'same-origin'
+                }});
+                if (relayResp && relayResp.ok) {{
+                  var rHeaders = {{}};
+                  relayResp.headers.forEach(function (v, k) {{ rHeaders[k] = v; }});
+                  var rBuf = m === 'HEAD' ? new ArrayBuffer(0) : await relayResp.arrayBuffer();
+                  addLog('info', '[TOP-API] relay ' + relayResp.status + ' ' + u.href);
+                  return {{
+                    status: relayResp.status,
+                    statusText: relayResp.statusText || 'OK',
+                    headers: rHeaders,
+                    body: rBuf
+                  }};
+                }}
+              }} catch (_) {{}}
+            }}
+          }} catch (_) {{}}
+          return base.request(remote, method, body, headers, signal);
+        }},
+        connect: function (url, protocols, requestHeaders, onopen, onmessage, onclose, onerror) {{
+          var u = null;
+          try {{
+            u = url instanceof URL ? url : new URL(String(url));
+          }} catch (_) {{}}
+          if (u && isGameWsHost(u.hostname)) {{
+            var bridgeUrl = wsProto + '//' + location.host + '/florr_ws_bridge?target=' + encodeURIComponent(u.href);
+            var validProtocols = Array.isArray(protocols)
+              ? protocols.filter(function (p) {{ return typeof p === 'string' && p.length > 0; }})
+              : (typeof protocols === 'string' && protocols.length > 0 ? [protocols] : []);
+            addLog('info', '[TOP-WS-BRIDGE] connect ' + u.href);
+            var ws = validProtocols.length > 0
+              ? new WebSocket(bridgeUrl, validProtocols)
+              : new WebSocket(bridgeUrl);
+            ws.binaryType = 'arraybuffer';
+            var settled = false;
+            var opened = false;
+            var firstPacketLogged = false;
+            var pendingQueue = [];
+
+            ws.onopen = function () {{
+              opened = true;
+              addLog('ok', '[TOP-WS-BRIDGE] open ' + u.href + (ws.protocol ? ' proto=' + ws.protocol : ''));
+              while (pendingQueue.length > 0) {{
+                try {{
+                  ws.send(pendingQueue.shift());
+                }} catch (_) {{}}
+              }}
+              if (!settled) {{
+                settled = true;
+                try {{
+                  if (typeof onopen === 'function') onopen(ws.protocol || '', ws.extensions || '');
+                }} catch (_) {{}}
+              }}
+            }};
+
+            ws.onmessage = function (ev) {{
+              var data = ev.data;
+              if (!firstPacketLogged) {{
+                firstPacketLogged = true;
+                var size = data instanceof ArrayBuffer ? data.byteLength : (typeof data === 'string' ? data.length : 0);
+                addLog('ok', '[TOP-WS-BRIDGE] first packet bytes=' + size + ' ' + u.href);
+              }}
+              if (data instanceof Blob) {{
+                data.arrayBuffer().then(function (ab) {{
+                  try {{
+                    if (typeof onmessage === 'function') onmessage(ab);
+                  }} catch (_) {{}}
+                }}).catch(function () {{}});
+                return;
+              }}
+              try {{
+                if (typeof onmessage === 'function') onmessage(data);
+              }} catch (_) {{}}
+            }};
+
+            ws.onclose = function (ev) {{
+              var code = ev && typeof ev.code === 'number' ? ev.code : 1000;
+              var reason = ev && ev.reason ? ev.reason : '';
+              addLog(code === 1000 || code === 1005 ? 'info' : 'warn', '[TOP-WS-BRIDGE] close code=' + code + (reason ? ' reason=' + reason : '') + ' ' + u.href);
+              if (!settled) {{
+                settled = true;
+                try {{
+                  if (typeof onerror === 'function') onerror('WebSocket closed before open (code=' + code + ')');
+                }} catch (_) {{}}
+              }} else if (opened) {{
+                try {{
+                  if (typeof onclose === 'function') onclose(code, reason);
+                }} catch (_) {{}}
+              }}
+            }};
+
+            ws.onerror = function () {{
+              addLog('error', '[TOP-WS-BRIDGE] error ' + u.href);
+              if (!settled) {{
+                settled = true;
+                try {{
+                  if (typeof onerror === 'function') onerror('WebSocket bridge error');
+                }} catch (_) {{}}
+              }}
+            }};
+
+            var sendFn = function (data) {{
+              if (ws.readyState === WebSocket.OPEN) {{
+                ws.send(data);
+              }} else if (ws.readyState === WebSocket.CONNECTING) {{
+                pendingQueue.push(data);
+              }}
+            }};
+
+            var closeFn = function (code, reason) {{
+              try {{
+                if (typeof code === 'number' && code >= 1000 && code <= 4999) {{
+                  ws.close(code, typeof reason === 'string' ? reason.slice(0, 123) : '');
+                }} else {{
+                  ws.close();
+                }}
+              }} catch (_) {{
+                try {{ ws.close(); }} catch (_2) {{}}
+              }}
+            }};
+
+            return [sendFn, closeFn];
+          }}
+          return base.connect(url, protocols, requestHeaders, onopen, onmessage, onclose, onerror);
+        }}
+      }};
+    }}
+
     async function selectTransport() {{
       var wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
       var sameOriginWisp = wsProto + '//' + location.host + '/wisp/';
@@ -988,7 +1170,7 @@ async def florr_launcher(request: Request):
             ]);
           }}
           addLog('ok', '[TRANSPORT] ' + item.name + ' ready -> ' + chosenWisp);
-          return transport;
+          return wrapTransport(transport);
         }} catch (e) {{
           addLog('error', '[TRANSPORT] ' + item.name + ' failed: ' + (e && e.message ? e.message : String(e)));
         }}
