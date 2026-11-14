@@ -69,6 +69,20 @@ _INDEXEDDB_PATCHED = (
     '}catch(e){t(e)}}))}'
 )
 
+_READABLESTREAM_ORIG = (
+    'return[{body:s.body,status:s.status,statusText:s.statusText,headers:s.headers.toRawHeaders()},'
+    's.body instanceof ReadableStream||s.body instanceof ArrayBuffer?[s.body]:[]]'
+)
+
+_READABLESTREAM_PATCHED = (
+    'let __b=s.body;'
+    'if(__b instanceof ReadableStream&&![101,204,205,304].includes(s.status)){'
+    '__b=await new Response(__b).arrayBuffer()'
+    '}'
+    'return[{body:__b,status:s.status,statusText:s.statusText,headers:s.headers.toRawHeaders()},'
+    '__b instanceof ReadableStream||__b instanceof ArrayBuffer?[__b]:[]]'
+)
+
 
 def _is_allowed_host(host: str, suffixes: tuple[str, ...]) -> bool:
     h = (host or "").lower().rstrip(".")
@@ -136,7 +150,7 @@ async def florr_scramjet_js():
 
 @router.get("/florr/controller.api.js", include_in_schema=False)
 async def florr_controller_api_js():
-    """Serve controller.api.js with an IndexedDB timeout guard for iPadOS WebKit."""
+    """Serve controller.api.js with IndexedDB timeout guard and ReadableStream buffering for iPadOS WebKit."""
     import app as host_app
 
     resp = await host_app.scramjet_asset("controller.api.js")
@@ -145,6 +159,8 @@ async def florr_controller_api_js():
     text = bytes(resp.body).decode("utf-8", errors="replace")
     if _INDEXEDDB_ORIG in text:
         text = text.replace(_INDEXEDDB_ORIG, _INDEXEDDB_PATCHED, 1)
+    if _READABLESTREAM_ORIG in text:
+        text = text.replace(_READABLESTREAM_ORIG, _READABLESTREAM_PATCHED, 1)
     return Response(
         content=text.encode("utf-8"),
         media_type="application/javascript; charset=utf-8",
@@ -379,11 +395,50 @@ async def florr_inject_js():
               return origFetch(relayUrl, { credentials: 'same-origin' });
             });
           }
-          return origFetch(input, init);
+          var isWasm = targetStr.indexOf('.wasm') !== -1;
+          if (isWasm) {
+            postLog('info', '[FETCH] wasm -> ' + targetStr);
+          }
+          return origFetch(input, init).then(function (resp) {
+            if (isWasm || (resp && !resp.ok && resp.status >= 400)) {
+              postLog(resp && resp.ok ? 'ok' : 'warn', '[FETCH] ' + (resp ? resp.status : 0) + ' ' + targetStr);
+            }
+            return resp;
+          }).catch(function (err) {
+            postLog('error', '[FETCH] err ' + targetStr + ' -> ' + (err && err.message ? err.message : String(err)));
+            throw err;
+          });
         };
       }
     } catch (e) {
       postLog('error', '[HOOK-FETCH] ' + (e && e.message ? e.message : String(e)));
+    }
+
+    try {
+      if (win.XMLHttpRequest && win.XMLHttpRequest.prototype) {
+        var origXhrOpen = win.XMLHttpRequest.prototype.open;
+        var origXhrSend = win.XMLHttpRequest.prototype.send;
+        win.XMLHttpRequest.prototype.open = function (method, url) {
+          this.__florrUrl = unwrapScramjetUrl(url || '');
+          return origXhrOpen.apply(this, arguments);
+        };
+        win.XMLHttpRequest.prototype.send = function () {
+          var self = this;
+          var targetStr = self.__florrUrl || '';
+          var isWasm = targetStr.indexOf('.wasm') !== -1;
+          if (isWasm) {
+            postLog('info', '[XHR] wasm -> ' + targetStr);
+          }
+          self.addEventListener('loadend', function () {
+            if (isWasm || self.status === 0 || self.status >= 400) {
+              postLog(self.status >= 200 && self.status < 400 ? 'ok' : 'warn', '[XHR] ' + self.status + ' ' + targetStr);
+            }
+          });
+          return origXhrSend.apply(this, arguments);
+        };
+      }
+    } catch (e) {
+      postLog('error', '[HOOK-XHR] ' + (e && e.message ? e.message : String(e)));
     }
 
     try {
@@ -564,7 +619,7 @@ async def florr_redirect():
 @router.get("/florr/", include_in_schema=False)
 async def florr_launcher(request: Request):
     sj_ver, ctrl_ver = _scramjet_versions()
-    v_tag = f"{sj_ver}-{ctrl_ver}-v3"
+    v_tag = f"{sj_ver}-{ctrl_ver}-v4"
 
     html = f"""<!DOCTYPE html>
 <html lang="ja">
